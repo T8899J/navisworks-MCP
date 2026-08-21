@@ -47,6 +47,11 @@ public sealed class OllamaClient : IDisposable
 {
     private const int MaxToolRounds = 4;
     private const int MaxHistoryMessages = 24;
+
+    // Approximate token budget for a single tool result. Character-based
+    // because the desktop app has no tokenizer; 8k chars stays well inside
+    // the 16K-token context window alongside history and tool definitions.
+    private const int MaxToolResultChars = 8000;
     private static readonly TimeSpan ConnectionProbeTimeout = TimeSpan.FromSeconds(5);
 
     // Hang detector for the streamed /api/chat response: generous because a cold
@@ -262,7 +267,8 @@ public sealed class OllamaClient : IDisposable
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     progress(new LlmStreamUpdate(LlmStreamKind.Tool, toolCall.Name));
-                    var toolResult = await executeTool(toolCall, cancellationToken);
+                    var rawToolResult = await executeTool(toolCall, cancellationToken);
+                    var toolResult = TruncateToolResult(toolCall.Name, rawToolResult);
                     var toolMessage = new OllamaMessage("tool", toolResult);
                     requestMessages.Add(toolMessage);
                     turnMessages.Add(toolMessage);
@@ -517,6 +523,25 @@ public sealed class OllamaClient : IDisposable
         while (start < messages.Count && messages[start].Role == "tool")
             start++;
         return start;
+    }
+
+    // Keeps a single tool result from crowding out the rest of the 16K
+    // context window. The tail hint tells the model why data is missing and
+    // how to narrow the query, mirroring the plug-in's RESPONSE_TOO_LARGE.
+    private static string TruncateToolResult(string toolName, string result)
+    {
+        if (result.Length <= MaxToolResultChars)
+            return result;
+
+        var clipped = result[..MaxToolResultChars];
+        if (char.IsHighSurrogate(clipped[^1]))
+            clipped = clipped[..^1];
+
+        return clipped +
+            "\n\n[工具 " + toolName + " 的结果过大（原始 " +
+            result.Length.ToString("N0") + " 字符），已截断至 " +
+            MaxToolResultChars.ToString("N0") +
+            " 字符。请缩小查询范围后重试：降低 limit、改用 category/property 过滤参数，或减少 itemIds 数量。]";
     }
 
     // A turn committed to history must never end on a dangling fragment:
