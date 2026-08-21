@@ -19,12 +19,16 @@ namespace NavisworksCodexMcp.Plugin
         private readonly NavisworksToolService toolService;
         private readonly BridgeLogger logger;
         private readonly BridgeEndpointRegistry endpointRegistry;
-        private readonly JavaScriptSerializer serializer;
         private readonly CancellationTokenSource cancellation;
         private readonly ManualResetEventSlim listenerReady;
         private readonly string pipeName;
+        // Both collections are guarded by pipeSyncRoot. activePipes holds
+        // every live server instance (waiting for a client or being served);
+        // handlerTasks tracks the per-connection workers so Dispose can wait
+        // for them in a bounded way.
+        private readonly List<NamedPipeServerStream> activePipes = new List<NamedPipeServerStream>();
+        private readonly List<Task> handlerTasks = new List<Task>();
         private Task runTask;
-        private NamedPipeServerStream activePipe;
         private bool disposed;
 
         public BridgeServer(
@@ -39,11 +43,6 @@ namespace NavisworksCodexMcp.Plugin
             this.logger = logger ?? throw new ArgumentNullException("logger");
 
             endpointRegistry = new BridgeEndpointRegistry();
-            serializer = new JavaScriptSerializer
-            {
-                MaxJsonLength = BridgeConstants.MaxFrameBytes,
-                RecursionLimit = 100
-            };
             cancellation = new CancellationTokenSource();
             listenerReady = new ManualResetEventSlim(false);
             pipeName = string.Format(
@@ -84,13 +83,19 @@ namespace NavisworksCodexMcp.Plugin
             disposed = true;
             cancellation.Cancel();
 
+            NamedPipeServerStream[] pipesSnapshot;
+            Task[] handlersSnapshot;
             lock (pipeSyncRoot)
             {
-                if (activePipe != null)
-                {
-                    activePipe.Dispose();
-                    activePipe = null;
-                }
+                pipesSnapshot = activePipes.ToArray();
+                handlersSnapshot = handlerTasks.ToArray();
+            }
+
+            // Disposing every live instance unlocks both the accept loop's
+            // WaitForConnectionAsync and the handlers' blocked reads/writes.
+            foreach (NamedPipeServerStream pipe in pipesSnapshot)
+            {
+                DisposeQuietly(pipe);
             }
 
             if (runTask != null)
@@ -105,6 +110,15 @@ namespace NavisworksCodexMcp.Plugin
                 }
             }
 
+            try
+            {
+                Task.WaitAll(handlersSnapshot, TimeSpan.FromSeconds(2));
+            }
+            catch
+            {
+                // The pipes are already gone; handlers exit on their own soon after.
+            }
+
             endpointRegistry.DeleteIfOwned(pipeName);
             listenerReady.Dispose();
             cancellation.Dispose();
@@ -117,14 +131,14 @@ namespace NavisworksCodexMcp.Plugin
 
             while (!cancellationToken.IsCancellationRequested)
             {
+                NamedPipeServerStream pipe = null;
                 try
                 {
-                    using (NamedPipeServerStream pipe = CreatePipe())
+                    pipe = CreatePipe();
+
+                    lock (pipeSyncRoot)
                     {
-                        lock (pipeSyncRoot)
-                        {
-                            activePipe = pipe;
-                        }
+                        activePipes.Add(pipe);
 
                         if (firstListener)
                         {
@@ -132,19 +146,32 @@ namespace NavisworksCodexMcp.Plugin
                             listenerReady.Set();
                         }
 
-                        await pipe.WaitForConnectionAsync(
-                            cancellationToken).ConfigureAwait(false);
-                        await ProcessConnectionAsync(
-                            pipe,
-                            cancellationToken).ConfigureAwait(false);
+                        PruneCompletedHandlersLocked();
                     }
+
+                    await pipe.WaitForConnectionAsync(
+                        cancellationToken).ConfigureAwait(false);
+
+                    // Hand the connected instance to its own worker so the
+                    // accept loop immediately offers the next instance; a slow
+                    // or busy connection can no longer block new clients.
+                    Task handlerTask = HandleConnectionAsync(
+                        pipe,
+                        cancellationToken);
+                    lock (pipeSyncRoot)
+                    {
+                        handlerTasks.Add(handlerTask);
+                    }
+                    pipe = null;
                 }
                 catch (OperationCanceledException)
                 {
+                    CleanupFailedAccept(pipe);
                     break;
                 }
                 catch (ObjectDisposedException)
                 {
+                    CleanupFailedAccept(pipe);
                     if (cancellationToken.IsCancellationRequested)
                     {
                         break;
@@ -152,6 +179,7 @@ namespace NavisworksCodexMcp.Plugin
                 }
                 catch (Exception exception)
                 {
+                    CleanupFailedAccept(pipe);
                     logger.Error(
                         "Bridge listener error: "
                         + exception.GetType().Name
@@ -168,12 +196,76 @@ namespace NavisworksCodexMcp.Plugin
                         break;
                     }
                 }
-                finally
+            }
+        }
+
+        private async Task HandleConnectionAsync(
+            NamedPipeServerStream pipe,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await ProcessConnectionAsync(
+                    pipe,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutdown: the pipe is disposed in finally below.
+            }
+            catch (Exception exception)
+            {
+                logger.Error(
+                    "Bridge connection failed: "
+                    + exception.GetType().Name
+                    + ": "
+                    + exception.Message);
+            }
+            finally
+            {
+                lock (pipeSyncRoot)
                 {
-                    lock (pipeSyncRoot)
-                    {
-                        activePipe = null;
-                    }
+                    activePipes.Remove(pipe);
+                }
+
+                DisposeQuietly(pipe);
+            }
+        }
+
+        private void CleanupFailedAccept(NamedPipeServerStream pipe)
+        {
+            if (pipe == null)
+            {
+                return;
+            }
+
+            lock (pipeSyncRoot)
+            {
+                activePipes.Remove(pipe);
+            }
+
+            DisposeQuietly(pipe);
+        }
+
+        private static void DisposeQuietly(NamedPipeServerStream pipe)
+        {
+            try
+            {
+                pipe.Dispose();
+            }
+            catch
+            {
+                // Best-effort teardown during shutdown or error recovery.
+            }
+        }
+
+        private void PruneCompletedHandlersLocked()
+        {
+            for (int i = handlerTasks.Count - 1; i >= 0; i--)
+            {
+                if (handlerTasks[i].IsCompleted)
+                {
+                    handlerTasks.RemoveAt(i);
                 }
             }
         }
@@ -182,6 +274,10 @@ namespace NavisworksCodexMcp.Plugin
             Stream pipe,
             CancellationToken cancellationToken)
         {
+            // JavaScriptSerializer has no thread-safety guarantee; concurrent
+            // connections each get their own instance.
+            JavaScriptSerializer serializer = CreateSerializer();
+
             while (!cancellationToken.IsCancellationRequested)
             {
                 string requestJson = await BridgeFrameProtocol.ReadJsonAsync(
@@ -192,8 +288,9 @@ namespace NavisworksCodexMcp.Plugin
                     return;
                 }
 
-                BridgeResponse response = await ProcessRequestAsync(requestJson)
-                    .ConfigureAwait(false);
+                BridgeResponse response = await ProcessRequestAsync(
+                    serializer,
+                    requestJson).ConfigureAwait(false);
 
                 // Serializing and writing the response must never kill the
                 // connection loop: an oversized or undeliverable response is
@@ -251,7 +348,9 @@ namespace NavisworksCodexMcp.Plugin
             return BridgeResponse.Failure(response.Id, code, message);
         }
 
-        private async Task<BridgeResponse> ProcessRequestAsync(string requestJson)
+        private async Task<BridgeResponse> ProcessRequestAsync(
+            JavaScriptSerializer serializer,
+            string requestJson)
         {
             BridgeRequest request = null;
 
@@ -322,12 +421,25 @@ namespace NavisworksCodexMcp.Plugin
             }
         }
 
+        private static JavaScriptSerializer CreateSerializer()
+        {
+            return new JavaScriptSerializer
+            {
+                MaxJsonLength = BridgeConstants.MaxFrameBytes,
+                RecursionLimit = 100
+            };
+        }
+
         private NamedPipeServerStream CreatePipe()
         {
             return new NamedPipeServerStream(
                 pipeName,
                 PipeDirection.InOut,
-                1,
+
+                // Live instances = in-flight handlers + one acceptor. Eight
+                // leaves ample headroom over the real concurrency peak while
+                // keeping the handler count bounded.
+                8,
                 PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous,
                 BridgeConstants.MaxFrameBytes,
