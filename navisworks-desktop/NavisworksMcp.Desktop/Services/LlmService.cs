@@ -218,7 +218,7 @@ public sealed class OllamaClient : IDisposable
             new("system", SystemPrompt)
         };
 
-        requestMessages.AddRange(_history.TakeLast(MaxHistoryMessages));
+        requestMessages.AddRange(_history.Skip(GetValidHistoryStart(_history)));
         requestMessages.Add(userMessage);
         var latestContextTokens = 0;
         var streamedContent = "";
@@ -273,7 +273,7 @@ public sealed class OllamaClient : IDisposable
                 progress(new LlmStreamUpdate(LlmStreamKind.Thinking, ""));
             }
 
-            CommitHistory(turnMessages);
+            CommitHistory(turnMessages, "工具调用已达上限，已停止。");
             return LlmRunResult.Failure(
                 $"工具调用超过 {MaxToolRounds} 轮，已停止以避免循环。请缩小指令范围后重试。",
                 latestContextTokens);
@@ -283,7 +283,7 @@ public sealed class OllamaClient : IDisposable
             var partial = streamedContent.Trim();
             if (!string.IsNullOrWhiteSpace(partial))
                 turnMessages.Add(new OllamaMessage("assistant", partial));
-            CommitHistory(turnMessages);
+            CommitHistory(turnMessages, "已停止生成。");
             return LlmRunResult.Cancelled(partial, latestContextTokens);
         }
         catch (OperationCanceledException)
@@ -498,11 +498,52 @@ public sealed class OllamaClient : IDisposable
         call.Id,
         new OllamaFunctionCall(call.Index, call.Name, call.Arguments));
 
-    private void CommitHistory(IEnumerable<OllamaMessage> messages)
+    private void CommitHistory(List<OllamaMessage> messages, string? closeoutForIncompleteTurn = null)
     {
+        EnsureCompleteTurnEnding(messages, closeoutForIncompleteTurn);
         _history.AddRange(messages);
-        if (_history.Count > MaxHistoryMessages)
-            _history.RemoveRange(0, _history.Count - MaxHistoryMessages);
+
+        var start = GetValidHistoryStart(_history);
+        if (start > 0)
+            _history.RemoveRange(0, start);
+    }
+
+    // Index of the first message of the trailing MaxHistoryMessages window
+    // that does not start on an orphaned "tool" reply (its assistant request
+    // was trimmed away). Keeps assistant(tool_calls)/tool pairs intact.
+    private static int GetValidHistoryStart(IReadOnlyList<OllamaMessage> messages)
+    {
+        var start = Math.Max(0, messages.Count - MaxHistoryMessages);
+        while (start < messages.Count && messages[start].Role == "tool")
+            start++;
+        return start;
+    }
+
+    // A turn committed to history must never end on a dangling fragment:
+    //  - ending on "tool": append the synthetic assistant closeout so the
+    //    tool results stay answerable in later turns;
+    //  - ending on an assistant(tool_calls) whose tools never ran: drop it,
+    //    there is nothing to keep and it would break the pairing.
+    private static void EnsureCompleteTurnEnding(List<OllamaMessage> messages, string? closeoutText)
+    {
+        while (messages.Count > 0)
+        {
+            var last = messages[^1];
+            if (last.Role == "tool")
+            {
+                if (!string.IsNullOrEmpty(closeoutText))
+                    messages.Add(new OllamaMessage("assistant", closeoutText));
+                return;
+            }
+
+            if (last.Role == "assistant" && last.ToolCalls is { Count: > 0 })
+            {
+                messages.RemoveAt(messages.Count - 1);
+                continue;
+            }
+
+            return;
+        }
     }
 
     private static string ReadError(string responseBody)
