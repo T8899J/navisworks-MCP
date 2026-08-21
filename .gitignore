@@ -1,0 +1,9 @@
+artifacts/
+.npm-cache/
+**/bin/
+**/obj/
+mcp-server/dist/
+mcp-server/node_modules/
+navisworks-desktop/sessions.json
+*.user
+*.suo

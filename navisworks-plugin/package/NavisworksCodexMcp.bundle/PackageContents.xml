@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage
+  SchemaVersion="1.0"
+  AutodeskProduct="Navisworks"
+  ProductType="Application"
+  Name="Navisworks Codex MCP"
+  AppVersion="0.1.0"
+  Description="Local current-user bridge between Navisworks Manage 2023 and Codex MCP."
+  Author="Local"
+  ProductCode="{5772D233-8847-4743-B9A3-C25628A0EE14}"
+  UpgradeCode="{641B40D7-4F7D-4D60-A8BB-6AC89B8F0832}">
+  <CompanyDetails Name="Local" />
+  <Components Description="Navisworks Manage 2023">
+    <RuntimeRequirements
+      OS="Win64"
+      Platform="NAVMAN"
+      SeriesMin="Nw20"
+      SeriesMax="Nw20" />
+    <ComponentEntry
+      AppName="Navisworks Codex MCP"
+      AppType="ManagedPlugin"
+      ModuleName="./Contents/v20/NavisworksCodexMcp.Plugin.dll"
+      AppDescription="Local named-pipe bridge for Codex MCP."
+      Version="0.1.0" />
+  </Components>
+</ApplicationPackage>
+
