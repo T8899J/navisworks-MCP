@@ -322,7 +322,8 @@ namespace NavisworksCodexMcp.Plugin
 
                 // The degraded frame only carries Id/Ok/Error and is far below
                 // the frame limit. If this write also fails the pipe is truly
-                // broken; let the exception close the connection via RunAsync.
+                // broken; let the exception close the connection via
+                // HandleConnectionAsync's cleanup.
                 await BridgeFrameProtocol.WriteJsonAsync(
                     pipe,
                     responseJson,
