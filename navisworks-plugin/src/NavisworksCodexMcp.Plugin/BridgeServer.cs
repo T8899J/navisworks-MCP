@@ -194,12 +194,61 @@ namespace NavisworksCodexMcp.Plugin
 
                 BridgeResponse response = await ProcessRequestAsync(requestJson)
                     .ConfigureAwait(false);
-                string responseJson = serializer.Serialize(response);
+
+                // Serializing and writing the response must never kill the
+                // connection loop: an oversized or undeliverable response is
+                // downgraded to a small failure frame instead.
+                string responseJson;
+                try
+                {
+                    responseJson = serializer.Serialize(response);
+                    await BridgeFrameProtocol.WriteJsonAsync(
+                        pipe,
+                        responseJson,
+                        cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    logger.Error(
+                        "Bridge response pipeline failed: "
+                        + exception.GetType().Name
+                        + ": "
+                        + exception.Message);
+                    responseJson = serializer.Serialize(
+                        BuildDegradedFailure(response, exception));
+                }
+
+                // The degraded frame only carries Id/Ok/Error and is far below
+                // the frame limit. If this write also fails the pipe is truly
+                // broken; let the exception close the connection via RunAsync.
                 await BridgeFrameProtocol.WriteJsonAsync(
                     pipe,
                     responseJson,
                     cancellationToken).ConfigureAwait(false);
             }
+        }
+
+        private static BridgeResponse BuildDegradedFailure(
+            BridgeResponse response,
+            Exception exception)
+        {
+            bool tooLarge = exception is BridgeException
+                || exception is ArgumentException
+                || exception is InvalidOperationException;
+            string code = tooLarge
+                ? "RESPONSE_TOO_LARGE"
+                : "BRIDGE_RESPONSE_WRITE_FAILED";
+            string message = tooLarge
+                ? "Navisworks response exceeded the one MiB protocol limit. "
+                    + "Narrow the query: request fewer items, use the "
+                    + "category/property filters, or lower the limit."
+                : "Navisworks could not deliver the response.";
+            return BridgeResponse.Failure(response.Id, code, message);
         }
 
         private async Task<BridgeResponse> ProcessRequestAsync(string requestJson)

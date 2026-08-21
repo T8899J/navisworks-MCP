@@ -1078,9 +1078,19 @@ namespace NavisworksCodexMcp.Plugin
                 return string.Empty;
             }
 
-            return value.Length <= MaxTextLength
-                ? value
-                : value.Substring(0, MaxTextLength);
+            if (value.Length <= MaxTextLength)
+            {
+                return value;
+            }
+
+            string clipped = value.Substring(0, MaxTextLength);
+            if (char.IsHighSurrogate(clipped[clipped.Length - 1]))
+            {
+                // Never cut a UTF-16 surrogate pair in half.
+                clipped = clipped.Substring(0, clipped.Length - 1);
+            }
+
+            return clipped;
         }
     }
 }

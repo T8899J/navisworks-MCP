@@ -16,7 +16,8 @@ namespace NavisworksCodexMcp.Plugin
                 TestRequestSerialization();
                 TestFrameRoundTrip();
                 TestOversizedFrameIsRejected();
-                Console.WriteLine("PROTOCOL_TESTS: PASS (3/3)");
+                TestWriteOversizedFrameIsRejected();
+                Console.WriteLine("PROTOCOL_TESTS: PASS (4/4)");
                 return 0;
             }
             catch (Exception exception)
@@ -99,6 +100,32 @@ namespace NavisworksCodexMcp.Plugin
 
             throw new InvalidOperationException(
                 "Oversized frame was not rejected.");
+        }
+
+        private static void TestWriteOversizedFrameIsRejected()
+        {
+            string oversized = new string('a', BridgeConstants.MaxFrameBytes + 1);
+
+            using (var stream = new MemoryStream())
+            {
+                try
+                {
+                    BridgeFrameProtocol.WriteJsonAsync(
+                        stream,
+                        oversized,
+                        CancellationToken.None).GetAwaiter().GetResult();
+                }
+                catch (BridgeException exception)
+                {
+                    Assert(
+                        exception.Code == "FRAME_TOO_LARGE",
+                        "Oversized write returned the wrong error.");
+                    return;
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Oversized write was not rejected.");
         }
 
         private static void Assert(bool condition, string message)
