@@ -214,8 +214,7 @@ namespace NavisworksCodexMcp.Plugin
                     break;
                 }
 
-                if ((scannedCount & 255) == 0
-                    && stopwatch.ElapsedMilliseconds > MaxSearchMilliseconds)
+                if (stopwatch.ElapsedMilliseconds > MaxSearchMilliseconds)
                 {
                     timedOut = true;
                     break;
@@ -235,16 +234,19 @@ namespace NavisworksCodexMcp.Plugin
                     continue;
                 }
 
+                if (items.Count >= limit)
+                {
+                    // A match beyond the requested limit exists: only now is
+                    // the result set genuinely truncated. Exactly `limit`
+                    // matches end the loop naturally with truncated=false.
+                    resultLimitReached = true;
+                    break;
+                }
+
                 string itemId = RegisterItem(item);
                 Dictionary<string, object> summary = SummarizeItem(item, itemId);
                 summary["match"] = match;
                 items.Add(summary);
-
-                if (items.Count >= limit)
-                {
-                    resultLimitReached = true;
-                    break;
-                }
             }
 
             stopwatch.Stop();
