@@ -1053,7 +1053,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
             else
             {
-                await SendWithCliAsync(text);
+                await SendWithCliAsync(text, turnCts.Token);
             }
         }
         catch (OperationCanceledException) when (turnCts.IsCancellationRequested)
@@ -1198,7 +1198,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         try
         {
-            var result = await _bridge.CallAsync(toolCall.Name, parameters);
+            var result = await _bridge.CallAsync(toolCall.Name, parameters, cancellationToken);
             MarkNavisworksAvailable();
 
             var summary = FormatResult(toolCall.Name, result);
@@ -1230,7 +1230,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private async Task SendWithCliAsync(string text)
+    private async Task SendWithCliAsync(string text, CancellationToken cancellationToken)
     {
         var parts = ParseLine(text);
         if (parts.Length == 0) return;
@@ -1244,36 +1244,36 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 Messages.Add(new ChatMessage { Role = "system", Content = HelpText });
                 break;
             case "status":
-                await RunAndShow("navisworks_status");
+                await RunAndShow("navisworks_status", null, cancellationToken);
                 break;
             case "doc":
-                await RunAndShow("navisworks_get_document");
+                await RunAndShow("navisworks_get_document", null, cancellationToken);
                 break;
             case "sel":
-                await RunAndShow("navisworks_get_selection", new() { { "includeProperties", false }, { "limit", 50 } });
+                await RunAndShow("navisworks_get_selection", new() { { "includeProperties", false }, { "limit", 50 } }, cancellationToken);
                 break;
             case "find":
                 if (args.Length > 0 && !args[0].StartsWith("--"))
-                    await RunAndShow("navisworks_find_items", new() { { "query", args[0] }, { "scope", "all" }, { "match", "contains" }, { "limit", 20 } });
+                    await RunAndShow("navisworks_find_items", new() { { "query", args[0] }, { "scope", "all" }, { "match", "contains" }, { "limit", 20 } }, cancellationToken);
                 else Messages.Add(new ChatMessage { Role = "system", Content = "用法：find <关键词>" });
                 break;
             case "props":
-                await RunAndShow("navisworks_get_item_properties", new() { { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } });
+                await RunAndShow("navisworks_get_item_properties", new() { { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } }, cancellationToken);
                 break;
             case "select":
-                await RunAndShow("navisworks_select_items", new() { { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() }, { "mode", "replace" } });
+                await RunAndShow("navisworks_select_items", new() { { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() }, { "mode", "replace" } }, cancellationToken);
                 break;
             case "hide":
-                await RunAndShow("navisworks_set_visibility", new() { { "action", "hide" }, { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } });
+                await RunAndShow("navisworks_set_visibility", new() { { "action", "hide" }, { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } }, cancellationToken);
                 break;
             case "show":
-                await RunAndShow("navisworks_set_visibility", new() { { "action", "show" }, { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } });
+                await RunAndShow("navisworks_set_visibility", new() { { "action", "show" }, { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } }, cancellationToken);
                 break;
             case "isolate":
-                await RunAndShow("navisworks_set_visibility", new() { { "action", "isolate" }, { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } });
+                await RunAndShow("navisworks_set_visibility", new() { { "action", "isolate" }, { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } }, cancellationToken);
                 break;
             case "reset":
-                await RunAndShow("navisworks_set_visibility", new() { { "action", "reset" } });
+                await RunAndShow("navisworks_set_visibility", new() { { "action", "reset" } }, cancellationToken);
                 break;
             case "clear":
                 Messages.Clear();
@@ -1285,18 +1285,18 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private async Task RunAndShow(string method, Dictionary<string, object?>? parameters = null)
+    private async Task RunAndShow(string method, Dictionary<string, object?>? parameters, CancellationToken cancellationToken)
     {
         Messages.Add(new ChatMessage { Role = "ai", Content = $"🔧 {method}" });
-        var result = await CallToolAsync(method, parameters);
+        var result = await CallToolAsync(method, parameters, cancellationToken);
         Messages.Add(new ChatMessage { Role = "tool", Content = result });
     }
 
-    private async Task<string> CallToolAsync(string method, Dictionary<string, object?>? parameters = null)
+    private async Task<string> CallToolAsync(string method, Dictionary<string, object?>? parameters, CancellationToken cancellationToken)
     {
         try
         {
-            var result = await _bridge.CallAsync(method, parameters);
+            var result = await _bridge.CallAsync(method, parameters, cancellationToken);
             return FormatResult(method, result);
         }
         catch (BridgeException ex)
@@ -1411,8 +1411,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             try
             {
-                var result = await _bridge.CallAsync("navisworks_status");
+                var result = await _bridge.CallAsync("navisworks_status", null, _cts.Token);
                 UpdateNavisworksStatus(result);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
             }
             catch (Exception)
             {

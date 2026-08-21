@@ -19,7 +19,10 @@ internal sealed class BridgeClient : IDisposable
         _requestTimeoutMs = requestTimeoutMs;
     }
 
-    public async Task<object?> CallAsync(string method, Dictionary<string, object?>? parameters = null)
+    public async Task<object?> CallAsync(
+        string method,
+        Dictionary<string, object?>? parameters = null,
+        CancellationToken cancellationToken = default)
     {
         var endpoint = await EndpointReader.ReadAsync(_endpointFile);
         var pipePath = $@"\\.\pipe\{endpoint.PipeName}";
@@ -32,7 +35,7 @@ internal sealed class BridgeClient : IDisposable
             Params = parameters ?? new Dictionary<string, object?>()
         };
 
-        var rawResponse = await ExchangeFrameAsync(pipePath, request, _requestTimeoutMs);
+        var rawResponse = await ExchangeFrameAsync(pipePath, request, _requestTimeoutMs, cancellationToken);
 
         BridgeResponse? response;
         try
@@ -83,9 +86,11 @@ internal sealed class BridgeClient : IDisposable
     private static async Task<string> ExchangeFrameAsync(
         string pipePath,
         BridgeRequest request,
-        int timeoutMs)
+        int timeoutMs,
+        CancellationToken externalToken)
     {
-        using var cts = new CancellationTokenSource(timeoutMs);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+        linkedCts.CancelAfter(timeoutMs);
         using var pipe = new NamedPipeClientStream(
             ".",
             pipePath.Replace(@"\\.\pipe\", ""),
@@ -94,7 +99,7 @@ internal sealed class BridgeClient : IDisposable
 
         try
         {
-            await pipe.ConnectAsync(timeoutMs, cts.Token);
+            await pipe.ConnectAsync(timeoutMs, linkedCts.Token);
 
             // Write frame
             var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request, JsonOptions));
@@ -111,13 +116,13 @@ internal sealed class BridgeClient : IDisposable
             header[2] = (byte)((payload.Length >> 16) & 0xFF);
             header[3] = (byte)((payload.Length >> 24) & 0xFF);
 
-            await pipe.WriteAsync(header, cts.Token);
-            await pipe.WriteAsync(payload, cts.Token);
-            await pipe.FlushAsync(cts.Token);
+            await pipe.WriteAsync(header, linkedCts.Token);
+            await pipe.WriteAsync(payload, linkedCts.Token);
+            await pipe.FlushAsync(linkedCts.Token);
 
             // Read response header
             var responseHeader = new byte[4];
-            await ReadExactlyAsync(pipe, responseHeader, cts.Token);
+            await ReadExactlyAsync(pipe, responseHeader, linkedCts.Token);
 
             var responseLength = responseHeader[0]
                 | (responseHeader[1] << 8)
@@ -133,7 +138,7 @@ internal sealed class BridgeClient : IDisposable
 
             // Read response payload
             var responsePayload = new byte[responseLength];
-            await ReadExactlyAsync(pipe, responsePayload, cts.Token);
+            await ReadExactlyAsync(pipe, responsePayload, linkedCts.Token);
 
             return Encoding.UTF8.GetString(responsePayload);
         }
@@ -148,12 +153,19 @@ internal sealed class BridgeClient : IDisposable
                 $"Navisworks did not respond within {timeoutMs} ms.",
                 ex);
         }
-        catch (OperationCanceledException ex)
+        catch (OperationCanceledException ex) when (!externalToken.IsCancellationRequested)
         {
+            // Only the internal timeout fired; keep the original semantics.
             throw new BridgeException(
                 "NAVISWORKS_TIMEOUT",
                 $"Navisworks did not respond within {timeoutMs} ms.",
                 ex);
+        }
+        catch (OperationCanceledException)
+        {
+            // The caller cancelled: propagate untouched so "stop generation"
+            // is never reported as a Navisworks timeout or I/O failure.
+            throw;
         }
         catch (Exception ex)
         {
