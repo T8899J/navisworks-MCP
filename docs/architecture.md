@@ -33,7 +33,7 @@
 | 文件 | 职责 |
 |---|---|
 | `NavisworksMcpPlugin.cs` | 插件入口，Navisworks 加载时启动桥 |
-| `BridgeServer.cs` | 命名管道服务端，ACL 只授权当前 Windows 用户 |
+| `BridgeServer.cs` | 命名管道服务端（多实例并发 accept，上限 8），ACL 只授权当前 Windows 用户 |
 | `BridgeEndpointRegistry.cs` | 写 `endpoint.json`（管道名、协议版本、PID、插件版本、宿主版本） |
 | `BridgeFrameProtocol.cs` | 4 字节小端长度 + UTF-8 JSON，单帧上限 1 MiB |
 | `NavisworksToolService.cs` | **9 个工具的唯一实现**（大型文件） |
@@ -78,7 +78,8 @@ Claude Code 的在 `~/.claude.json` 的 `mcpServers.navisworks`，两者指向�
 - 状态落在 `%LOCALAPPDATA%\NavisworksMcpDesktop\`：`sessions.json` 是主会话文件，
   `sessions.backup.json` 是回退副本，`settings.json` 保存模型、推理模式和活动会话 ID；仓库内
   不存这些文件。启动时先读主文件，失败后读备份；两者都不可读时禁用本次持久化，避免退出时
-  用空集合覆盖历史。写会话时通过同目录临时文件后原子替换主文件和备份文件。
+  用空集合覆盖历史。`sessions.json`（含备份）与 `settings.json` 均通过同目录临时文件后
+  原子替换写入。
 - 上下文窗口固定 16384 tokens。
 - 模型只能调 `AllowedAgentTools` 白名单里的 9 个工具，其他一律拦掉。
 - **Bridge 归属已变更**：这三个文件原先由 csproj 用 `<Compile Include>` 从 `navisworks-console`

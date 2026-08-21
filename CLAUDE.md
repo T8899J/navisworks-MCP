@@ -103,6 +103,10 @@ dotnet build navisworks-desktop\NavisworksMcp.Desktop
 （`Microsoft.CodeAnalysis.LanguageServer.exe`）或 C# Dev Kit BuildHost 持有 `obj\` 句柄。
 先 `dotnet build-server shutdown`，必要时结束该进程，VS Code 会自动重启它。
 
+构建脚本要用 PowerShell 原生会话跑（`.\scripts\build.ps1`）；从 Git Bash 里调
+`powershell.exe -File` 会因 PSModulePath 继承问题挂掉 `package.ps1` 的 `Get-FileHash`
+（编译和 ProtocolTests 仍能过，容易误判为成功）。
+
 ## 运行时路径与前置条件
 
 | 项 | 值 |
@@ -124,6 +128,17 @@ dotnet build navisworks-desktop\NavisworksMcp.Desktop
 | `README.md` | 支持范围、安装、验证、安全边界 |
 | `docs/architecture.md` | 数据流、构建方式 |
 | `docs/protocol.md` | 命名管道帧格式、请求/响应/错误 JSON（未受删除影响） |
+
+## 有意设计（不要「顺手改回」，先问）
+
+- `BridgeServer` 的 `JavaScriptSerializer` 是**每连接一个实例**（`CreateSerializer`），不是共享字段——
+  JavaScriptSerializer 无线程安全保证，多实例管道下并发连接会同时序列化。
+- 管道服务端是**多实例并发 accept**（上限 8 = 在途 handler 数 + 1 个 acceptor）；改回单实例
+  会重现「处理请求期间新连接被拒」的 bug。
+- 桌面端 `MainViewModel._cts` **故意不 Dispose**（窗口关闭后 fire-and-forget 任务仍读 `.Token`，
+  Dispose 会抛 ObjectDisposedException；CTS 无非托管资源且从未 CancelAfter）。
+- CLI 命令回显 `"🔧 {method}"` 的格式与 `IsLegacyAgentActionMessage` 过滤器耦合：改回显格式必须
+  同步改过滤器，否则回显会重新污染 LLM 历史。
 
 ## 已知技术债（不要「顺手重构」，先问）
 
