@@ -80,7 +80,9 @@ Claude Code 的在 `~/.claude.json` 的 `mcpServers.navisworks`，两者指向�
   不存这些文件。启动时先读主文件，失败后读备份；两者都不可读时禁用本次持久化，避免退出时
   用空集合覆盖历史。`sessions.json`（含备份）与 `settings.json` 均通过同目录临时文件后
   原子替换写入。
-- 上下文窗口固定 16384 tokens。
+- 上下文窗口固定 16384 tokens；进入 agent 循环的单条工具结果截断到
+  `MaxToolResultChars`（8000 字符，按字符近似 token 预算），尾部附缩小查询的中文指引，
+  防止大结果挤占历史与回复预算。CLI 路径不经此截断，保留完整输出。
 - 模型只能调 `AllowedAgentTools` 白名单里的 9 个工具，其他一律拦掉。
 - **Bridge 归属已变更**：这三个文件原先由 csproj 用 `<Compile Include>` 从 `navisworks-console`
   跨目录链入，随该项目删除已物理并入本项目，现由 SDK 默认 glob 自动包含。命名空间仍是
