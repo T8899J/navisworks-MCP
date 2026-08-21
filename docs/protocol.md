@@ -26,6 +26,13 @@ The maximum payload is 1 MiB. One pipe connection may carry one or more
 request/response pairs, although the MCP server currently uses one request per
 connection.
 
+If a response payload itself exceeds the limit (for example a very large
+property query), the server does not drop the connection: it serializes a
+small failure frame with error code `RESPONSE_TOO_LARGE` instead, so the
+client always receives an answer for its request id. If even the degraded
+frame cannot be written (the pipe is already broken), the connection is
+closed and reported as `BRIDGE_RESPONSE_WRITE_FAILED`.
+
 ## Request
 
 ```json

@@ -130,6 +130,8 @@ dotnet build navisworks-desktop\NavisworksMcp.Desktop
 - 超过 800 行的文件：`MainViewModel.cs`、`MainWindow.xaml`、`NavisworksToolService.cs`。
 - `navisworks-desktop` **零测试**；仓库内只有 `navisworks-plugin/tests` 有覆盖
   （`mcp-server/test` 随源码一并删除）。
-- 仓库**没有 git**（只有 `.gitignore`）。没有历史层，所以文档就是唯一的交接介质，改了要同步。
+- 仓库于 2026-08-21 初始化了 git（基线 commit `a89598b`，此前无历史层）。
+  改动照常提交；`artifacts/` 被 `.gitignore` 忽略，`navisworks-mcp.mjs` 不入库，
+  另有仓库外备份 `D:\副业\项目\_backup_navisworks-mcp.mjs`。
 - `navisworks-desktop\NavisworksMcp.Desktop\Views\` 是空目录，UI 全在 `MainWindow.xaml` 里。
 - `.nuget\packages` 与 `.npm-cache` 已删；下次 `build.ps1` 会重新下载 NuGet 包（约 130 MB）。
