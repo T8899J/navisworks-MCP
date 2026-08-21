@@ -29,13 +29,15 @@ namespace NavisworksCodexMcp.Plugin
                 }
                 catch (Exception exception)
                 {
-                    var failed = new TaskCompletionSource<object>();
+                    var failed = new TaskCompletionSource<object>(
+                        TaskCreationOptions.RunContinuationsAsynchronously);
                     failed.SetException(exception);
                     return failed.Task;
                 }
             }
 
-            var completion = new TaskCompletionSource<object>();
+            var completion = new TaskCompletionSource<object>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             synchronizationContext.Post(
                 state =>
                 {
