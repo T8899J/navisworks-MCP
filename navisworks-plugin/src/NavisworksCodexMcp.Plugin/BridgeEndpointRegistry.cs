@@ -49,12 +49,15 @@ namespace NavisworksCodexMcp.Plugin
                 serializer.Serialize(endpoint),
                 new UTF8Encoding(false));
 
-            if (File.Exists(endpointFile))
+            try
             {
-                File.Delete(endpointFile);
+                File.Replace(temporaryFile, endpointFile, null);
             }
-
-            File.Move(temporaryFile, endpointFile);
+            catch (FileNotFoundException)
+            {
+                // First write in this data directory: nothing to replace yet.
+                File.Move(temporaryFile, endpointFile);
+            }
         }
 
         public void DeleteIfOwned(string pipeName)
