@@ -317,7 +317,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             _ => !string.IsNullOrWhiteSpace(NewModelName));
         NewChatCommand = new RelayCommand(
             _ => CreateNewSessionFromUserAction(),
-            _ => !IsBusy && HasActiveSession);
+            _ => !IsBusy);
         SelectSessionCommand = new RelayCommand(
             session => ActivateSession(session as ChatSessionItem),
             _ => !IsBusy);
@@ -357,9 +357,6 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void CreateNewSessionFromUserAction()
     {
-        if (_currentSession is null)
-            return;
-
         CreateAndActivateSession();
     }
 
@@ -438,6 +435,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         client.RestoreHistory(session.Messages
             .Where(message => message.Role is "user" or "ai")
             .Where(message => !message.IsTransient)
+            .Where(message => !IsLegacyAgentActionMessage(message))
             .Select(message => new LlmHistoryEntry(
                 message.Role == "user" ? "user" : "assistant",
                 message.Content)));
@@ -663,6 +661,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         return message.Content.StartsWith("🔍 搜索：", StringComparison.Ordinal) ||
                message.Content.StartsWith("👁 ", StringComparison.Ordinal) ||
+               message.Content.StartsWith("🔧 ", StringComparison.Ordinal) ||
                message.Content is
                    "🖱 选择中..." or
                    "📋 获取属性..." or
@@ -844,7 +843,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 Skills.ToList(),
                 ReasoningMode,
                 _lastActiveSessionId);
-            File.WriteAllText(
+            WriteTextAtomically(
                 _settingsPath,
                 JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true }));
         }
@@ -969,6 +968,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 candidate.RestoreHistory(Messages
                     .Where(message => message.Role is "user" or "ai")
                     .Where(message => !message.IsTransient)
+                    .Where(message => !IsLegacyAgentActionMessage(message))
                     .Select(message => new LlmHistoryEntry(
                         message.Role == "user" ? "user" : "assistant",
                         message.Content)));
@@ -1510,7 +1510,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _cts.Cancel();
         _llm?.Dispose();
         _bridge.Dispose();
-        _cts.Dispose();
+
+        // _cts is deliberately not disposed: it holds no unmanaged resources
+        // and never uses CancelAfter, so there is nothing to leak, while
+        // fire-and-forget tasks (status polling, LLM connect) may still read
+        // _cts.Token after the window closes — a disposed CTS would make the
+        // Token getter throw ObjectDisposedException.
     }
 }
 
