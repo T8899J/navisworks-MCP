@@ -379,9 +379,28 @@
                                     <Button.Style>
                                         <Style TargetType="Button" BasedOn="{StaticResource CopyMessageButton}">
                                             <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsMouseOver, ElementName=MessageShellUser}" Value="True">
+                                                <!-- FindAncestor walks the visual tree, so it is
+                                                     immune to the NameScope/virtualization issues
+                                                     that made the ElementName form unreliable. -->
+                                                <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Grid}}" Value="True">
                                                     <Setter Property="Opacity" Value="1" />
                                                     <Setter Property="IsHitTestVisible" Value="True" />
+                                                    <DataTrigger.EnterActions>
+                                                        <BeginStoryboard>
+                                                            <Storyboard>
+                                                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                                 To="1" Duration="0:0:0.12" />
+                                                            </Storyboard>
+                                                        </BeginStoryboard>
+                                                    </DataTrigger.EnterActions>
+                                                    <DataTrigger.ExitActions>
+                                                        <BeginStoryboard>
+                                                            <Storyboard>
+                                                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                                 To="0" Duration="0:0:0.22" />
+                                                            </Storyboard>
+                                                        </BeginStoryboard>
+                                                    </DataTrigger.ExitActions>
                                                 </DataTrigger>
                                             </Style.Triggers>
                                         </Style>
@@ -545,9 +564,28 @@
                                     <Button.Style>
                                         <Style TargetType="Button" BasedOn="{StaticResource CopyMessageButton}">
                                             <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsMouseOver, ElementName=MessageShellAgent}" Value="True">
+                                                <!-- FindAncestor walks the visual tree, so it is
+                                                     immune to the NameScope/virtualization issues
+                                                     that made the ElementName form unreliable. -->
+                                                <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Grid}}" Value="True">
                                                     <Setter Property="Opacity" Value="1" />
                                                     <Setter Property="IsHitTestVisible" Value="True" />
+                                                    <DataTrigger.EnterActions>
+                                                        <BeginStoryboard>
+                                                            <Storyboard>
+                                                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                                 To="1" Duration="0:0:0.12" />
+                                                            </Storyboard>
+                                                        </BeginStoryboard>
+                                                    </DataTrigger.EnterActions>
+                                                    <DataTrigger.ExitActions>
+                                                        <BeginStoryboard>
+                                                            <Storyboard>
+                                                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                                 To="0" Duration="0:0:0.22" />
+                                                            </Storyboard>
+                                                        </BeginStoryboard>
+                                                    </DataTrigger.ExitActions>
                                                 </DataTrigger>
                                             </Style.Triggers>
                                         </Style>
