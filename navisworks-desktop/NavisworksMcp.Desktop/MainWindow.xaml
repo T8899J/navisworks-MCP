@@ -277,35 +277,55 @@
                     <Style TargetType="ScrollBar" BasedOn="{StaticResource ChatScrollBar}" />
                     <!-- Shared per-message copy button chrome. Visibility is
                          driven per-instance by the owning message-shell's
-                         IsMouseOver (see the BasedOn styles in the template). -->
+                         IsMouseOver (see the BasedOn styles in the template).
+                         Icon set follows the Lucide copy/check pair. -->
                     <Style x:Key="CopyMessageButton" TargetType="Button">
                         <Setter Property="Opacity" Value="0" />
                         <Setter Property="IsHitTestVisible" Value="False" />
                         <Setter Property="Cursor" Value="Hand" />
+                        <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+                        <Setter Property="Background" Value="Transparent" />
+                        <Setter Property="ToolTip" Value="复制" />
                         <Setter Property="Template">
                             <Setter.Value>
                                 <ControlTemplate TargetType="Button">
-                                    <Border x:Name="Chrome" Width="26" Height="22" CornerRadius="5"
-                                            Background="{DynamicResource SurfaceBrush}"
-                                            BorderBrush="Orange" BorderThickness="1">
-                                        <Grid Width="13" Height="13">
-                                            <!-- Back sheet (filled with the chrome background so the
-                                                 overlap line stays hidden), front sheet on top. -->
-                                            <Rectangle Width="8.5" Height="8.5"
-                                                       HorizontalAlignment="Right" VerticalAlignment="Top"
-                                                       RadiusX="1.6" RadiusY="1.6"
-                                                       Fill="{Binding Background, RelativeSource={RelativeSource AncestorType=Border}}"
-                                                       Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.3" />
-                                            <Rectangle Width="8.5" Height="8.5"
-                                                       HorizontalAlignment="Left" VerticalAlignment="Bottom"
-                                                       RadiusX="1.6" RadiusY="1.6"
-                                                       Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.3" />
+                                    <Border x:Name="Chrome" Padding="3"
+                                            Background="{TemplateBinding Background}">
+                                        <Grid Width="15" Height="15">
+                                            <!-- Lucide "copy" (two rounded sheets) -->
+                                            <Grid x:Name="CopyIcon">
+                                                <Viewbox>
+                                                    <Canvas Width="24" Height="24">
+                                                        <Rectangle Canvas.Left="8" Canvas.Top="8" Width="14" Height="14"
+                                                                   RadiusX="2" RadiusY="2"
+                                                                   Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                                   StrokeThickness="2" />
+                                                        <Path Data="M 4 16 C 2.9 16 2 15.1 2 14 L 2 4 C 2 2.9 2.9 2 4 2 L 14 2 C 15.1 2 16 2.9 16 4"
+                                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                              StrokeThickness="2" Fill="Transparent"
+                                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                                                    </Canvas>
+                                                </Viewbox>
+                                            </Grid>
+                                            <!-- Lucide "check" — shown while Tag=copied -->
+                                            <Path x:Name="CheckIcon"
+                                                  Data="M 20 6 L 9 17 L 4 12"
+                                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                  StrokeThickness="2" Fill="Transparent"
+                                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                                  StrokeLineJoin="Round"
+                                                  Visibility="Collapsed" />
                                         </Grid>
                                     </Border>
                                     <ControlTemplate.Triggers>
                                         <Trigger Property="IsMouseOver" Value="True">
                                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource SurfaceHoverBrush}" />
+                                            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
                                         </Trigger>
+                                        <DataTrigger Binding="{Binding Tag, RelativeSource={RelativeSource Self}}" Value="copied">
+                                            <Setter TargetName="CopyIcon" Property="Visibility" Value="Collapsed" />
+                                            <Setter TargetName="CheckIcon" Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
                                     </ControlTemplate.Triggers>
                                 </ControlTemplate>
                             </Setter.Value>
@@ -326,15 +346,13 @@
                 <ListBox.ItemTemplate>
                     <DataTemplate>
                         <Grid HorizontalAlignment="Center" Margin="0,0,0,26"
-                              Background="#10FF0000"
                               Width="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=ListBox}, Converter={StaticResource ConversationWidthConverter}}">
                             <!-- User prompts stay compact and right-aligned, matching the Codex conversation rhythm.
                                  Hovering the row reveals a one-click copy button beside the bubble. -->
                             <!-- message-shell (user): fit-content container that the
                                  copy button anchors to. Blue outline is temporary
                                  debug chrome. -->
-                            <Grid x:Name="MessageShellUser" HorizontalAlignment="Right"
-                                  Background="#223B82F6">
+                            <Grid x:Name="MessageShellUser" HorizontalAlignment="Right">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
@@ -350,7 +368,6 @@
                                     </Style>
                                 </Grid.Style>
                                 <Border Grid.Row="0" HorizontalAlignment="Right" Padding="14,9" CornerRadius="14"
-                                        BorderBrush="Green" BorderThickness="1"
                                         MaxWidth="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=ListBox}, Converter={StaticResource ConversationWidthConverter}, ConverterParameter=user}"
                                         Background="{DynamicResource AccentMutedBrush}">
                                     <TextBlock Text="{Binding Content}" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" LineHeight="23"
@@ -378,8 +395,7 @@
                                  content edge, not to the full column. -->
                             <!-- message-shell (agent): fit-content, anchors the copy
                                  button to the whole-reply bounding box's bottom-left. -->
-                            <Grid x:Name="MessageShellAgent" HorizontalAlignment="Left"
-                                  Background="#223B82F6">
+                            <Grid x:Name="MessageShellAgent" HorizontalAlignment="Left">
                                 <Grid.Style>
                                     <Style TargetType="Grid">
                                         <Setter Property="Visibility" Value="Visible" />
@@ -394,8 +410,7 @@
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
-                                <StackPanel Grid.Row="0" HorizontalAlignment="Stretch"
-                                            Background="#1400AA00">
+                                <StackPanel Grid.Row="0" HorizontalAlignment="Stretch">
                                 <!-- Collapsible reasoning chain: expanded while
                                      streaming (IsTransient), collapsed once the
                                      reply lands, still expandable afterwards.
