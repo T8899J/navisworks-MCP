@@ -351,10 +351,15 @@
                                                                                VerticalAlignment="Center"
                                                                                Foreground="{DynamicResource TextMutedBrush}" />
                                                                     <!-- Chevron points right when collapsed,
-                                                                         rotates 90° to point down when expanded. -->
-                                                                    <Path Margin="7,1,0,0"
+                                                                         rotates 90° to point down when expanded.
+                                                                         Square layout box + centered geometry +
+                                                                         origin 0.5,0.5 keep it anchored while
+                                                                         rotating. -->
+                                                                    <Path Width="10" Height="10"
+                                                                          Margin="6,0,0,0"
                                                                           VerticalAlignment="Center"
-                                                                          Data="M 0 0 L 4.5 4.5 L 0 9"
+                                                                          Data="M 2.75 2.75 L 7.25 5 L 2.75 7.25"
+                                                                          RenderTransformOrigin="0.5,0.5"
                                                                           Stroke="{DynamicResource TextMutedBrush}"
                                                                           StrokeThickness="2"
                                                                           StrokeStartLineCap="Round"
