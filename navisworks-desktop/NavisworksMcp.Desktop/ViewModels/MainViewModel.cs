@@ -1059,7 +1059,11 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
             else
             {
-                await SendWithCliAsync(text, turnCts.Token);
+                Messages.Add(new ChatMessage
+                {
+                    Role = "system",
+                    Content = "本地模型未连接。请启动 Ollama 并点击侧栏的「连接」，连接成功后再发送。"
+                });
             }
         }
         catch (OperationCanceledException) when (turnCts.IsCancellationRequested)
@@ -1236,179 +1240,6 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private async Task SendWithCliAsync(string text, CancellationToken cancellationToken)
-    {
-        var parts = ParseLine(text);
-        if (parts.Length == 0) return;
-
-        var cmd = parts[0].ToLowerInvariant();
-        var args = parts.Skip(1).ToArray();
-
-        switch (cmd)
-        {
-            case "help":
-                Messages.Add(new ChatMessage { Role = "system", Content = HelpText });
-                break;
-            case "status":
-                await RunAndShow("navisworks_status", null, cancellationToken);
-                break;
-            case "doc":
-                await RunAndShow("navisworks_get_document", null, cancellationToken);
-                break;
-            case "sel":
-                await RunAndShow("navisworks_get_selection", new() { { "includeProperties", false }, { "limit", 50 } }, cancellationToken);
-                break;
-            case "find":
-                if (args.Length > 0 && !args[0].StartsWith("--"))
-                    await RunAndShow("navisworks_find_items", new() { { "query", args[0] }, { "scope", "all" }, { "match", "contains" }, { "limit", 20 } }, cancellationToken);
-                else Messages.Add(new ChatMessage { Role = "system", Content = "用法：find <关键词>" });
-                break;
-            case "props":
-                await RunAndShow("navisworks_get_item_properties", new() { { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } }, cancellationToken);
-                break;
-            case "select":
-                await RunAndShow("navisworks_select_items", new() { { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() }, { "mode", "replace" } }, cancellationToken);
-                break;
-            case "hide":
-                await RunAndShow("navisworks_set_visibility", new() { { "action", "hide" }, { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } }, cancellationToken);
-                break;
-            case "show":
-                await RunAndShow("navisworks_set_visibility", new() { { "action", "show" }, { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } }, cancellationToken);
-                break;
-            case "isolate":
-                await RunAndShow("navisworks_set_visibility", new() { { "action", "isolate" }, { "itemIds", args.Where(a => !a.StartsWith("--")).ToList() } }, cancellationToken);
-                break;
-            case "reset":
-                await RunAndShow("navisworks_set_visibility", new() { { "action", "reset" } }, cancellationToken);
-                break;
-            case "clear":
-                Messages.Clear();
-                _llm?.ClearHistory();
-                break;
-            default:
-                Messages.Add(new ChatMessage { Role = "system", Content = $"未知命令：'{cmd}'。输入 help 查看帮助。" });
-                break;
-        }
-    }
-
-    private async Task RunAndShow(string method, Dictionary<string, object?>? parameters, CancellationToken cancellationToken)
-    {
-        Messages.Add(new ChatMessage { Role = "ai", Content = $"🔧 {method}" });
-        var result = await CallToolAsync(method, parameters, cancellationToken);
-        Messages.Add(new ChatMessage { Role = "tool", Content = result });
-    }
-
-    private async Task<string> CallToolAsync(string method, Dictionary<string, object?>? parameters, CancellationToken cancellationToken)
-    {
-        try
-        {
-            var result = await _bridge.CallAsync(method, parameters, cancellationToken);
-            return FormatResult(method, result);
-        }
-        catch (BridgeException ex)
-        {
-            return $"❌ {ex.Message}";
-        }
-    }
-
-    private string FormatResult(string method, object? result)
-    {
-        if (result is not JsonElement obj) return "OK";
-
-        switch (method)
-        {
-            case "navisworks_status":
-                var connected = obj.TryGetProperty("connected", out var c) && c.GetBoolean();
-                var doc = obj.TryGetProperty("documentTitle", out var dt) ? dt.GetString() : "";
-                return connected ? $"✅ 已连接。文档：{doc}" : "❌ 未连接到 Navisworks。";
-
-            case "navisworks_find_items":
-                var returned = obj.TryGetProperty("returnedCount", out var rc) ? rc.GetInt32() : 0;
-                var scanned = obj.TryGetProperty("scannedCount", out var sc) ? sc.GetInt32() : 0;
-                var lines = new List<string> { $"找到 {returned} 个结果（扫描 {scanned} 项）：" };
-                if (obj.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
-                {
-                    int i = 1;
-                    foreach (var item in items.EnumerateArray())
-                    {
-                        var id = TryStr(item, "itemId");
-                        var name = TryStr(item, "displayName");
-                        var cls = TryStr(item, "classDisplayName");
-                        var hidden = item.TryGetProperty("isHidden", out var ih) && ih.GetBoolean() ? " 🔒" : "";
-                        lines.Add($"  {i}. [{id}] {name} ({cls}){hidden}");
-                        i++;
-                    }
-                }
-                return string.Join("\n", lines);
-
-            case "navisworks_get_selection":
-                var selCount = obj.TryGetProperty("selectedCount", out var sc2) ? sc2.GetInt32() : 0;
-                var slines = new List<string> { $"已选中 {selCount} 项：" };
-                if (obj.TryGetProperty("items", out var sitems) && sitems.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var item in sitems.EnumerateArray())
-                        slines.Add($"  [{TryStr(item, "itemId")}] {TryStr(item, "displayName")}");
-                }
-                return string.Join("\n", slines);
-
-            case "navisworks_get_item_properties":
-                var plines = new List<string>();
-                if (obj.TryGetProperty("items", out var pitems) && pitems.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var pi in pitems.EnumerateArray())
-                    {
-                        if (pi.TryGetProperty("propertyData", out var pd) &&
-                            pd.TryGetProperty("categories", out var cats))
-                        {
-                            foreach (var cat in cats.EnumerateArray())
-                            {
-                                plines.Add($"📂 {TryStr(cat, "displayName")}");
-                                if (cat.TryGetProperty("properties", out var props))
-                                    foreach (var prop in props.EnumerateArray())
-                                        plines.Add($"    {TryStr(prop, "displayName")}: {TryStr(prop, "value")}");
-                            }
-                        }
-                    }
-                }
-                return string.Join("\n", plines);
-
-            case "navisworks_list_viewpoints":
-                var viewpointCount = obj.TryGetProperty("entries", out var entries)
-                    ? entries.EnumerateArray().Count(entry => TryStr(entry, "type") == "viewpoint")
-                    : 0;
-                return $"共 {viewpointCount} 个保存视点。";
-
-            case "navisworks_select_items":
-                var s = obj.TryGetProperty("selectedCount", out var sc3) ? sc3.GetInt32() : 0;
-                return $"✅ 已选中 {s} 项。";
-
-            case "navisworks_set_visibility":
-                var action = obj.TryGetProperty("action", out var act) ? act.GetString() : "";
-                var label = action switch
-                {
-                    "hide" => "已隐藏",
-                    "show" => "已显示",
-                    "isolate" => "已隔离",
-                    "reset" => "已重置全部显示",
-                    _ => "操作完成"
-                };
-                return $"✅ {label}。";
-
-            case "navisworks_activate_viewpoint":
-                var vp = obj.TryGetProperty("displayName", out var dn2) ? dn2.GetString() : "";
-                return $"✅ 已切换到：{vp}";
-
-            case "navisworks_get_document":
-                var title = obj.TryGetProperty("title", out var t) ? t.GetString() : "";
-                var models = obj.TryGetProperty("modelCount", out var mc) ? mc.GetInt32() : 0;
-                var sel = obj.TryGetProperty("selectionCount", out var scc) ? scc.GetInt32() : 0;
-                return $"📄 {title}\n模型数：{models} | 选中：{sel} | 单位：{TryStr(obj, "units")}";
-
-            default:
-                return JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true });
-        }
-    }
-
     // ── Status polling ─────────────────────────────────
 
     private async Task PollStatusAsync()
@@ -1466,39 +1297,6 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private static string TryStr(JsonElement obj, string key)
         => obj.TryGetProperty(key, out var v) ? v.GetString() ?? "" : "";
-
-    private static string[] ParseLine(string line)
-    {
-        var parts = new List<string>();
-        var current = new System.Text.StringBuilder();
-        var inQuotes = false;
-        foreach (var ch in line)
-        {
-            if (ch == '"') { inQuotes = !inQuotes; }
-            else if (ch == ' ' && !inQuotes) { if (current.Length > 0) { parts.Add(current.ToString()); current.Clear(); } }
-            else { current.Append(ch); }
-        }
-        if (current.Length > 0) parts.Add(current.ToString());
-        return parts.ToArray();
-    }
-
-    private const string HelpText = """
-可用命令：
-  status    检查连接
-  doc       文档信息
-  find <关键词>  搜索模型
-  sel       当前选中
-  props <ID>  查看属性
-  select <ID>  选中
-  hide/show/isolate/reset <ID>  控制可见性
-  clear     清空对话
-  help      显示帮助
-
-连接 LLM 后可直接用中文指令，如：
-  查找所有管道
-  隐藏第三个
-  显示全部
-""";
 
     // ── INotifyPropertyChanged ─────────────────────────
 

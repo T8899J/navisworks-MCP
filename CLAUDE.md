@@ -137,8 +137,9 @@ dotnet build navisworks-desktop\NavisworksMcp.Desktop
   会重现「处理请求期间新连接被拒」的 bug。
 - 桌面端 `MainViewModel._cts` **故意不 Dispose**（窗口关闭后 fire-and-forget 任务仍读 `.Token`，
   Dispose 会抛 ObjectDisposedException；CTS 无非托管资源且从未 CancelAfter）。
-- CLI 命令回显 `"🔧 {method}"` 的格式与 `IsLegacyAgentActionMessage` 过滤器耦合：改回显格式必须
-  同步改过滤器，否则回显会重新污染 LLM 历史。
+- CLI 命令链路已于 2026-08-22 删除（用户只用 LLM 对话），但 `IsLegacyAgentActionMessage`
+  过滤器**必须保留**：历史会话文件里仍存有旧的 `"🔧 {method}"` 回显消息，删掉过滤它们
+  会重新污染 LLM 历史。
 
 ## 已知技术债（不要「顺手重构」，先问）
 
