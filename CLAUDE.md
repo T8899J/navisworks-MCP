@@ -140,6 +140,9 @@ dotnet build navisworks-desktop\NavisworksMcp.Desktop
 - CLI 命令链路已于 2026-08-22 删除（用户只用 LLM 对话），但 `IsLegacyAgentActionMessage`
   过滤器**必须保留**：历史会话文件里仍存有旧的 `"🔧 {method}"` 回显消息，删掉过滤它们
   会重新污染 LLM 历史。
+- 桌面端消息模板里**不要用 `ElementName` 绑定**（共享 Style + DataTemplate 实例作用域 +
+  ListBox 虚拟化回收三者叠加会让它间歇性失效——复制按钮 hover 曾因此时灵时不灵），
+  一律用 `RelativeSource FindAncestor` 沿视觉树查找。
 
 ## 已知技术债（不要「顺手重构」，先问）
 

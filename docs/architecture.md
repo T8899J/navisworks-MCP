@@ -75,7 +75,8 @@ Claude Code 的在 `~/.claude.json` 的 `mcpServers.navisworks`，两者指向�
 | `Themes/DarkTheme.xaml` | 控件样式 |
 | `Bridge/{BridgeClient,BridgeTypes,EndpointReader}.cs` | C# 侧管道客户端 |
 
-- 状态落在 `%LOCALAPPDATA%\NavisworksMcpDesktop\`：`sessions.json` 是主会话文件，
+- 状态落在 `%LOCALAPPDATA%\NavisworksMcpDesktop\`：`sessions.json` 是主会话文件
+  （消息含 `ThinkingText` 推理链字段，供折叠块回看，不进 LLM 上下文），
   `sessions.backup.json` 是回退副本，`settings.json` 保存模型、推理模式和活动会话 ID；仓库内
   不存这些文件。启动时先读主文件，失败后读备份；两者都不可读时禁用本次持久化，避免退出时
   用空集合覆盖历史。`sessions.json`（含备份）与 `settings.json` 均通过同目录临时文件后
