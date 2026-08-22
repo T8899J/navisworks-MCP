@@ -335,10 +335,10 @@
                                  debug chrome. -->
                             <Grid x:Name="MessageShellUser" HorizontalAlignment="Right"
                                   Background="#223B82F6">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
                                 <Grid.Style>
                                     <Style TargetType="Grid">
                                         <Setter Property="Visibility" Value="Collapsed" />
@@ -349,14 +349,14 @@
                                         </Style.Triggers>
                                     </Style>
                                 </Grid.Style>
-                                <Border Grid.Column="0" Padding="14,9" CornerRadius="14"
+                                <Border Grid.Row="0" HorizontalAlignment="Right" Padding="14,9" CornerRadius="14"
                                         BorderBrush="Green" BorderThickness="1"
                                         MaxWidth="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=ListBox}, Converter={StaticResource ConversationWidthConverter}, ConverterParameter=user}"
                                         Background="{DynamicResource AccentMutedBrush}">
                                     <TextBlock Text="{Binding Content}" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" LineHeight="23"
                                                Foreground="{DynamicResource TextPrimaryBrush}" />
                                 </Border>
-                                <Button Grid.Column="1" VerticalAlignment="Bottom" Margin="6,0,0,2"
+                                <Button Grid.Row="1" HorizontalAlignment="Right" Margin="0,4,4,0"
                                         Click="CopyMessage_Click"
                                         AutomationProperties.Name="复制消息">
                                     <Button.Style>
@@ -390,11 +390,11 @@
                                         </Style.Triggers>
                                     </Style>
                                 </Grid.Style>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Grid.Column="1" HorizontalAlignment="Stretch"
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Grid.Row="0" HorizontalAlignment="Stretch"
                                             Background="#1400AA00">
                                 <!-- Collapsible reasoning chain: expanded while
                                      streaming (IsTransient), collapsed once the
@@ -524,7 +524,7 @@
                                     </TextBlock.Style>
                                 </TextBlock>
                             </StackPanel>
-                                <Button Grid.Column="0" VerticalAlignment="Bottom" Margin="0,0,6,2"
+                                <Button Grid.Row="1" HorizontalAlignment="Left" Margin="2,4,0,0"
                                         Click="CopyMessage_Click"
                                         AutomationProperties.Name="复制回复">
                                     <Button.Style>
