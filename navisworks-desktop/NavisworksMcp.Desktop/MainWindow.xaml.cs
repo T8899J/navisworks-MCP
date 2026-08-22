@@ -119,7 +119,7 @@ public partial class MainWindow : Window
         ScrollToLatestMessage();
     }
 
-    private void CopyUserMessage_Click(object sender, RoutedEventArgs e)
+    private void CopyMessage_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is ChatMessage message &&
             !string.IsNullOrEmpty(message.Content))
