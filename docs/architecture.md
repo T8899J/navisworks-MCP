@@ -71,16 +71,26 @@ Claude Code 的在 `~/.claude.json` 的 `mcpServers.navisworks`，两者指向�
 | `Services/LlmService.cs` | `OllamaClient`：`http://localhost:11434`，默认模型 `qwen3.5:9b-q4_K_M`，解析 `tool_calls` |
 | `ViewModels/MainViewModel.cs` | 会话、设置、白名单 `AllowedAgentTools`、编排循环（大型文件） |
 | `MainWindow.xaml(.cs)` | 全部 UI（大型文件）；`Views/` 目录是空的 |
-| `App.xaml.cs` | 跟随 Windows 注册表 `AppsUseLightTheme` 切换亮/暗色板 |
+| `Controls/MessageShell.cs` | 单条消息的内容/操作区边界；统一控制 hover/focus 可见性与左右对齐，避免复制按钮依赖正文内部布局 |
+| `Runtime/AppDataPathProvider.cs` | 唯一的桌面数据目录解析入口；区分 Production、Debug 和显式测试目录 |
+| `Runtime/ApplicationRuntimeContext.cs` | 汇总版本、Commit、EXE、用户、进程、数据路径和启动日志，供诊断界面读取 |
+| `App.xaml.cs` | 创建 Runtime Context、写启动诊断日志，并跟随 Windows 注册表切换亮/暗色板 |
 | `Themes/DarkTheme.xaml` | 控件样式 |
 | `Bridge/{BridgeClient,BridgeTypes,EndpointReader}.cs` | C# 侧管道客户端 |
 
-- 状态落在 `%LOCALAPPDATA%\NavisworksMcpDesktop\`：`sessions.json` 是主会话文件
+- Production 状态落在 `%LOCALAPPDATA%\NavisworksMcpDesktop\`，Debug 默认落在
+  `%LOCALAPPDATA%\NavisworksMcpDesktop.Debug\`。自动化/测试必须用 `--data-dir <目录>` 或
+  `NAVISWORKS_MCP_DESKTOP_DATA_DIR` 显式传入独立临时目录；命令行优先于环境变量，二者都优先于
+  构建配置默认值。应用不判断是不是由 Codex 启动，也不自动迁移两个目录之间的数据。
+- 每个数据目录里的 `sessions.json` 是主会话文件
   （消息含 `ThinkingText` 推理链字段，供折叠块回看，不进 LLM 上下文），
   `sessions.backup.json` 是回退副本，`settings.json` 保存模型、推理模式和活动会话 ID；仓库内
   不存这些文件。启动时先读主文件，失败后读备份；两者都不可读时禁用本次持久化，避免退出时
   用空集合覆盖历史。`sessions.json`（含备份）与 `settings.json` 均通过同目录临时文件后
   原子替换写入。
+- 每次启动向当前数据目录的 `startup.log` 追加 Runtime Context；会话标题栏右侧的“•••”打开
+  诊断界面，直接显示构建配置、Commit、EXE、当前用户、实际数据目录、会话文件时间、Bridge
+  端点和 Navisworks 状态。
 - 上下文窗口固定 16384 tokens；进入 agent 循环的单条工具结果截断到
   `MaxToolResultChars`（按字符近似 token 预算），尾部附缩小查询的中文指引，
   防止大结果挤占历史与回复预算。agent 工具结果只携带原始 `result` 数据——
@@ -106,9 +116,10 @@ Claude Code 的在 `~/.claude.json` 的 `mcpServers.navisworks`，两者指向�
 窗口行为没有自动化测试覆盖。修改 `MainWindow.xaml(.cs)`、`App.xaml.cs` 或标题栏样式后，
 应先构建，再在真实窗口中验证拖动、系统菜单、最小化、最大化/还原、关闭和亮/暗主题。
 
-会话恢复也有明确的验收边界：Codex/自动化工具直接启动的进程以及沙箱内读取的
-`%LOCALAPPDATA%` 可能落在虚拟化文件视图。用户侧验收必须从资源管理器正常启动成品，并在
-沙箱外核对真实 `%LOCALAPPDATA%\NavisworksMcpDesktop\`，不能把受限环境中的结果当作等价证据。
+会话恢复也有明确的验收边界：Codex/自动化工具直接启动时必须显式传独立 `--data-dir`，不得
+读取默认用户目录；用户侧验收仍须从资源管理器正常启动成品，并在诊断界面和沙箱外目录中核对
+真实路径。桥端点 `%LOCALAPPDATA%\NavisworksCodexMcp\endpoint.json` 是插件与客户端共享的
+跨进程发现文件，故意不随桌面数据目录隔离。
 
 ## 构建与测试矩阵
 

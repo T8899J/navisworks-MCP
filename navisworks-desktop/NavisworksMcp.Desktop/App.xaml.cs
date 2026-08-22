@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Data;
 using System.Windows.Media;
 using Microsoft.Win32;
+using NavisworksMcp.Desktop.Runtime;
 
 namespace NavisworksMcp.Desktop;
 
@@ -19,6 +20,29 @@ public partial class App : Application
         });
 
         base.OnStartup(e);
+
+        try
+        {
+            var appDataPathProvider = AppDataPathProviderFactory.Create(e.Args);
+            var runtimeContext = ApplicationRuntimeContext.Create(appDataPathProvider);
+            runtimeContext.WriteStartupLog();
+
+            var mainWindow = new MainWindow(runtimeContext);
+            MainWindow = mainWindow;
+            mainWindow.Show();
+        }
+        catch (Exception ex) when (ex is ArgumentException
+                                   or IOException
+                                   or UnauthorizedAccessException
+                                   or NotSupportedException)
+        {
+            MessageBox.Show(
+                $"无法初始化桌面端数据目录。\n\n{ex.Message}",
+                "Navisworks MCP 启动失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            Shutdown(-1);
+        }
     }
 
     internal void RefreshSystemTheme()

@@ -8,3 +8,4 @@ navisworks-desktop/sessions.json
 *.user
 *.suo
 .nuget/
+.claude/settings.local.json

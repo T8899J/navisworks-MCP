@@ -6,6 +6,7 @@ using System.Text.Json.Serialization;
 using System.Windows;
 using System.Windows.Input;
 using NavisworksMcp.Console.Bridge;
+using NavisworksMcp.Desktop.Runtime;
 using NavisworksMcp.Desktop.Services;
 
 namespace NavisworksMcp.Desktop.ViewModels;
@@ -14,15 +15,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 {
     private const int FixedContextWindowTokens = 16384;
 
-    private static readonly string AppDataDirectory = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "NavisworksMcpDesktop");
-
+    private readonly ApplicationRuntimeContext _runtimeContext;
     private readonly BridgeClient _bridge;
     private readonly CancellationTokenSource _cts = new();
-    private readonly string _sessionsPath = Path.Combine(AppDataDirectory, "sessions.json");
-    private readonly string _sessionsBackupPath = Path.Combine(AppDataDirectory, "sessions.backup.json");
-    private readonly string _settingsPath = Path.Combine(AppDataDirectory, "settings.json");
+    private readonly string _sessionsPath;
+    private readonly string _sessionsBackupPath;
+    private readonly string _settingsPath;
     private OllamaClient? _llm;
     private CancellationTokenSource? _llmConnectCts;
     private CancellationTokenSource? _turnCts;
@@ -146,8 +144,13 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public ObservableCollection<string> AvailableModels { get; } = new();
     public ObservableCollection<ManagedExtensionItem> Plugins { get; } = new();
     public ObservableCollection<ManagedExtensionItem> Skills { get; } = new();
-    public string ConversationSavePath => AppDataDirectory;
+    public string ConversationSavePath => _runtimeContext.AppDataPathProvider.RootDirectory;
     public string ConversationSaveFile => _sessionsPath;
+    public string RuntimeProfileLabel =>
+        $"{_runtimeContext.AppDataPathProvider.BuildConfiguration} · {_runtimeContext.AppDataPathProvider.SourceDescription}";
+    public string RuntimeDiagnostics => _runtimeContext.BuildDiagnosticReport(
+        NavisworksStatus,
+        EndpointReader.GetDefaultEndpointFile());
 
     public string SettingsModel
     {
@@ -160,6 +163,13 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         get => _isSettingsOpen;
         private set { _isSettingsOpen = value; OnPropertyChanged(); }
+    }
+
+    private bool _isDiagnosticsOpen;
+    public bool IsDiagnosticsOpen
+    {
+        get => _isDiagnosticsOpen;
+        private set { _isDiagnosticsOpen = value; OnPropertyChanged(); }
     }
 
     private string _settingsPage = "conversation";
@@ -257,7 +267,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public string NavisworksStatus
     {
         get => _navisworksStatus;
-        private set { _navisworksStatus = value; OnPropertyChanged(); }
+        private set
+        {
+            _navisworksStatus = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(RuntimeDiagnostics));
+        }
     }
 
     // ── Commands ────────────────────────────────────────
@@ -275,6 +290,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public ICommand DeleteSessionCommand { get; }
     public ICommand OpenSettingsCommand { get; }
     public ICommand CloseSettingsCommand { get; }
+    public ICommand OpenDiagnosticsCommand { get; }
+    public ICommand CloseDiagnosticsCommand { get; }
     public ICommand SelectSettingsPageCommand { get; }
     public ICommand SelectExtensionPageCommand { get; }
     public ICommand AddPluginCommand { get; }
@@ -283,8 +300,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     // ── Constructor ────────────────────────────────────
 
-    public MainViewModel()
+    public MainViewModel(ApplicationRuntimeContext runtimeContext)
     {
+        _runtimeContext = runtimeContext ?? throw new ArgumentNullException(nameof(runtimeContext));
+        _sessionsPath = runtimeContext.SessionsFile;
+        _sessionsBackupPath = runtimeContext.SessionsBackupFile;
+        _settingsPath = runtimeContext.SettingsFile;
         _bridge = new BridgeClient();
 
         LoadSettings();
@@ -324,8 +345,19 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         DeleteSessionCommand = new RelayCommand(
             session => DeleteSession(session as ChatSessionItem),
             _ => !IsBusy);
-        OpenSettingsCommand = new RelayCommand(_ => IsSettingsOpen = true);
+        OpenSettingsCommand = new RelayCommand(_ =>
+        {
+            IsDiagnosticsOpen = false;
+            IsSettingsOpen = true;
+        });
         CloseSettingsCommand = new RelayCommand(_ => IsSettingsOpen = false);
+        OpenDiagnosticsCommand = new RelayCommand(_ =>
+        {
+            IsSettingsOpen = false;
+            OnPropertyChanged(nameof(RuntimeDiagnostics));
+            IsDiagnosticsOpen = true;
+        });
+        CloseDiagnosticsCommand = new RelayCommand(_ => IsDiagnosticsOpen = false);
         SelectSettingsPageCommand = new RelayCommand(page => SelectSettingsPage(page as string));
         SelectExtensionPageCommand = new RelayCommand(page => SelectExtensionPage(page as string));
         AddPluginCommand = new RelayCommand(
@@ -1450,6 +1482,7 @@ public sealed record AppSettingsSnapshot(
 public sealed class ChatMessage : INotifyPropertyChanged
 {
     private string _content = "";
+    private bool _isCopied;
 
     public string Role { get; set; } = ""; // user, ai, tool, system, error
 
@@ -1491,6 +1524,24 @@ public sealed class ChatMessage : INotifyPropertyChanged
 
     [JsonIgnore]
     public bool HasThinking => !string.IsNullOrEmpty(ThinkingText);
+
+    [JsonIgnore]
+    public bool IsCopied
+    {
+        get => _isCopied;
+        set
+        {
+            if (_isCopied == value)
+                return;
+
+            _isCopied = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsCopied)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CopyToolTip)));
+        }
+    }
+
+    [JsonIgnore]
+    public string CopyToolTip => IsCopied ? "已复制" : "复制";
 
     [JsonIgnore]
     public string Sender => Role switch

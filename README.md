@@ -104,13 +104,25 @@ dotnet build navisworks-desktop\NavisworksMcp.Desktop
 最小化/最大化/关闭命令；亮暗色跟随 Windows 应用主题。Windows 11 下还会请求系统 DWM 圆角
 与边框，较旧系统继续使用 WPF `WindowChrome` 的兼容行为。
 
-会话与设置存在 `%LOCALAPPDATA%\NavisworksMcpDesktop\`：`sessions.json` 是主会话文件，
-`sessions.backup.json` 是可回退副本，`settings.json` 保存模型、推理模式和上次活动会话。
-启动时会恢复上次活动会话；主会话文件不可读时会尝试备份，两个文件都不可读时不会用空历史
-覆盖原文件。模型只能调用上面那 9 个工具，白名单之外的调用一律拦掉。
+Production 会话与设置存在 `%LOCALAPPDATA%\NavisworksMcpDesktop\`，Debug 默认使用独立的
+`%LOCALAPPDATA%\NavisworksMcpDesktop.Debug\`。每个目录中的 `sessions.json` 是主会话文件，
+`sessions.backup.json` 是可回退副本，`settings.json` 保存模型、推理模式和上次活动会话，
+`startup.log` 记录每次启动的版本、Commit、EXE 和实际数据目录。窗口右上角“•••”可直接查看
+当前 Runtime Context。两个默认目录不会自动互相迁移。
 
-> 如果“最近”列表意外为空，应从资源管理器正常启动成品，并核对真实的上述目录。受限自动化或
-> 沙箱环境可能看到虚拟化的 `%LOCALAPPDATA%` 文件视图，不能用其直接启动结果代替用户侧验收。
+自动化或临时验收必须显式指定一次性数据目录，不能读取真实用户会话：
+
+```powershell
+$testData = Join-Path $env:TEMP ("NavisworksMcpDesktop.Tests\" + [guid]::NewGuid())
+& .\navisworks-desktop\NavisworksMcp.Desktop\bin\Debug\net8.0-windows\NavisworksMcpDesktop.exe --data-dir $testData
+```
+
+也可设置 `NAVISWORKS_MCP_DESKTOP_DATA_DIR`；`--data-dir` 的优先级更高。启动时会恢复所选目录中的
+上次活动会话；主会话文件不可读时会尝试备份，两个文件都不可读时不会用空历史覆盖原文件。
+模型只能调用上面那 9 个工具，白名单之外的调用一律拦掉。
+
+> 如果“最近”列表意外为空，先打开右上角“•••”核对构建配置与实际数据目录。用户侧验收应从
+> 资源管理器正常启动；自动化启动必须传独立 `--data-dir`，不能用沙箱默认目录代替用户数据。
 
 > 桌面端不在 `scripts\build.ps1` 和 `install.ps1` 的交付链里，属于本地工具。
 > 它所需的 `Bridge\*.cs` 原先从已删除的 `navisworks-console` 链入，现已并入桌面端自有源码。

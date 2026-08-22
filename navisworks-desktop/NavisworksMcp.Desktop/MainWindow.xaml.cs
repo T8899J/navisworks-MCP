@@ -12,6 +12,7 @@ using System.Windows.Interop;
 using System.Windows.Media.Animation;
 using System.Windows.Media;
 using System.Windows.Threading;
+using NavisworksMcp.Desktop.Runtime;
 using NavisworksMcp.Desktop.ViewModels;
 
 namespace NavisworksMcp.Desktop;
@@ -42,6 +43,7 @@ public partial class MainWindow : Window
     private long _chatScrollStartTimestamp;
     private bool _isChatScrollAnimating;
     private readonly DispatcherTimer _flyoutCloseTimer;
+    private readonly Dictionary<ChatMessage, DispatcherTimer> _copyFeedbackTimers = new();
     private Popup? _pendingFlyoutClose;
     private bool _sidebarOpen = true;
     private int _sidebarAnimationVersion;
@@ -95,14 +97,15 @@ public partial class MainWindow : Window
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetMonitorInfo(IntPtr monitorHandle, ref MonitorInfo monitorInfo);
 
-    public MainWindow()
+    internal MainWindow(ApplicationRuntimeContext runtimeContext)
     {
+        ArgumentNullException.ThrowIfNull(runtimeContext);
         _flyoutCloseTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(180)
         };
         _flyoutCloseTimer.Tick += FlyoutCloseTimer_Tick;
-        _vm = new MainViewModel();
+        _vm = new MainViewModel(runtimeContext);
         DataContext = _vm;
         InitializeComponent();
         Loaded += OnLoaded;
@@ -126,22 +129,7 @@ public partial class MainWindow : Window
         {
             Clipboard.SetText(message.Content);
 
-            if (sender is System.Windows.Controls.Button button)
-            {
-                // Check-mark feedback for ~2 s (Lucide check), then back to
-                // the copy icon. The template swaps icons on Tag="copied".
-                button.Tag = "copied";
-                var feedback = new System.Windows.Threading.DispatcherTimer(
-                    TimeSpan.FromSeconds(2),
-                    System.Windows.Threading.DispatcherPriority.Background,
-                    (timer, _) =>
-                    {
-                        ((System.Windows.Threading.DispatcherTimer)timer).Stop();
-                        button.Tag = "";
-                    },
-                    Dispatcher);
-                feedback.Start();
-            }
+            ShowCopyFeedback(message);
         }
 
         e.Handled = true;
@@ -157,7 +145,34 @@ public partial class MainWindow : Window
             _observedMessages.CollectionChanged -= Messages_CollectionChanged;
         StopChatScrollAnimation();
         _flyoutCloseTimer.Stop();
+        foreach (var timer in _copyFeedbackTimers.Values)
+            timer.Stop();
+        _copyFeedbackTimers.Clear();
         _vm.Dispose();
+    }
+
+    private void ShowCopyFeedback(ChatMessage message)
+    {
+        if (_copyFeedbackTimers.Remove(message, out var existingTimer))
+            existingTimer.Stop();
+
+        message.IsCopied = true;
+        var feedbackTimer = new DispatcherTimer(
+            TimeSpan.FromMilliseconds(1800),
+            DispatcherPriority.Background,
+            (sender, _) =>
+            {
+                if (sender is not DispatcherTimer timer)
+                    return;
+
+                timer.Stop();
+                _copyFeedbackTimers.Remove(message);
+                message.IsCopied = false;
+            },
+            Dispatcher);
+
+        _copyFeedbackTimers[message] = feedbackTimer;
+        feedbackTimer.Start();
     }
 
     private void OnSourceInitialized(object? sender, EventArgs e)
@@ -424,6 +439,13 @@ public partial class MainWindow : Window
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.Escape && _vm.IsDiagnosticsOpen)
+        {
+            _vm.CloseDiagnosticsCommand.Execute(null);
+            e.Handled = true;
+            return;
+        }
+
         if (e.Key != Key.B || Keyboard.Modifiers != ModifierKeys.Control)
             return;
 

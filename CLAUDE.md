@@ -76,9 +76,13 @@ args = ['C:\Users\BOY\AppData\Local\NavisworksCodexMcp\mcp-server\navisworks-mcp
   右键标题栏应打开标准窗口菜单。左上角只保留侧栏开关，不再显示应用图标或标题文字。
 - 改标题栏、主题或弹出菜单后，除 `dotnet build` 外还要真实验证亮/暗主题、最小化、
   最大化/还原、关闭、系统菜单，以及模型/推理菜单；桌面端目前没有自动化 UI 测试。
-- 桌面端会话验收不能只看 Codex/自动化工具直接启动的进程，也不能只读沙箱内的
-  `%LOCALAPPDATA%`。受限环境可能看到虚拟化文件视图；必须从资源管理器正常启动成品，并在
-  沙箱外核验真实 `%LOCALAPPDATA%\NavisworksMcpDesktop\` 后，才能判断用户会话是否已恢复。
+- 桌面端数据目录只能由 `Runtime/AppDataPathProvider.cs` 解析：Production 默认
+  `%LOCALAPPDATA%\NavisworksMcpDesktop`，Debug 默认 `%LOCALAPPDATA%\NavisworksMcpDesktop.Debug`。
+  不要在业务代码重新裸调 `Environment.SpecialFolder.LocalApplicationData`，也不要通过判断
+  “是否由 Codex 启动”选路径。
+- Codex/自动化启动桌面端时必须用 `--data-dir <独立临时目录>` 或
+  `NAVISWORKS_MCP_DESKTOP_DATA_DIR` 显式隔离，禁止读取默认用户会话。真实用户验收仍从资源管理器
+  启动，并用右上角“•••”诊断界面和沙箱外目录共同核对路径。
 
 ## 命令速查
 
@@ -114,7 +118,9 @@ dotnet build navisworks-desktop\NavisworksMcp.Desktop
 | 插件端点发现 | `%LOCALAPPDATA%\NavisworksCodexMcp\endpoint.json` |
 | 插件安装位置 | `%APPDATA%\Autodesk\ApplicationPlugins\NavisworksCodexMcp.bundle` |
 | mcp-server 安装位置 | `%LOCALAPPDATA%\NavisworksCodexMcp\mcp-server` |
-| 桌面端会话与设置 | `%LOCALAPPDATA%\NavisworksMcpDesktop\{sessions.json,sessions.backup.json,settings.json}` |
+| 桌面端 Production 数据 | `%LOCALAPPDATA%\NavisworksMcpDesktop\{sessions.json,sessions.backup.json,settings.json,startup.log}` |
+| 桌面端 Debug 数据 | `%LOCALAPPDATA%\NavisworksMcpDesktop.Debug\{sessions.json,sessions.backup.json,settings.json,startup.log}` |
+| 桌面端自动化数据 | 必须通过 `--data-dir` 或 `NAVISWORKS_MCP_DESKTOP_DATA_DIR` 指向独立临时目录 |
 | 桌面端 LLM | 本地 Ollama `http://localhost:11434`，默认模型 `qwen3.5:9b-q4_K_M` |
 | 桌面端上下文窗口 | 固定 16384 tokens（`FixedContextWindowTokens`） |
 
