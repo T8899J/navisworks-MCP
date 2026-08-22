@@ -352,7 +352,7 @@
                                                Foreground="{DynamicResource TextPrimaryBrush}" />
                                 </Border>
                                 <Button Style="{StaticResource CopyMessageButton}" Click="CopyMessage_Click"
-                                        HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="-32,0,0,0"
+                                        HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,5,3"
                                         AutomationProperties.Name="复制消息" />
                             </Grid>
 
@@ -501,7 +501,7 @@
                                 </TextBlock>
                             </StackPanel>
                                 <Button Style="{StaticResource CopyMessageButton}" Click="CopyMessage_Click"
-                                        HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-30,2"
+                                        HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="4,0,0,2"
                                         AutomationProperties.Name="复制回复" />
                             </Grid>
                         </Grid>
