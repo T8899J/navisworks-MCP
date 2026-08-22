@@ -354,11 +354,12 @@
                                                                          rotates 90° to point down when expanded.
                                                                          Square layout box + centered geometry +
                                                                          origin 0.5,0.5 keep it anchored while
-                                                                         rotating. -->
-                                                                    <Path Width="10" Height="10"
+                                                                         rotating; both header children align on
+                                                                         the panel's center line. -->
+                                                                    <Path Width="14" Height="14"
                                                                           Margin="6,0,0,0"
                                                                           VerticalAlignment="Center"
-                                                                          Data="M 2.75 2.75 L 7.25 5 L 2.75 7.25"
+                                                                          Data="M 4 3.75 L 10 7 L 4 10.25"
                                                                           RenderTransformOrigin="0.5,0.5"
                                                                           Stroke="{DynamicResource TextMutedBrush}"
                                                                           StrokeThickness="2"
