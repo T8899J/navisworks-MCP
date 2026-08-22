@@ -354,7 +354,6 @@ public sealed class OllamaClient : IDisposable
         var promptEvalCount = 0;
         var evalCount = 0;
         var thinking = new StringBuilder();
-        var lastThinkingReported = 0;
 
         await using var stream = await response.Content.ReadAsStreamAsync(idleCts.Token);
         using var reader = new StreamReader(stream, Encoding.UTF8);
@@ -382,17 +381,13 @@ public sealed class OllamaClient : IDisposable
                     var thinkingDelta = thinkingElement.GetString();
                     if (!string.IsNullOrEmpty(thinkingDelta))
                     {
+                        // Same per-delta pattern as the content stream: the
+                        // full accumulated chain goes out on every chunk, so
+                        // the expander renders it live like a typing effect.
                         thinking.Append(thinkingDelta);
-                        // Throttle: one full-text update per ~200 chars instead
-                        // of per token, so the UI does not re-render the whole
-                        // chain on every delta.
-                        if (thinking.Length - lastThinkingReported >= 200)
-                        {
-                            lastThinkingReported = thinking.Length;
-                            onUpdate?.Invoke(new LlmStreamUpdate(
-                                LlmStreamKind.Thinking,
-                                thinking.ToString()));
-                        }
+                        onUpdate?.Invoke(new LlmStreamUpdate(
+                            LlmStreamKind.Thinking,
+                            thinking.ToString()));
                     }
                 }
 
@@ -422,15 +417,6 @@ public sealed class OllamaClient : IDisposable
                             evalElement.TryGetInt32(out var parsedEval)
                     ? parsedEval
                     : 0;
-
-                // Flush any throttled thinking tail so the placeholder shows
-                // the complete chain before content or a tool status takes over.
-                if (thinking.Length > lastThinkingReported)
-                {
-                    onUpdate?.Invoke(new LlmStreamUpdate(
-                        LlmStreamKind.Thinking,
-                        thinking.ToString()));
-                }
             }
         }
 
