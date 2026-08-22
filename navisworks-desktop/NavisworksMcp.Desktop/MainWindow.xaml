@@ -348,21 +348,53 @@
                                                                 </ToggleButton.Template>
                                                                 <StackPanel Orientation="Horizontal">
                                                                     <TextBlock Text="深度思考" FontSize="12" FontWeight="SemiBold"
+                                                                               VerticalAlignment="Center"
                                                                                Foreground="{DynamicResource TextMutedBrush}" />
-                                                                    <TextBlock Margin="6,0,0,0" FontSize="11"
-                                                                               Foreground="{DynamicResource TextMutedBrush}"
-                                                                               Text="˄">
-                                                                        <TextBlock.Style>
-                                                                            <Style TargetType="TextBlock">
-                                                                                <Setter Property="Text" Value="˄" />
+                                                                    <!-- Chevron points right when collapsed,
+                                                                         rotates 90° to point down when expanded. -->
+                                                                    <Path Margin="7,1,0,0"
+                                                                          VerticalAlignment="Center"
+                                                                          Data="M 0 0 L 4.5 4.5 L 0 9"
+                                                                          Stroke="{DynamicResource TextMutedBrush}"
+                                                                          StrokeThickness="2"
+                                                                          StrokeStartLineCap="Round"
+                                                                          StrokeEndLineCap="Round"
+                                                                          StrokeLineJoin="Round">
+                                                                        <Path.Style>
+                                                                            <Style TargetType="Path">
+                                                                                <Setter Property="RenderTransform">
+                                                                                    <Setter.Value>
+                                                                                        <RotateTransform Angle="0" />
+                                                                                    </Setter.Value>
+                                                                                </Setter>
                                                                                 <Style.Triggers>
                                                                                     <DataTrigger Binding="{Binding IsExpanded, RelativeSource={RelativeSource AncestorType=Expander}}" Value="True">
-                                                                                        <Setter Property="Text" Value="˅" />
+                                                                                        <Setter Property="RenderTransform">
+                                                                                            <Setter.Value>
+                                                                                                <RotateTransform Angle="90" />
+                                                                                            </Setter.Value>
+                                                                                        </Setter>
+                                                                                        <DataTrigger.EnterActions>
+                                                                                            <BeginStoryboard>
+                                                                                                <Storyboard>
+                                                                                                    <DoubleAnimation Storyboard.TargetProperty="(Path.RenderTransform).(RotateTransform.Angle)"
+                                                                                                                     To="90" Duration="0:0:0.16" />
+                                                                                                </Storyboard>
+                                                                                            </BeginStoryboard>
+                                                                                        </DataTrigger.EnterActions>
+                                                                                        <DataTrigger.ExitActions>
+                                                                                            <BeginStoryboard>
+                                                                                                <Storyboard>
+                                                                                                    <DoubleAnimation Storyboard.TargetProperty="(Path.RenderTransform).(RotateTransform.Angle)"
+                                                                                                                     To="0" Duration="0:0:0.16" />
+                                                                                                </Storyboard>
+                                                                                            </BeginStoryboard>
+                                                                                        </DataTrigger.ExitActions>
                                                                                     </DataTrigger>
                                                                                 </Style.Triggers>
                                                                             </Style>
-                                                                        </TextBlock.Style>
-                                                                    </TextBlock>
+                                                                        </Path.Style>
+                                                                    </Path>
                                                                 </StackPanel>
                                                             </ToggleButton>
                                                             <ContentPresenter x:Name="ExpandSite"
