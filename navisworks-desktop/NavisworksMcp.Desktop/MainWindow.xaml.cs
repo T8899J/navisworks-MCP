@@ -127,6 +127,18 @@ public partial class MainWindow : Window
             Clipboard.SetText(message.Content);
         }
 
+        // TEMPORARY layout diagnostics: shell vs button rects on the window
+        // title, standing in for getBoundingClientRect(). Remove together
+        // with the colored debug outlines once anchoring is confirmed.
+        if ((sender as FrameworkElement)?.Parent is Grid shell)
+        {
+            var shellTopLeft = shell.TransformToVisual(this).Transform(new Point(0, 0));
+            var button = (FrameworkElement)sender!;
+            var buttonTopLeft = button.TransformToVisual(this).Transform(new Point(0, 0));
+            Title = $"shell=({shellTopLeft.X:F0},{shellTopLeft.Y:F0} {shell.ActualWidth:F0}x{shell.ActualHeight:F0}) "
+                  + $"btn=({buttonTopLeft.X:F0},{buttonTopLeft.Y:F0} {button.ActualWidth:F0}x{button.ActualHeight:F0})";
+        }
+
         e.Handled = true;
     }
 
