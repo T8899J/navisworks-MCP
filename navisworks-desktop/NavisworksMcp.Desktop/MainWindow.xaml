@@ -326,16 +326,61 @@
                                 </StackPanel.Style>
                                 <!-- Collapsible reasoning chain: expanded while
                                      streaming (IsTransient), collapsed once the
-                                     reply lands, still expandable afterwards. -->
+                                     reply lands, still expandable afterwards.
+                                     Minimal template: plain-text header with a
+                                     bare caret glyph instead of the themed
+                                     circle-arrow toggle. -->
                                 <Expander Margin="0,0,0,8"
                                           IsExpanded="{Binding IsTransient, Mode=OneWay}"
                                           Visibility="{Binding HasThinking, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <Expander.Header>
-                                        <TextBlock Text="深度思考" FontSize="12" FontWeight="SemiBold"
-                                                   Foreground="{DynamicResource TextMutedBrush}" />
-                                    </Expander.Header>
+                                    <Expander.Style>
+                                        <Style TargetType="Expander">
+                                            <Setter Property="Template">
+                                                <Setter.Value>
+                                                    <ControlTemplate TargetType="Expander">
+                                                        <StackPanel>
+                                                            <ToggleButton Cursor="Hand"
+                                                                          IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+                                                                <ToggleButton.Template>
+                                                                    <ControlTemplate TargetType="ToggleButton">
+                                                                        <ContentPresenter />
+                                                                    </ControlTemplate>
+                                                                </ToggleButton.Template>
+                                                                <StackPanel Orientation="Horizontal">
+                                                                    <TextBlock Text="深度思考" FontSize="12" FontWeight="SemiBold"
+                                                                               Foreground="{DynamicResource TextMutedBrush}" />
+                                                                    <TextBlock Margin="6,0,0,0" FontSize="11"
+                                                                               Foreground="{DynamicResource TextMutedBrush}"
+                                                                               Text="˄">
+                                                                        <TextBlock.Style>
+                                                                            <Style TargetType="TextBlock">
+                                                                                <Setter Property="Text" Value="˄" />
+                                                                                <Style.Triggers>
+                                                                                    <DataTrigger Binding="{Binding IsExpanded, RelativeSource={RelativeSource AncestorType=Expander}}" Value="True">
+                                                                                        <Setter Property="Text" Value="˅" />
+                                                                                    </DataTrigger>
+                                                                                </Style.Triggers>
+                                                                            </Style>
+                                                                        </TextBlock.Style>
+                                                                    </TextBlock>
+                                                                </StackPanel>
+                                                            </ToggleButton>
+                                                            <ContentPresenter x:Name="ExpandSite"
+                                                                              Visibility="Collapsed"
+                                                                              Content="{TemplateBinding Content}" />
+                                                        </StackPanel>
+                                                        <ControlTemplate.Triggers>
+                                                            <Trigger Property="IsExpanded" Value="True">
+                                                                <Setter TargetName="ExpandSite" Property="Visibility" Value="Visible" />
+                                                            </Trigger>
+                                                        </ControlTemplate.Triggers>
+                                                    </ControlTemplate>
+                                                </Setter.Value>
+                                            </Setter>
+                                        </Style>
+                                    </Expander.Style>
                                     <TextBlock Text="{Binding ThinkingText}" FontSize="12"
-                                               TextWrapping="Wrap" LineHeight="19"
+                                               TextWrapping="Wrap" LineHeight="19" Margin="14,4,0,0"
                                                Foreground="{DynamicResource TextMutedBrush}" />
                                 </Expander>
 
