@@ -2,10 +2,10 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Windows;
 using System.Windows.Input;
 using NavisworksMcp.Console.Bridge;
+using NavisworksMcp.Desktop.Models;
 using NavisworksMcp.Desktop.Runtime;
 using NavisworksMcp.Desktop.Services;
 
@@ -16,11 +16,10 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private const int FixedContextWindowTokens = 16384;
 
     private readonly ApplicationRuntimeContext _runtimeContext;
+    private readonly IConversationSessionRepository _sessionRepository;
+    private readonly ISettingsRepository _settingsRepository;
     private readonly BridgeClient _bridge;
     private readonly CancellationTokenSource _cts = new();
-    private readonly string _sessionsPath;
-    private readonly string _sessionsBackupPath;
-    private readonly string _settingsPath;
     private OllamaClient? _llm;
     private CancellationTokenSource? _llmConnectCts;
     private CancellationTokenSource? _turnCts;
@@ -145,7 +144,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public ObservableCollection<ManagedExtensionItem> Plugins { get; } = new();
     public ObservableCollection<ManagedExtensionItem> Skills { get; } = new();
     public string ConversationSavePath => _runtimeContext.AppDataPathProvider.RootDirectory;
-    public string ConversationSaveFile => _sessionsPath;
+    public string ConversationSaveFile => _runtimeContext.SessionsFile;
     public string RuntimeProfileLabel =>
         $"{_runtimeContext.AppDataPathProvider.BuildConfiguration} · {_runtimeContext.AppDataPathProvider.SourceDescription}";
     public string RuntimeDiagnostics => _runtimeContext.BuildDiagnosticReport(
@@ -300,12 +299,14 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     // ── Constructor ────────────────────────────────────
 
-    public MainViewModel(ApplicationRuntimeContext runtimeContext)
+    public MainViewModel(
+        ApplicationRuntimeContext runtimeContext,
+        IConversationSessionRepository sessionRepository,
+        ISettingsRepository settingsRepository)
     {
         _runtimeContext = runtimeContext ?? throw new ArgumentNullException(nameof(runtimeContext));
-        _sessionsPath = runtimeContext.SessionsFile;
-        _sessionsBackupPath = runtimeContext.SessionsBackupFile;
-        _settingsPath = runtimeContext.SettingsFile;
+        _sessionRepository = sessionRepository ?? throw new ArgumentNullException(nameof(sessionRepository));
+        _settingsRepository = settingsRepository ?? throw new ArgumentNullException(nameof(settingsRepository));
         _bridge = new BridgeClient();
 
         LoadSettings();
@@ -509,29 +510,16 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void LoadSessions()
     {
-        var primaryExists = File.Exists(_sessionsPath);
-        var backupExists = File.Exists(_sessionsBackupPath);
-        if (!primaryExists && !backupExists)
+        var loadResult = _sessionRepository.Load();
+        _canPersistSessions = loadResult.CanPersist;
+        if (!loadResult.CanPersist || loadResult.Source == SessionLoadSource.None)
             return;
-
-        var loadedFromBackup = false;
-        if (!TryReadSessionSnapshots(_sessionsPath, out var snapshots))
-        {
-            if (!TryReadSessionSnapshots(_sessionsBackupPath, out snapshots))
-            {
-                // Never overwrite unreadable history with an empty collection on shutdown.
-                _canPersistSessions = false;
-                return;
-            }
-
-            loadedFromBackup = true;
-        }
 
         try
         {
             var loadedSessions = new List<ChatSessionItem>();
             var removedLegacyIntermediateMessages = false;
-            foreach (var snapshot in snapshots
+            foreach (var snapshot in loadResult.Snapshots
                          .OrderByDescending(item => item.UpdatedAt)
                          .Take(30))
             {
@@ -560,7 +548,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             foreach (var session in loadedSessions)
                 Sessions.Add(session);
 
-            if (loadedFromBackup || removedLegacyIntermediateMessages)
+            if (loadResult.Source == SessionLoadSource.Backup || removedLegacyIntermediateMessages)
                 SaveSessions();
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
@@ -571,80 +559,24 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private static bool TryReadSessionSnapshots(
-        string path,
-        out List<ChatSessionSnapshot> snapshots)
-    {
-        snapshots = new List<ChatSessionSnapshot>();
-        if (!File.Exists(path))
-            return false;
-
-        try
-        {
-            snapshots = JsonSerializer.Deserialize<List<ChatSessionSnapshot>>(
-                File.ReadAllText(path)) ?? new List<ChatSessionSnapshot>();
-            return true;
-        }
-        catch (Exception ex) when (ex is IOException
-                                   or UnauthorizedAccessException
-                                   or JsonException
-                                   or NotSupportedException)
-        {
-            return false;
-        }
-    }
-
     private void SaveSessions()
     {
         if (!_canPersistSessions)
             return;
 
-        try
-        {
-            var directory = Path.GetDirectoryName(_sessionsPath);
-            if (!string.IsNullOrWhiteSpace(directory))
-                Directory.CreateDirectory(directory);
+        var snapshots = Sessions
+            .OrderByDescending(session => session.UpdatedAt)
+            .Take(30)
+            .Select(session => new ChatSessionSnapshot(
+                session.Id,
+                session.Title,
+                session.Preview,
+                session.UpdatedAt,
+                session.Messages.TakeLast(100).ToList(),
+                session.ContextTokensUsed))
+            .ToList();
 
-            var snapshots = Sessions
-                .OrderByDescending(session => session.UpdatedAt)
-                .Take(30)
-                .Select(session => new ChatSessionSnapshot(
-                    session.Id,
-                    session.Title,
-                    session.Preview,
-                    session.UpdatedAt,
-                    session.Messages.TakeLast(100).ToList(),
-                    session.ContextTokensUsed))
-                .ToList();
-            var json = JsonSerializer.Serialize(
-                snapshots,
-                new JsonSerializerOptions { WriteIndented = true });
-
-            WriteTextAtomically(_sessionsPath, json);
-            WriteTextAtomically(_sessionsBackupPath, json);
-        }
-        catch (Exception ex) when (ex is IOException
-                                   or UnauthorizedAccessException
-                                   or JsonException
-                                   or NotSupportedException)
-        {
-            // The chat still works if local history cannot be persisted.
-        }
-    }
-
-    private static void WriteTextAtomically(string path, string content)
-    {
-        var temporaryPath = $"{path}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
-        try
-        {
-            File.WriteAllText(temporaryPath, content);
-            File.Move(temporaryPath, path, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-                File.Delete(temporaryPath);
-        }
+        _sessionRepository.TrySave(snapshots);
     }
 
     private static string BuildSessionTitle(string content)
@@ -821,11 +753,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         try
         {
-            if (!File.Exists(_settingsPath))
-                return;
-
-            var snapshot = JsonSerializer.Deserialize<AppSettingsSnapshot>(
-                File.ReadAllText(_settingsPath));
+            var snapshot = _settingsRepository.Load();
             if (snapshot is null)
                 return;
 
@@ -862,27 +790,15 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void SaveSettings()
     {
-        try
-        {
-            var directory = Path.GetDirectoryName(_settingsPath);
-            if (!string.IsNullOrWhiteSpace(directory))
-                Directory.CreateDirectory(directory);
+        var snapshot = new AppSettingsSnapshot(
+            LlmModel,
+            AvailableModels.ToList(),
+            Plugins.ToList(),
+            Skills.ToList(),
+            ReasoningMode,
+            _lastActiveSessionId);
 
-            var snapshot = new AppSettingsSnapshot(
-                LlmModel,
-                AvailableModels.ToList(),
-                Plugins.ToList(),
-                Skills.ToList(),
-                ReasoningMode,
-                _lastActiveSessionId);
-            WriteTextAtomically(
-                _settingsPath,
-                JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true }));
-        }
-        catch
-        {
-            // Settings remain usable in memory when local persistence is unavailable.
-        }
+        _settingsRepository.TrySave(snapshot);
     }
 
     // ── LLM ────────────────────────────────────────────
@@ -1363,206 +1279,6 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         // Token getter throw ObjectDisposedException.
     }
 }
-
-// ── Saved viewpoint ───────────────────────────────────
-
-public sealed class ChatSessionItem : INotifyPropertyChanged
-{
-    private string _title;
-    private string _preview;
-    private DateTimeOffset _updatedAt;
-    private bool _isActive;
-
-    public ChatSessionItem(
-        Guid id,
-        string title,
-        string preview,
-        DateTimeOffset updatedAt,
-        ObservableCollection<ChatMessage> messages)
-    {
-        Id = id;
-        _title = title;
-        _preview = preview;
-        _updatedAt = updatedAt;
-        Messages = messages;
-    }
-
-    public Guid Id { get; }
-    public ObservableCollection<ChatMessage> Messages { get; }
-    public int ContextTokensUsed { get; set; }
-
-    public string Title
-    {
-        get => _title;
-        set { _title = value; OnPropertyChanged(); }
-    }
-
-    public string Preview
-    {
-        get => _preview;
-        set { _preview = value; OnPropertyChanged(); }
-    }
-
-    public DateTimeOffset UpdatedAt
-    {
-        get => _updatedAt;
-        set
-        {
-            _updatedAt = value;
-            OnPropertyChanged();
-            OnPropertyChanged(nameof(UpdatedLabel));
-        }
-    }
-
-    public string UpdatedLabel => UpdatedAt.LocalDateTime.Date == DateTime.Today
-        ? UpdatedAt.LocalDateTime.ToString("HH:mm")
-        : UpdatedAt.LocalDateTime.ToString("MM-dd");
-
-    public bool IsActive
-    {
-        get => _isActive;
-        set { _isActive = value; OnPropertyChanged(); }
-    }
-
-    public event PropertyChangedEventHandler? PropertyChanged;
-    private void OnPropertyChanged([CallerMemberName] string? name = null)
-        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
-}
-
-public sealed record ChatSessionSnapshot(
-    Guid Id,
-    string Title,
-    string Preview,
-    DateTimeOffset UpdatedAt,
-    List<ChatMessage>? Messages,
-    int ContextTokensUsed = 0);
-
-public sealed class ManagedExtensionItem : INotifyPropertyChanged
-{
-    private bool _isEnabled;
-
-    public ManagedExtensionItem(Guid id, string name, string type, bool isEnabled)
-    {
-        Id = id;
-        Name = name;
-        Type = type;
-        _isEnabled = isEnabled;
-    }
-
-    public Guid Id { get; init; }
-    public string Name { get; init; }
-    public string Type { get; init; }
-
-    public bool IsEnabled
-    {
-        get => _isEnabled;
-        set
-        {
-            if (_isEnabled == value)
-                return;
-            _isEnabled = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsEnabled)));
-        }
-    }
-
-    public string TypeLabel => Type == "plugin" ? "插件" : "技能";
-    public event PropertyChangedEventHandler? PropertyChanged;
-}
-
-public sealed record AppSettingsSnapshot(
-    string SelectedModel,
-    List<string> Models,
-    List<ManagedExtensionItem> Plugins,
-    List<ManagedExtensionItem> Skills,
-    string? ReasoningMode = null,
-    Guid? ActiveSessionId = null);
-
-// ── ChatMessage ────────────────────────────────────────
-
-public sealed class ChatMessage : INotifyPropertyChanged
-{
-    private string _content = "";
-    private bool _isCopied;
-
-    public string Role { get; set; } = ""; // user, ai, tool, system, error
-
-    public string Content
-    {
-        get => _content;
-        set
-        {
-            if (_content == value)
-                return;
-            _content = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Content)));
-        }
-    }
-
-    // True while this message is a live streaming placeholder; excluded from
-    // previews, turn markers, and LLM history restore. Serialized so a file
-    // written mid-turn (crash) can be filtered out on the next load.
-    public bool IsTransient { get; set; }
-
-    private string _thinkingText = "";
-
-    // The model's reasoning chain for this message. Display-only: never sent
-    // back to the LLM and excluded from previews/turn markers via the same
-    // transient rules as Content. Serialized so finished messages keep their
-    // collapsible chain across restarts.
-    public string ThinkingText
-    {
-        get => _thinkingText;
-        set
-        {
-            if (_thinkingText == value)
-                return;
-            _thinkingText = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ThinkingText)));
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasThinking)));
-        }
-    }
-
-    [JsonIgnore]
-    public bool HasThinking => !string.IsNullOrEmpty(ThinkingText);
-
-    [JsonIgnore]
-    public bool IsCopied
-    {
-        get => _isCopied;
-        set
-        {
-            if (_isCopied == value)
-                return;
-
-            _isCopied = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsCopied)));
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CopyToolTip)));
-        }
-    }
-
-    [JsonIgnore]
-    public string CopyToolTip => IsCopied ? "已复制" : "复制";
-
-    [JsonIgnore]
-    public string Sender => Role switch
-    {
-        "user" => "你",
-        "ai" => "助手",
-        "tool" => "工具",
-        "system" => "系统",
-        "error" => "错误",
-        _ => ""
-    };
-    [JsonIgnore]
-    public bool ShowSender => Role is "user" or "ai" or "tool";
-
-    public event PropertyChangedEventHandler? PropertyChanged;
-}
-
-public sealed record ConversationTurnItem(
-    ChatMessage Anchor,
-    string UserPreview,
-    string AssistantPreview);
 
 // ── RelayCommand ───────────────────────────────────────
 

@@ -97,8 +97,12 @@ navisworks_status
 `qwen3.5:9b-q4_K_M`）。
 
 ```powershell
-dotnet build navisworks-desktop\NavisworksMcp.Desktop
+dotnet build navisworks-desktop\NavisworksMcp.Desktop --configuration Debug
+dotnet run --project navisworks-desktop\NavisworksMcp.Desktop.Tests --configuration Debug
 ```
+
+桌面端已把单条消息和运行诊断拆成独立 `Views`，会话/设置 JSON 则通过构造注入的仓储访问；
+`MainViewModel` 不再直接读写文件。轻量回归测试只使用一次性临时目录，不会读取用户会话。
 
 窗口外壳遵循 Windows 桌面习惯：32 px 自绘标题栏保留拖动、双击最大化、系统窗口菜单和标准
 最小化/最大化/关闭命令；亮暗色跟随 Windows 应用主题。Windows 11 下还会请求系统 DWM 圆角

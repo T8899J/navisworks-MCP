@@ -12,7 +12,9 @@ using System.Windows.Interop;
 using System.Windows.Media.Animation;
 using System.Windows.Media;
 using System.Windows.Threading;
+using NavisworksMcp.Desktop.Models;
 using NavisworksMcp.Desktop.Runtime;
+using NavisworksMcp.Desktop.Services;
 using NavisworksMcp.Desktop.ViewModels;
 
 namespace NavisworksMcp.Desktop;
@@ -43,7 +45,6 @@ public partial class MainWindow : Window
     private long _chatScrollStartTimestamp;
     private bool _isChatScrollAnimating;
     private readonly DispatcherTimer _flyoutCloseTimer;
-    private readonly Dictionary<ChatMessage, DispatcherTimer> _copyFeedbackTimers = new();
     private Popup? _pendingFlyoutClose;
     private bool _sidebarOpen = true;
     private int _sidebarAnimationVersion;
@@ -97,15 +98,20 @@ public partial class MainWindow : Window
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetMonitorInfo(IntPtr monitorHandle, ref MonitorInfo monitorInfo);
 
-    internal MainWindow(ApplicationRuntimeContext runtimeContext)
+    internal MainWindow(
+        ApplicationRuntimeContext runtimeContext,
+        IConversationSessionRepository sessionRepository,
+        ISettingsRepository settingsRepository)
     {
         ArgumentNullException.ThrowIfNull(runtimeContext);
+        ArgumentNullException.ThrowIfNull(sessionRepository);
+        ArgumentNullException.ThrowIfNull(settingsRepository);
         _flyoutCloseTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(180)
         };
         _flyoutCloseTimer.Tick += FlyoutCloseTimer_Tick;
-        _vm = new MainViewModel(runtimeContext);
+        _vm = new MainViewModel(runtimeContext, sessionRepository, settingsRepository);
         DataContext = _vm;
         InitializeComponent();
         Loaded += OnLoaded;
@@ -122,19 +128,6 @@ public partial class MainWindow : Window
         ScrollToLatestMessage();
     }
 
-    private void CopyMessage_Click(object sender, RoutedEventArgs e)
-    {
-        if ((sender as FrameworkElement)?.DataContext is ChatMessage message &&
-            !string.IsNullOrEmpty(message.Content))
-        {
-            Clipboard.SetText(message.Content);
-
-            ShowCopyFeedback(message);
-        }
-
-        e.Handled = true;
-    }
-
     private void OnClosed(object? sender, EventArgs e)
     {
         if (Application.Current is App app)
@@ -145,34 +138,7 @@ public partial class MainWindow : Window
             _observedMessages.CollectionChanged -= Messages_CollectionChanged;
         StopChatScrollAnimation();
         _flyoutCloseTimer.Stop();
-        foreach (var timer in _copyFeedbackTimers.Values)
-            timer.Stop();
-        _copyFeedbackTimers.Clear();
         _vm.Dispose();
-    }
-
-    private void ShowCopyFeedback(ChatMessage message)
-    {
-        if (_copyFeedbackTimers.Remove(message, out var existingTimer))
-            existingTimer.Stop();
-
-        message.IsCopied = true;
-        var feedbackTimer = new DispatcherTimer(
-            TimeSpan.FromMilliseconds(1800),
-            DispatcherPriority.Background,
-            (sender, _) =>
-            {
-                if (sender is not DispatcherTimer timer)
-                    return;
-
-                timer.Stop();
-                _copyFeedbackTimers.Remove(message);
-                message.IsCopied = false;
-            },
-            Dispatcher);
-
-        _copyFeedbackTimers[message] = feedbackTimer;
-        feedbackTimer.Start();
     }
 
     private void OnSourceInitialized(object? sender, EventArgs e)

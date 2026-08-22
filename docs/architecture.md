@@ -69,8 +69,12 @@ Claude Code 的在 `~/.claude.json` 的 `mcpServers.navisworks`，两者指向�
 | 文件 | 职责 |
 |---|---|
 | `Services/LlmService.cs` | `OllamaClient`：`http://localhost:11434`，默认模型 `qwen3.5:9b-q4_K_M`，解析 `tool_calls` |
-| `ViewModels/MainViewModel.cs` | 会话、设置、白名单 `AllowedAgentTools`、编排循环（大型文件） |
-| `MainWindow.xaml(.cs)` | 全部 UI（大型文件）；`Views/` 目录是空的 |
+| `ViewModels/MainViewModel.cs` | 会话状态、UI 命令、白名单 `AllowedAgentTools` 和编排循环（仍是大型文件） |
+| `Models/ConversationModels.cs` | 消息、会话快照、设置快照与扩展项等可持久化模型 |
+| `Services/JsonRepositories.cs` | 会话/设置仓储；主备回退、坏文件保护和原子 JSON 写入 |
+| `MainWindow.xaml(.cs)` | 窗口外壳、聊天滚动、输入和弹出菜单协调（仍是大型文件） |
+| `Views/MessageView.xaml(.cs)` | 单条消息、推理折叠、复制操作与局部反馈 |
+| `Views/DiagnosticsView.xaml(.cs)` | Runtime Context 诊断弹层 |
 | `Controls/MessageShell.cs` | 单条消息的内容/操作区边界；统一控制 hover/focus 可见性与左右对齐，避免复制按钮依赖正文内部布局 |
 | `Runtime/AppDataPathProvider.cs` | 唯一的桌面数据目录解析入口；区分 Production、Debug 和显式测试目录 |
 | `Runtime/ApplicationRuntimeContext.cs` | 汇总版本、Commit、EXE、用户、进程、数据路径和启动日志，供诊断界面读取 |
@@ -88,6 +92,9 @@ Claude Code 的在 `~/.claude.json` 的 `mcpServers.navisworks`，两者指向�
   不存这些文件。启动时先读主文件，失败后读备份；两者都不可读时禁用本次持久化，避免退出时
   用空集合覆盖历史。`sessions.json`（含备份）与 `settings.json` 均通过同目录临时文件后
   原子替换写入。
+- `MainViewModel` 不再直接调用 `File.*` 读写会话和设置；`App.xaml.cs` 在组合根创建
+  `JsonConversationSessionRepository` / `JsonSettingsRepository` 并通过构造函数注入。这样测试可显式
+  使用临时目录，也为后续 SQLite 迁移保留了稳定接口。
 - 每次启动向当前数据目录的 `startup.log` 追加 Runtime Context；会话标题栏右侧的“•••”打开
   诊断界面，直接显示构建配置、Commit、EXE、当前用户、实际数据目录、会话文件时间、Bridge
   端点和 Navisworks 状态。
@@ -126,11 +133,18 @@ Claude Code 的在 `~/.claude.json` 的 `mcpServers.navisworks`，两者指向�
 | 子项目 | 怎么构建 | 有测试吗 |
 |---|---|---|
 | `navisworks-plugin` | `scripts\build.ps1`（vswhere 找 MSBuild） | `tests/NavisworksCodexMcp.ProtocolTests` |
-| `navisworks-desktop` | **不在 build.ps1 里**，用 `dotnet build` | 无 |
+| `navisworks-desktop` | **不在 build.ps1 里**，用 `dotnet build` | `NavisworksMcp.Desktop.Tests` 轻量回归测试；无 UI 自动化 |
 
 `scripts\build.ps1` 现在只负责插件 + 插件测试 + 打包校验。它开头的 mcp-server `npm ci`/
 `npm run verify` 步骤已加 `Test-Path` 判空：源码目录不存在时打印 `SKIP:` 并跳过，
 直接复用 `artifacts\mcp-server\navisworks-mcp.mjs`。桌面端不进 `artifacts/`，也不进 `install.ps1`。
+
+桌面端测试不依赖测试框架包，沿用仓库现有的可执行回归测试形式。它覆盖 `--data-dir` 优先级、
+主会话损坏后的备份恢复、主备都损坏时禁止覆盖，以及设置往返；所有文件都只写入独立临时目录：
+
+```powershell
+dotnet run --project navisworks-desktop\NavisworksMcp.Desktop.Tests --configuration Debug
+```
 
 构建被 `Permission denied` 挡住时，通常是 VS Code 的 Roslyn 语言服务器
 （`Microsoft.CodeAnalysis.LanguageServer.exe`）或 C# Dev Kit BuildHost 持有 `obj\` 目录句柄。

@@ -3,6 +3,7 @@ using System.Windows.Data;
 using System.Windows.Media;
 using Microsoft.Win32;
 using NavisworksMcp.Desktop.Runtime;
+using NavisworksMcp.Desktop.Services;
 
 namespace NavisworksMcp.Desktop;
 
@@ -27,7 +28,14 @@ public partial class App : Application
             var runtimeContext = ApplicationRuntimeContext.Create(appDataPathProvider);
             runtimeContext.WriteStartupLog();
 
-            var mainWindow = new MainWindow(runtimeContext);
+            var sessionRepository = new JsonConversationSessionRepository(
+                runtimeContext.SessionsFile,
+                runtimeContext.SessionsBackupFile);
+            var settingsRepository = new JsonSettingsRepository(runtimeContext.SettingsFile);
+            var mainWindow = new MainWindow(
+                runtimeContext,
+                sessionRepository,
+                settingsRepository);
             MainWindow = mainWindow;
             mainWindow.Show();
         }

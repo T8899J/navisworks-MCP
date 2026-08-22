@@ -83,6 +83,10 @@ args = ['C:\Users\BOY\AppData\Local\NavisworksCodexMcp\mcp-server\navisworks-mcp
 - Codex/自动化启动桌面端时必须用 `--data-dir <独立临时目录>` 或
   `NAVISWORKS_MCP_DESKTOP_DATA_DIR` 显式隔离，禁止读取默认用户会话。真实用户验收仍从资源管理器
   启动，并用右上角“•••”诊断界面和沙箱外目录共同核对路径。
+- 会话和设置 I/O 只能通过 `Services/JsonRepositories.cs` 的两个仓储接口访问；保持
+  `App.xaml.cs` 作为组合根并使用构造注入，不要把 `File.*` 重新塞回 `MainViewModel`。
+- 单条消息 UI 属于 `Views/MessageView.xaml(.cs)`，运行诊断属于 `Views/DiagnosticsView.xaml(.cs)`；
+  增加消息操作时优先扩展 `MessageView` / `MessageShell`，不要重新堆回主窗口模板。
 
 ## 命令速查
 
@@ -100,7 +104,8 @@ args = ['C:\Users\BOY\AppData\Local\NavisworksCodexMcp\mcp-server\navisworks-mcp
 
 ```powershell
 # 桌面端不在 scripts\build.ps1 里，只能单独 dotnet 构建
-dotnet build navisworks-desktop\NavisworksMcp.Desktop
+dotnet build navisworks-desktop\NavisworksMcp.Desktop --configuration Debug
+dotnet run --project navisworks-desktop\NavisworksMcp.Desktop.Tests --configuration Debug
 ```
 
 构建被 `Permission denied` 挡住时，多半是 VS Code 的 Roslyn 语言服务器
@@ -153,10 +158,11 @@ dotnet build navisworks-desktop\NavisworksMcp.Desktop
 ## 已知技术债（不要「顺手重构」，先问）
 
 - 超过 800 行的文件：`MainViewModel.cs`、`MainWindow.xaml`、`NavisworksToolService.cs`。
-- `navisworks-desktop` **零测试**；仓库内只有 `navisworks-plugin/tests` 有覆盖
-  （`mcp-server/test` 随源码一并删除）。
+- `navisworks-desktop` 已有数据目录与 JSON 仓储的轻量回归测试，但仍没有 WPF UI 自动化；
+  标题栏、虚拟化滚动、消息 hover/focus 和真实用户会话仍需按上面的 GUI 验收边界检查。
 - 仓库于 2026-08-21 初始化了 git（基线 commit `a89598b`，此前无历史层）。
   改动照常提交；`artifacts/` 被 `.gitignore` 忽略，`navisworks-mcp.mjs` 不入库，
   另有仓库外备份 `D:\副业\项目\_backup_navisworks-mcp.mjs`。
-- `navisworks-desktop\NavisworksMcp.Desktop\Views\` 是空目录，UI 全在 `MainWindow.xaml` 里。
+- `MainWindow.xaml` 仍包含侧栏、输入区和大型设置中心；后续继续按稳定边界迁移到 `Views/`，
+  不要为了减少行数拆出相互引用窗口命名元素的薄包装。
 - `.nuget\packages` 与 `.npm-cache` 已删；下次 `build.ps1` 会重新下载 NuGet 包（约 130 MB）。
