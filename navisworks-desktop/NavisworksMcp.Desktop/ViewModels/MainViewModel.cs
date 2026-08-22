@@ -1142,14 +1142,23 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private static void ApplyStreamUpdate(ChatMessage message, LlmStreamUpdate update)
     {
-        message.Content = update.Kind switch
+        switch (update.Kind)
         {
-            LlmStreamKind.Thinking => string.IsNullOrWhiteSpace(update.Text) || update.Text == "0"
-                ? "思考中..."
-                : $"思考中...\n\n{update.Text}",
-            LlmStreamKind.Tool => BuildToolProgressText(message.Content, update.Text),
-            _ => update.Text
-        };
+            case LlmStreamKind.Thinking:
+                // The chain lives in its own collapsible block; the content
+                // keeps only the placeholder header until real text streams.
+                if (!string.IsNullOrEmpty(update.Text))
+                    message.ThinkingText = update.Text;
+                if (message.Content != "思考中..." && !message.Content.StartsWith("⏳", StringComparison.Ordinal))
+                    message.Content = "思考中...";
+                break;
+            case LlmStreamKind.Tool:
+                message.Content = BuildToolProgressText(message.Content, update.Text);
+                break;
+            default:
+                message.Content = update.Text;
+                break;
+        }
     }
 
     private static string BuildToolProgressText(string current, string toolName)
@@ -1460,6 +1469,28 @@ public sealed class ChatMessage : INotifyPropertyChanged
     // previews, turn markers, and LLM history restore. Serialized so a file
     // written mid-turn (crash) can be filtered out on the next load.
     public bool IsTransient { get; set; }
+
+    private string _thinkingText = "";
+
+    // The model's reasoning chain for this message. Display-only: never sent
+    // back to the LLM and excluded from previews/turn markers via the same
+    // transient rules as Content. Serialized so finished messages keep their
+    // collapsible chain across restarts.
+    public string ThinkingText
+    {
+        get => _thinkingText;
+        set
+        {
+            if (_thinkingText == value)
+                return;
+            _thinkingText = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ThinkingText)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasThinking)));
+        }
+    }
+
+    [JsonIgnore]
+    public bool HasThinking => !string.IsNullOrEmpty(ThinkingText);
 
     [JsonIgnore]
     public string Sender => Role switch
