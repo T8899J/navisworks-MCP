@@ -172,7 +172,7 @@
                                                       CommandParameter="{Binding}" />
                                         </ContextMenu>
                                     </Button.ContextMenu>
-                                    <Border MinHeight="56" Padding="20,9" CornerRadius="0">
+                                    <Border MinHeight="36" Padding="20,7" CornerRadius="0">
                                         <Border.Style>
                                             <Style TargetType="Border">
                                                 <Setter Property="Background" Value="Transparent" />
@@ -188,14 +188,11 @@
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
-                                            <StackPanel>
-                                                <TextBlock Text="{Binding Title}" FontSize="12"
-                                                           Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" />
-                                                <TextBlock Text="{Binding Preview}" FontSize="10" Margin="0,3,0,0"
-                                                           Foreground="{DynamicResource TextMutedBrush}" TextTrimming="CharacterEllipsis" />
-                                            </StackPanel>
+                                            <TextBlock Text="{Binding Title}" FontSize="12"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Grid.Column="1" Text="{Binding UpdatedLabel}" FontSize="9" Margin="8,1,0,0"
-                                                       Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Top" />
+                                                       Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" />
                                         </Grid>
                                     </Border>
                                 </Button>
@@ -294,12 +291,11 @@
                     <DataTemplate>
                         <Grid HorizontalAlignment="Center" Margin="0,0,0,26"
                               Width="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=ListBox}, Converter={StaticResource ConversationWidthConverter}}">
-                            <!-- User prompts stay compact and right-aligned, matching the Codex conversation rhythm. -->
-                            <Border HorizontalAlignment="Right" Padding="14,9" CornerRadius="14"
-                                    MaxWidth="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=ListBox}, Converter={StaticResource ConversationWidthConverter}, ConverterParameter=user}"
-                                    Background="{DynamicResource AccentMutedBrush}">
-                                <Border.Style>
-                                    <Style TargetType="Border">
+                            <!-- User prompts stay compact and right-aligned, matching the Codex conversation rhythm.
+                                 Hovering the row reveals a one-click copy button beside the bubble. -->
+                            <Grid HorizontalAlignment="Right">
+                                <Grid.Style>
+                                    <Style TargetType="Grid">
                                         <Setter Property="Visibility" Value="Collapsed" />
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding Role}" Value="user">
@@ -307,10 +303,42 @@
                                             </DataTrigger>
                                         </Style.Triggers>
                                     </Style>
-                                </Border.Style>
-                                <TextBlock Text="{Binding Content}" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" LineHeight="23"
-                                           Foreground="{DynamicResource TextPrimaryBrush}" />
-                            </Border>
+                                </Grid.Style>
+                                <Border Padding="14,9" CornerRadius="14"
+                                        MaxWidth="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=ListBox}, Converter={StaticResource ConversationWidthConverter}, ConverterParameter=user}"
+                                        Background="{DynamicResource AccentMutedBrush}">
+                                    <TextBlock Text="{Binding Content}" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" LineHeight="23"
+                                               Foreground="{DynamicResource TextPrimaryBrush}" />
+                                </Border>
+                                <Button Click="CopyUserMessage_Click" ToolTip="复制"
+                                        HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="-32,0,0,-2"
+                                        AutomationProperties.Name="复制消息">
+                                    <Button.Style>
+                                        <Style TargetType="Button">
+                                            <Setter Property="Opacity" Value="0" />
+                                            <Setter Property="IsHitTestVisible" Value="False" />
+                                            <Setter Property="Template">
+                                                <Setter.Value>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border Width="26" Height="22" CornerRadius="5"
+                                                                Background="{DynamicResource SurfaceBrush}"
+                                                                BorderBrush="{DynamicResource BorderStrongBrush}" BorderThickness="1">
+                                                            <TextBlock Text="⧉" FontSize="12"
+                                                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+                                                        </Border>
+                                                    </ControlTemplate>
+                                                </Setter.Value>
+                                            </Setter>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                                    <Setter Property="Opacity" Value="1" />
+                                                    <Setter Property="IsHitTestVisible" Value="True" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
+                            </Grid>
 
                             <!-- Agent, tool and status output remains a borderless document stream on the left. -->
                             <StackPanel HorizontalAlignment="Stretch">
@@ -343,7 +371,18 @@
                                                                           IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
                                                                 <ToggleButton.Template>
                                                                     <ControlTemplate TargetType="ToggleButton">
-                                                                        <ContentPresenter />
+                                                                        <Border Background="Transparent" CornerRadius="6" Padding="4,2">
+                                                                            <Border.Style>
+                                                                                <Style TargetType="Border">
+                                                                                    <Style.Triggers>
+                                                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                                                            <Setter Property="Background" Value="{DynamicResource SurfaceHoverBrush}" />
+                                                                                        </Trigger>
+                                                                                    </Style.Triggers>
+                                                                                </Style>
+                                                                            </Border.Style>
+                                                                            <ContentPresenter />
+                                                                        </Border>
                                                                     </ControlTemplate>
                                                                 </ToggleButton.Template>
                                                                 <StackPanel Orientation="Horizontal">
@@ -538,7 +577,7 @@
 
             <Border x:Name="ComposerSurface" Panel.ZIndex="4" Margin="0,0,0,18"
                     SizeChanged="OnComposerSizeChanged"
-                    Width="{Binding ActualWidth, ElementName=AppTitleBar, Converter={StaticResource ConversationWidthConverter}, ConverterParameter=composer}"
+                    Width="{Binding ActualWidth, ElementName=ChatBox, Converter={StaticResource ConversationWidthConverter}}"
                     Padding="16,12,10,10" CornerRadius="22"
                     Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderStrongBrush}" BorderThickness="1">
                 <Border.Style>
@@ -564,7 +603,7 @@
                              VerticalScrollBarVisibility="Auto" PreviewKeyDown="InputBox_KeyDown" />
 
                     <TextBlock Grid.Row="0" Text="输入消息，按Enter发送" FontSize="13"
-                               Margin="10,2,4,0" VerticalAlignment="Top"
+                               Margin="4,2,4,0" VerticalAlignment="Top"
                                Foreground="{DynamicResource TextMutedBrush}"
                                IsHitTestVisible="False" AutomationProperties.Name="输入提示">
                         <TextBlock.Style>
