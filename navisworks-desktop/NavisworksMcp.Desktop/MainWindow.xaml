@@ -335,6 +335,10 @@
                                  debug chrome. -->
                             <Grid x:Name="MessageShellUser" HorizontalAlignment="Right"
                                   Background="#223B82F6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
                                 <Grid.Style>
                                     <Style TargetType="Grid">
                                         <Setter Property="Visibility" Value="Collapsed" />
@@ -345,15 +349,15 @@
                                         </Style.Triggers>
                                     </Style>
                                 </Grid.Style>
-                                <Border Padding="14,9" CornerRadius="14"
+                                <Border Grid.Column="0" Padding="14,9" CornerRadius="14"
                                         BorderBrush="Green" BorderThickness="1"
                                         MaxWidth="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=ListBox}, Converter={StaticResource ConversationWidthConverter}, ConverterParameter=user}"
                                         Background="{DynamicResource AccentMutedBrush}">
                                     <TextBlock Text="{Binding Content}" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" LineHeight="23"
                                                Foreground="{DynamicResource TextPrimaryBrush}" />
                                 </Border>
-                                <Button Click="CopyMessage_Click"
-                                        HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,5,3"
+                                <Button Grid.Column="1" VerticalAlignment="Bottom" Margin="6,0,0,2"
+                                        Click="CopyMessage_Click"
                                         AutomationProperties.Name="复制消息">
                                     <Button.Style>
                                         <Style TargetType="Button" BasedOn="{StaticResource CopyMessageButton}">
@@ -386,7 +390,11 @@
                                         </Style.Triggers>
                                     </Style>
                                 </Grid.Style>
-                                <StackPanel HorizontalAlignment="Stretch"
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="1" HorizontalAlignment="Stretch"
                                             Background="#1400AA00">
                                 <!-- Collapsible reasoning chain: expanded while
                                      streaming (IsTransient), collapsed once the
@@ -516,8 +524,8 @@
                                     </TextBlock.Style>
                                 </TextBlock>
                             </StackPanel>
-                                <Button Click="CopyMessage_Click"
-                                        HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="4,0,0,2"
+                                <Button Grid.Column="0" VerticalAlignment="Bottom" Margin="0,0,6,2"
+                                        Click="CopyMessage_Click"
                                         AutomationProperties.Name="复制回复">
                                     <Button.Style>
                                         <Style TargetType="Button" BasedOn="{StaticResource CopyMessageButton}">
