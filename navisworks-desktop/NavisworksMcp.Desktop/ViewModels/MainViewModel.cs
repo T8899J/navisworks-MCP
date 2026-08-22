@@ -1201,13 +1201,13 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             var result = await _bridge.CallAsync(toolCall.Name, parameters, cancellationToken);
             MarkNavisworksAvailable();
 
-            var summary = FormatResult(toolCall.Name, result);
-
+            // The raw result is all the model needs (it must reference itemIds);
+            // the human-readable FormatResult summary is only for the CLI echo.
+            // Sending both doubled every tool result inside the context window.
             return JsonSerializer.Serialize(new
             {
                 status = "success",
                 tool = toolCall.Name,
-                summary,
                 result
             });
         }

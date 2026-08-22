@@ -49,9 +49,10 @@ public sealed class OllamaClient : IDisposable
     private const int MaxHistoryMessages = 24;
 
     // Approximate token budget for a single tool result. Character-based
-    // because the desktop app has no tokenizer; 8k chars stays well inside
-    // the 16K-token context window alongside history and tool definitions.
-    private const int MaxToolResultChars = 8000;
+    // because the desktop app has no tokenizer; 6k chars keeps a full
+    // 4-round tool loop inside the 16K-token window alongside the fixed
+    // prompt (system + tool schemas) and the reply budget.
+    private const int MaxToolResultChars = 6000;
     private static readonly TimeSpan ConnectionProbeTimeout = TimeSpan.FromSeconds(5);
 
     // Hang detector for the streamed /api/chat response: generous because a cold
