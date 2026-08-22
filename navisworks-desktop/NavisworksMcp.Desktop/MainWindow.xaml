@@ -308,7 +308,7 @@
                                         </Style.Triggers>
                                     </Style>
                                 </Border.Style>
-                                <TextBlock Text="{Binding Content}" FontSize="13" TextWrapping="Wrap" LineHeight="21"
+                                <TextBlock Text="{Binding Content}" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" LineHeight="23"
                                            Foreground="{DynamicResource TextPrimaryBrush}" />
                             </Border>
 
@@ -422,7 +422,7 @@
                                                Foreground="{DynamicResource TextMutedBrush}" />
                                 </Expander>
 
-                                <TextBlock Text="{Binding Content}" FontSize="13" TextWrapping="Wrap" LineHeight="22">
+                                <TextBlock Text="{Binding Content}" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" LineHeight="23">
                                     <TextBlock.Style>
                                         <Style TargetType="TextBlock">
                                             <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
