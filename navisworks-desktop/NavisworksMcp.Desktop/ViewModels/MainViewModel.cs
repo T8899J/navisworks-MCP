@@ -1146,7 +1146,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             LlmStreamKind.Thinking => string.IsNullOrWhiteSpace(update.Text) || update.Text == "0"
                 ? "思考中..."
-                : $"思考中...（已思考 {update.Text} 字）",
+                : $"思考中...\n\n{update.Text}",
             LlmStreamKind.Tool => BuildToolProgressText(message.Content, update.Text),
             _ => update.Text
         };
