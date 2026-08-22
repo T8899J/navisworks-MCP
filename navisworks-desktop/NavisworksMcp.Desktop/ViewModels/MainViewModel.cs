@@ -350,7 +350,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
 
         // 无历史会话时不自动创建；首次发送时由 SendAsync 创建。
-        _ = ConnectLlmAsync(showConversationMessage: false);
+        _ = ConnectLlmAsync(showConversationMessage: false, lockUi: false);
     }
 
     // ── Sessions ───────────────────────────────────────
@@ -909,7 +909,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         SaveSettings();
 
         if (modelChanged)
-            _ = ConnectLlmAsync(showConversationMessage: false);
+            _ = ConnectLlmAsync(showConversationMessage: false, lockUi: false);
     }
 
     private void SelectReasoningMode(string? mode)
@@ -927,7 +927,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         LlmStatus = "未连接";
         IsModelMenuOpen = false;
         SaveSettings();
-        _ = ConnectLlmAsync(showConversationMessage: false);
+        _ = ConnectLlmAsync(showConversationMessage: false, lockUi: false);
     }
 
     private void AddModel()
@@ -942,7 +942,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         SelectModel(model);
     }
 
-    private async Task ConnectLlmAsync(bool showConversationMessage)
+    private async Task ConnectLlmAsync(bool showConversationMessage, bool lockUi = true)
     {
         if (IsBusy && _llmConnectCts is null)
             return;
@@ -950,7 +950,10 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         _llmConnectCts?.Cancel();
         _llmConnectCts = connectionCts;
-        IsBusy = true;
+        // Background probes (startup, model switch) must not freeze the whole
+        // UI in its busy state; only the explicit "connect" command locks it.
+        if (lockUi)
+            IsBusy = true;
         LlmStatus = "连接中...";
         var candidate = CreateConfiguredClient();
 
@@ -1009,7 +1012,10 @@ internal sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             if (ReferenceEquals(_llmConnectCts, connectionCts))
             {
                 _llmConnectCts = null;
-                IsBusy = false;
+                // Only clear the flag this method set; a user turn that
+                // started meanwhile owns IsBusy now and must keep it.
+                if (lockUi)
+                    IsBusy = false;
             }
 
             connectionCts.Dispose();
