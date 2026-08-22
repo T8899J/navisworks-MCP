@@ -417,8 +417,8 @@
                                             </Setter>
                                         </Style>
                                     </Expander.Style>
-                                    <TextBlock Text="{Binding ThinkingText}" FontSize="12"
-                                               TextWrapping="Wrap" LineHeight="19" Margin="14,4,0,0"
+                                    <TextBlock Text="{Binding ThinkingText}" FontSize="14" FontWeight="SemiBold"
+                                               TextWrapping="Wrap" LineHeight="23" Margin="14,4,0,0"
                                                Foreground="{DynamicResource TextMutedBrush}" />
                                 </Expander>
 
