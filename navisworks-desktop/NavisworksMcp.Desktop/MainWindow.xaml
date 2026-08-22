@@ -352,8 +352,10 @@
                             </Grid>
 
                             <!-- Agent, tool and status output remains a borderless document stream on the left.
-                                 Hovering the row reveals the copy button at its bottom-right. -->
-                            <Grid>
+                                 Hovering the row reveals the copy button at its bottom-right. The grid
+                                 shrinks to the content's natural width so the button anchors to the
+                                 content edge, not to the full column. -->
+                            <Grid HorizontalAlignment="Left">
                                 <Grid.Style>
                                     <Style TargetType="Grid">
                                         <Setter Property="Visibility" Value="Visible" />
