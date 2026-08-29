@@ -72,6 +72,22 @@ export interface AgentBridgeClient {
   ): Promise<T>
 }
 
+/** Short ceiling so a slow/stuck summarizer can never stall retitleing long. */
+const TITLE_SUMMARY_TIMEOUT_MS = 20_000
+
+function cleanTitleCandidate(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^[「『"'“”‘’]+/, '')
+    .replace(/[」』"'“”‘’]+$/, '')
+    .replace(/^(标题|会话标题|Title)\s*[:：]\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 30)
+    .replace(/[。.!!??]+$/, '')
+    .trim()
+}
+
 export class OllamaAgentError extends Error {
   readonly code: string
 
@@ -171,6 +187,52 @@ export class OllamaAgent {
         message: `无法连接 Ollama：${errorMessage(error)}`,
       }
     }
+  }
+
+  /**
+   * One-shot title summarization for a conversation's first user message.
+   * Deliberately short-circuited (no streaming, tiny budget, its own timeout)
+   * so it stays cheap and never competes with the main reply for long.
+   */
+  async summarizeTitle(userText: string, signal?: AbortSignal): Promise<string> {
+    const prompt = [
+      '为下面的用户消息生成一个简短的会话标题。',
+      '要求：不超过12个字，概括主题；只输出标题本身，不要引号、句号或任何前缀说明。',
+      '',
+      `用户消息：${userText.slice(0, 500)}`
+    ].join('\n')
+
+    const body = await this.#requestJson(
+      '/api/chat',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...this.#authHeaders() },
+        body: JSON.stringify({
+          model: this.#model,
+          messages: [
+            { role: 'system', content: '你是会话标题生成器，只输出标题本身。' },
+            { role: 'user', content: prompt }
+          ],
+          stream: false,
+          think: false,
+          options: { num_predict: 24, temperature: 0.2 }
+        })
+      },
+      signal,
+      TITLE_SUMMARY_TIMEOUT_MS,
+    )
+
+    const root = requireObject(body, 'Ollama 标题响应')
+    const message = root.message
+    if (message === null || typeof message !== 'object' || Array.isArray(message)) {
+      throw new OllamaAgentError('OLLAMA_INVALID_RESPONSE', 'Ollama 标题响应缺少 message 字段。')
+    }
+    const raw = (message as Record<string, unknown>).content
+    const title = cleanTitleCandidate(typeof raw === 'string' ? raw : '')
+    if (!title) {
+      throw new OllamaAgentError('OLLAMA_INVALID_RESPONSE', 'Ollama 没有返回可用的标题。')
+    }
+    return title
   }
 
   async run(input: string, options: RunAgentOptions = {}): Promise<AgentRunResult> {

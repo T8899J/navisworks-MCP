@@ -8,7 +8,7 @@ import {
   MonitorCog,
   Palette,
   RefreshCw,
-  Settings2,
+  Settings,
   Wrench,
   X,
   Zap
@@ -33,11 +33,11 @@ const TOOL_CATALOG_UI = [
   { name: 'navisworks_status', description: '检查插件连接与当前文档', viewState: false },
   { name: 'navisworks_get_document', description: '读取文档、单位和选择数量', viewState: false },
   { name: 'navisworks_get_selection', description: '读取当前选中的构件', viewState: false },
-  { name: 'navisworks_find_items', description: '按名称或属性搜索构件', viewState: false },
+  { name: 'navisworks_find_items', description: '搜索构件（大模型分段续扫）', viewState: false },
   { name: 'navisworks_get_item_properties', description: '读取构件属性', viewState: false },
   { name: 'navisworks_select_items', description: '选中或取消选中构件', viewState: true },
   { name: 'navisworks_set_visibility', description: '隐藏、显示或隔离构件', viewState: true },
-  { name: 'navisworks_list_viewpoints', description: '列出保存的视点', viewState: false },
+  { name: 'navisworks_list_viewpoints', description: '列出保存的视点（可分页）', viewState: false },
   { name: 'navisworks_activate_viewpoint', description: '切换到保存的视点', viewState: true }
 ] as const
 
@@ -54,6 +54,17 @@ const FONT_LEVELS = [
   { value: 1.15, label: '较大' },
   { value: 1.3, label: '大' }
 ] as const
+
+/**
+ * Positions a tick/label directly under the slider thumb's center. The thumb
+ * is 14px wide, so its center sweeps [7px, width-7px]; percentage-only
+ * centering drifts at the endpoints, which is what left the old labels
+ * misaligned with the nodes.
+ */
+const THUMB_HALF_WIDTH_PX = 7
+
+const thumbAlignedLeft = (index: number, count: number): string =>
+  `calc(${THUMB_HALF_WIDTH_PX}px + (100% - ${THUMB_HALF_WIDTH_PX * 2}px) * ${index / (count - 1)})`
 
 interface SettingsPanelProps {
   open: boolean
@@ -258,7 +269,7 @@ export function SettingsPanel({
         onKeyDown={trapFocus}>
         <header className="settings-header">
           <div className="settings-title-copy">
-            <span className="settings-title-icon" aria-hidden="true"><Settings2 size={18} /></span>
+            <span className="settings-title-icon" aria-hidden="true"><Settings size={18} /></span>
             <h2 id={titleId}>设置</h2>
           </div>
           <button ref={closeRef} className="icon-button" type="button" aria-label="关闭设置" onClick={onClose}>
@@ -326,19 +337,27 @@ export function SettingsPanel({
                     aria-label="全局字体大小"
                     onChange={(event) => void onFontScaleChange(FONT_LEVELS[Number(event.currentTarget.value)]!.value)}
                   />
-                  <div className="font-scale-ticks" aria-hidden="true">
-                    {FONT_LEVELS.map((level, index) => (
-                      <span
-                        key={level.label}
-                        data-active={index === fontLevelIndex}
-                        style={{ left: `${index * (100 / (FONT_LEVELS.length - 1))}%` }}
-                      />
-                    ))}
-                  </div>
-                  <div className="font-scale-slider-labels" aria-hidden="true">
-                    {FONT_LEVELS.map((level, index) => (
-                      <span key={level.label} data-active={index === fontLevelIndex}>{level.label}</span>
-                    ))}
+                  <div className="thumb-aligned-scale" aria-hidden="true">
+                    <div className="font-scale-ticks">
+                      {FONT_LEVELS.map((level, index) => (
+                        <span
+                          key={level.label}
+                          data-active={index === fontLevelIndex}
+                          style={{ left: thumbAlignedLeft(index, FONT_LEVELS.length) }}
+                        />
+                      ))}
+                    </div>
+                    <div className="font-scale-slider-labels">
+                      {FONT_LEVELS.map((level, index) => (
+                        <span
+                          key={level.label}
+                          data-active={index === fontLevelIndex}
+                          style={{ left: thumbAlignedLeft(index, FONT_LEVELS.length) }}
+                        >
+                          {level.label}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 </div>
               </>

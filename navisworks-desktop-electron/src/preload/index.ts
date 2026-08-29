@@ -24,6 +24,7 @@ const allowedRoutes = new Set<IpcRoute>([
   'sessions.get',
   'sessions.save',
   'sessions.delete',
+  'sessions.summarizeTitle',
   'settings.get',
   'settings.update',
   'appearance.get',

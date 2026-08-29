@@ -11,6 +11,7 @@ import { resolveDesktopDataPaths } from './dataPaths'
 import {
   registerDesktopIpc,
   broadcastNativeThemeUpdated,
+  startNavisworksStatusPolling,
   type OllamaAgentPort,
   type OllamaEndpointOptions,
   type OllamaRunInput,
@@ -115,6 +116,8 @@ async function startApplication(): Promise<void> {
     appearance,
     senderTrust
   })
+  // Detect Navisworks appearing/disappearing without a manual refresh.
+  const disposeStatusPolling = startNavisworksStatusPolling(bridge)
 
   Menu.setApplicationMenu(null)
 
@@ -129,6 +132,7 @@ async function startApplication(): Promise<void> {
     disposeCsp()
     disposeNavigation()
     disposePermissions()
+    disposeStatusPolling()
     appearance.dispose()
     await disposeIpc()
   }
@@ -151,8 +155,8 @@ async function startApplication(): Promise<void> {
 
 function createMainWindow(): BrowserWindow {
   const window = new BrowserWindow({
-    width: 1180,
-    height: 760,
+    width: 1366,
+    height: 828,
     minWidth: 900,
     minHeight: 620,
     show: false,
@@ -232,6 +236,9 @@ function adaptOllamaAgent(
         runAgent.dispose()
       }
     },
+    // Title summaries share the default instance (its model = the persisted
+    // selection); the method itself forces think:false and a tiny budget.
+    summarizeTitle: (text, signal) => agent.summarizeTitle(text, signal),
     dispose: () => agent.dispose()
   }
 }

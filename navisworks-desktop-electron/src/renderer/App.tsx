@@ -24,7 +24,6 @@ import { desktopGateway } from './desktop'
 import { MessageList } from './MessageList'
 import {
   isSessionReadyForSend,
-  mergeSessionReplacement,
   planAfterDurableSessionDeletion,
   planSessionDeletion,
   planSessionReconciliation,
@@ -35,6 +34,7 @@ import {
   shouldShowHeroComposer
 } from './sessionLifecycle'
 import { Sidebar } from './Sidebar'
+import { SearchOverlay } from './SearchOverlay'
 import { SettingsPanel } from './SettingsPanel'
 
 const DEFAULT_SETTINGS: DesktopSettings = {
@@ -175,6 +175,8 @@ export default function App() {
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true)
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Chat-search overlay, scoped to the conversation pane (see SearchOverlay).
+  const [searchOpen, setSearchOpen] = useState(false)
   // In-app delete confirmation target. Native dialogs are off-limits:
   // Electron's window.confirm() leaves the renderer unable to focus inputs.
   const [pendingDeleteSession, setPendingDeleteSession] = useState<SessionSummary | null>(null)
@@ -429,18 +431,12 @@ export default function App() {
       if (statusResult.status === 'fulfilled') setNavisworks(statusResult.value)
 
       if (sessionResult.status === 'fulfilled' && sessionResult.value.length > 0) {
-        const loadedSessions = sessionResult.value
-        const first = loadedSessions.find((item) => item.pinnedAt) ?? loadedSessions[0]
-        commitSessionSummaries(loadedSessions)
-        if (first) {
-          activeSessionIdRef.current = first.id
-          setActiveSessionId(first.id)
-        }
-      } else {
-        // Empty store: land on the centered draft instead of writing a
-        // placeholder session to disk on every cold start.
-        openNewSession()
+        commitSessionSummaries(sessionResult.value)
       }
+
+      // Cold start always lands on the centered new-conversation view, even
+      // when saved conversations exist; entering one stays a sidebar choice.
+      openNewSession()
 
       const firstFailure = [sessionResult, settingsResult, statusResult].find((result) => result.status === 'rejected')
       if (firstFailure?.status === 'rejected') {
@@ -540,6 +536,26 @@ export default function App() {
     setDrafts((current) => ({ ...current, [activeSessionId]: value }))
   }
 
+  /**
+   * Swaps the first-send truncation label for a model-summarized title.
+   * Guards against switching away mid-request; chat streaming merges through
+   * sessionRef so a concurrent reply stream cannot clobber the new title.
+   */
+  const applySummarizedTitle = async (sessionId: string, firstMessage: string) => {
+    try {
+      const suggested = await desktopGateway.suggestSessionTitle(firstMessage)
+      if (activeSessionIdRef.current !== sessionId || sessionRef.current?.id !== sessionId) return
+      const target = sessionRef.current
+      if (!target || target.title === suggested) return
+      const retitled = { ...target, title: suggested }
+      sessionRef.current = retitled
+      setSession(retitled)
+      void persistSession(retitled)
+    } catch {
+      // Silent: the truncation label is already a usable fallback.
+    }
+  }
+
   const sendText = async (text: string) => {
     const trimmed = text.trim()
     const current = sessionRef.current
@@ -581,6 +597,13 @@ export default function App() {
       setDraftSessionId(undefined)
     }
     void persistSession(nextSession)
+
+    // The truncated send text is only a placeholder label; ask the model to
+    // retitle once the first message lands. Best-effort — on failure the
+    // truncation simply stays.
+    if (current.messages.length === 0) {
+      void applySummarizedTitle(current.id, trimmed)
+    }
 
     try {
       const started = await desktopGateway.startChat({
@@ -652,51 +675,19 @@ export default function App() {
         return
       }
 
+      // The deleted conversation was on screen: land on a fresh draft (the
+      // new-conversation view) instead of auto-jumping into some other
+      // conversation. Everything past the plan is synchronous, so the
+      // transition lock already covers the whole swap.
       invalidateSessionLoads()
       sessionRef.current = undefined
       setSession(undefined)
-      setLoading(true)
-      let durableReplacement: ChatSession | undefined
-      for (const summary of plan.remaining) {
-        if (!serviceAvailable) break
-        try {
-          durableReplacement = await desktopGateway.getSession(summary.id)
-          break
-        } catch {
-          // A stale/corrupt summary must not leave the composer bound to the
-          // deleted session. Try the next durable conversation before falling
-          // back to a fresh one.
-        }
-      }
-
-      // Nothing durable survived: continue on an unpersisted draft instead of
-      // writing a placeholder session to disk.
-      const fallsBackToDraft = !durableReplacement
-      const nextFocus = durableReplacement ?? createSession()
-
-      // Defensive fallback: the transition lock normally makes this branch
-      // unreachable, but internal/bootstrap state changes still must not be
-      // overwritten with the older deletion plan snapshot.
-      if (activeSessionIdRef.current !== sessionId) {
-        setDrafts((current) => removeDeletedSessionDraft(current, sessionId))
-        commitSessionSummaries(
-          sessionsRef.current.filter((item) => item.id !== sessionId)
-        )
-        return
-      }
-
-      if (fallsBackToDraft) {
-        draftSessionIdRef.current = nextFocus.id
-        setDraftSessionId(nextFocus.id)
-        // A draft never appears in the sidebar; the surviving rows are the
-        // whole list.
-        commitSessionSummaries(plan.remaining)
-      } else {
-        const replacementSummary = toSummary(nextFocus)
-        commitSessionSummaries(
-          mergeSessionReplacement(sessionsRef.current, sessionId, replacementSummary)
-        )
-      }
+      const nextFocus = createSession()
+      draftSessionIdRef.current = nextFocus.id
+      setDraftSessionId(nextFocus.id)
+      // A draft never appears in the sidebar; the surviving rows are the
+      // whole list.
+      commitSessionSummaries(plan.remaining)
       setDrafts((current) => removeDeletedSessionDraft(current, sessionId, nextFocus.id))
       activateLoadedSession(nextFocus)
       setLoading(false)
@@ -834,6 +825,7 @@ export default function App() {
         busy={busy || sessionTransitioning}
         onClose={() => setSidebarOpen(false)}
         onCreate={openNewSession}
+        onOpenSearch={() => setSearchOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
         onSelect={selectSession}
         onTogglePinned={(id) => void togglePinned(id)}
@@ -905,6 +897,15 @@ export default function App() {
           ) : null}
         </div>
       </main>
+
+      {searchOpen ? (
+        <SearchOverlay
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          onClose={() => setSearchOpen(false)}
+          onSelect={selectSession}
+        />
+      ) : null}
 
       {pendingDeleteSession ? (
         <div className="confirm-overlay" role="presentation" onClick={() => setPendingDeleteSession(null)}>

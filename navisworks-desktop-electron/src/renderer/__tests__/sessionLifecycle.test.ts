@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import type { ChatSession, SessionSummary } from '../chatTypes'
 import {
   isSessionReadyForSend,
-  mergeSessionReplacement,
   planAfterDurableSessionDeletion,
   planSessionDeletion,
   planSessionReconciliation,
@@ -42,17 +41,6 @@ describe('session lifecycle', () => {
     expect(lock.tryAcquire()).toBe(true) // next user intent can now run
   })
 
-  it('retains a concurrently observed new summary when merging a replacement', () => {
-    const third = { ...second, id: 'third', title: '并发建立的新会话' }
-    const refreshedSecond = { ...second, title: '重新加载的第二条' }
-
-    expect(mergeSessionReplacement(
-      [first, second, third],
-      'first',
-      refreshedSecond
-    )).toEqual([refreshedSecond, third])
-  })
-
   it('moves text typed during deletion to a replacement without overwriting its draft', () => {
     expect(removeDeletedSessionDraft({ first: '继续输入' }, 'first', 'second')).toEqual({
       second: '继续输入'
@@ -64,27 +52,24 @@ describe('session lifecycle', () => {
     )).toEqual({ second: '原有草稿' })
   })
 
-  it('selects the next remaining session after deleting the active one', () => {
+  it('flags the deleted active session without picking a next id', () => {
     expect(planSessionDeletion([first, second], 'first', 'first')).toEqual({
       remaining: [second],
-      deletedActiveSession: true,
-      nextSessionId: 'second'
+      deletedActiveSession: true
     })
   })
 
   it('leaves active state unchanged when deleting an inactive session', () => {
     expect(planSessionDeletion([first, second], 'first', 'second')).toEqual({
       remaining: [first],
-      deletedActiveSession: false,
-      nextSessionId: 'first'
+      deletedActiveSession: false
     })
   })
 
-  it('reports no next id after deleting the only active session', () => {
+  it('plans with an empty remainder after deleting the only active session', () => {
     expect(planSessionDeletion([first], 'first', 'first')).toEqual({
       remaining: [],
-      deletedActiveSession: true,
-      nextSessionId: undefined
+      deletedActiveSession: true
     })
   })
 
@@ -116,8 +101,7 @@ describe('session lifecycle', () => {
 
     await expect(deleting).resolves.toEqual({
       remaining: [second, third],
-      deletedActiveSession: false,
-      nextSessionId: 'third'
+      deletedActiveSession: false
     })
   })
 

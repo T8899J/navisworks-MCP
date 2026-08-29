@@ -3,7 +3,6 @@ import type { ChatSession, SessionSummary } from './chatTypes'
 export interface SessionDeletionPlan {
   remaining: SessionSummary[]
   deletedActiveSession: boolean
-  nextSessionId?: string
 }
 
 /** A small non-reentrant lock for durable session mutations. */
@@ -40,21 +39,8 @@ export function planSessionDeletion(
 
   return {
     remaining,
-    deletedActiveSession,
-    nextSessionId: deletedActiveSession ? remaining[0]?.id : activeSessionId
+    deletedActiveSession
   }
-}
-
-export function mergeSessionReplacement(
-  latestSessions: readonly SessionSummary[],
-  deletedSessionId: string,
-  replacement: SessionSummary
-): SessionSummary[] {
-  return [
-    replacement,
-    ...latestSessions.filter((session) =>
-      session.id !== deletedSessionId && session.id !== replacement.id)
-  ]
 }
 
 export function removeDeletedSessionDraft(

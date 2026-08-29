@@ -1,6 +1,8 @@
-import { MessageSquarePlus, PanelLeftClose, Pin, PinOff, Search, Settings2, Trash2 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { PanelLeftClose, Pin, PinOff, Search, Settings, SquarePen, Trash2 } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { useMemo } from 'react'
 import type { SessionSummary } from './chatTypes'
+import { splitSessionList } from './sessionList'
 
 interface SidebarProps {
   sessions: SessionSummary[]
@@ -9,15 +11,11 @@ interface SidebarProps {
   busy?: boolean
   onClose(): void
   onCreate(): void
+  onOpenSearch(): void
   onOpenSettings(): void
   onSelect(sessionId: string): void
   onTogglePinned(sessionId: string): void
   onDelete(sessionId: string): void
-}
-
-function timestamp(value: string): number {
-  const parsed = Date.parse(value)
-  return Number.isFinite(parsed) ? parsed : 0
 }
 
 export function Sidebar({
@@ -27,27 +25,59 @@ export function Sidebar({
   busy,
   onClose,
   onCreate,
+  onOpenSearch,
   onOpenSettings,
   onSelect,
   onTogglePinned,
   onDelete
 }: SidebarProps) {
-  const [query, setQuery] = useState('')
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase()
-    return sessions
-      .filter((session) => {
-        if (!needle) return true
-        return session.title.toLocaleLowerCase().includes(needle)
-      })
-      .sort((left, right) => {
-        const pinOrder = Number(Boolean(right.pinnedAt)) - Number(Boolean(left.pinnedAt))
-        if (pinOrder !== 0) return pinOrder
-        const leftTime = timestamp(left.pinnedAt ?? left.updatedAt)
-        const rightTime = timestamp(right.pinnedAt ?? right.updatedAt)
-        return rightTime - leftTime
-      })
-  }, [query, sessions])
+  const list = useMemo(() => splitSessionList(sessions), [sessions])
+
+  const renderRow = (session: SessionSummary): ReactNode => {
+    const active = session.id === activeSessionId
+    return (
+      <article className="session-row" data-active={active} key={session.id} role="listitem">
+        <button
+          className="session-select"
+          type="button"
+          aria-current={active ? 'page' : undefined}
+          onClick={() => onSelect(session.id)}>
+          <span className="session-title-line">
+            {session.pinnedAt ? <Pin aria-label="已固定" size={12} /> : null}
+            <span className="session-title">{session.title || '新会话'}</span>
+          </span>
+        </button>
+        <div className="session-actions" aria-label={`${session.title} 操作`}>
+          <button
+            className="mini-icon-button"
+            type="button"
+            aria-label={session.pinnedAt ? '取消固定会话' : '固定会话'}
+            title={session.pinnedAt ? '取消固定' : '固定'}
+            onClick={() => onTogglePinned(session.id)}>
+            {session.pinnedAt ? <PinOff aria-hidden="true" size={13} /> : <Pin aria-hidden="true" size={13} />}
+          </button>
+          <button
+            className="mini-icon-button danger"
+            type="button"
+            aria-label="删除会话"
+            title="删除"
+            onClick={() => onDelete(session.id)}>
+            <Trash2 aria-hidden="true" size={13} />
+          </button>
+        </div>
+      </article>
+    )
+  }
+
+  const renderGroup = (label: string, rows: SessionSummary[]): ReactNode => {
+    if (rows.length === 0) return null
+    return (
+      <div className="session-group" key={label}>
+        <div className="session-group-label">{label}</div>
+        {rows.map(renderRow)}
+      </div>
+    )
+  }
 
   return (
     <>
@@ -58,65 +88,36 @@ export function Sidebar({
         aria-hidden={!open}
         aria-label="会话导航">
         <div className="sidebar-header">
-          <div>
-            <div className="app-kicker">NAVISWORKS MCP</div>
-            <div className="app-name">Desktop Agent</div>
+          <span className="app-name">Curi</span>
+          <div className="sidebar-title-actions">
+            <button
+              className="icon-button sidebar-search-toggle"
+              type="button"
+              aria-label="搜索聊天"
+              aria-haspopup="dialog"
+              title="搜索聊天"
+              onClick={onOpenSearch}>
+              <Search aria-hidden="true" size={22} />
+            </button>
+            <button className="icon-button sidebar-close" type="button" aria-label="收起会话栏" onClick={onClose}>
+              <PanelLeftClose aria-hidden="true" size={18} />
+            </button>
           </div>
-          <button className="icon-button sidebar-close" type="button" aria-label="收起会话栏" onClick={onClose}>
-            <PanelLeftClose aria-hidden="true" size={18} />
-          </button>
         </div>
 
         <button className="new-session-button" type="button" onClick={onCreate} disabled={busy}>
-          <MessageSquarePlus aria-hidden="true" size={17} />
-          新建会话
+          <SquarePen aria-hidden="true" size={15} />
+          新对话
         </button>
 
-        <label className="session-search">
-          <span className="sr-only">搜索会话</span>
-          <Search aria-hidden="true" size={15} />
-          <input value={query} onChange={(event) => setQuery(event.currentTarget.value)} placeholder="搜索会话" />
-        </label>
-
         <div className="session-list" role="list" aria-label="会话列表">
-          {filtered.length === 0 ? (
-            <div className="session-empty">{query ? '没有匹配的会话' : '还没有会话'}</div>
+          {sessions.length === 0 ? (
+            <div className="session-empty">还没有会话</div>
           ) : (
-            filtered.map((session) => {
-              const active = session.id === activeSessionId
-              return (
-                <article className="session-row" data-active={active} key={session.id} role="listitem">
-                  <button
-                    className="session-select"
-                    type="button"
-                    aria-current={active ? 'page' : undefined}
-                    onClick={() => onSelect(session.id)}>
-                    <span className="session-title-line">
-                      {session.pinnedAt ? <Pin aria-label="已固定" size={12} /> : null}
-                      <span className="session-title">{session.title || '新会话'}</span>
-                    </span>
-                  </button>
-                  <div className="session-actions" aria-label={`${session.title} 操作`}>
-                    <button
-                      className="mini-icon-button"
-                      type="button"
-                      aria-label={session.pinnedAt ? '取消固定会话' : '固定会话'}
-                      title={session.pinnedAt ? '取消固定' : '固定'}
-                      onClick={() => onTogglePinned(session.id)}>
-                      {session.pinnedAt ? <PinOff aria-hidden="true" size={13} /> : <Pin aria-hidden="true" size={13} />}
-                    </button>
-                    <button
-                      className="mini-icon-button danger"
-                      type="button"
-                      aria-label="删除会话"
-                      title="删除"
-                      onClick={() => onDelete(session.id)}>
-                      <Trash2 aria-hidden="true" size={13} />
-                    </button>
-                  </div>
-                </article>
-              )
-            })
+            <>
+              {renderGroup('置顶', list.pinned)}
+              {list.groups.map((group) => renderGroup(group.label, group.sessions))}
+            </>
           )}
         </div>
 
@@ -128,7 +129,7 @@ export function Sidebar({
             aria-haspopup="dialog"
             title="设置"
             onClick={onOpenSettings}>
-            <Settings2 aria-hidden="true" size={18} />
+            <Settings aria-hidden="true" size={18} />
           </button>
         </div>
       </aside>

@@ -140,6 +140,10 @@ export const requestSchemas = {
     input: z.strictObject({ sessionId: nonEmptyString }),
     output: z.void()
   },
+  'sessions.summarizeTitle': {
+    input: z.strictObject({ text: nonEmptyString }),
+    output: z.strictObject({ title: z.string() })
+  },
   'settings.get': {
     input: emptyInput,
     output: appSettingsSchema

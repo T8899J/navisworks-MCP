@@ -52,7 +52,7 @@ const definitions = [
       limit: { type: 'integer', minimum: 1, maximum: 100 },
     },
   }),
-  tool('navisworks_find_items', '按名称、类别或属性搜索模型构件。', 'read-only', {
+  tool('navisworks_find_items', '按名称、类别或属性搜索模型构件。大模型会分段扫描：结果 truncated 为 true 时，用完全相同的参数再次调用可从断点继续搜索；多次后仍找不到，请用户在 Navisworks 手动选中后用 navisworks_get_selection。', 'read-only', {
     type: 'object',
     properties: {
       query: { type: 'string', description: '搜索关键词。', maxLength: 200 },
@@ -104,9 +104,12 @@ const definitions = [
     },
     required: ['action'],
   }),
-  tool('navisworks_list_viewpoints', '列出当前文档中的保存视点和文件夹。', 'read-only', {
+  tool('navisworks_list_viewpoints', '列出当前文档中的保存视点（含所在文件夹路径）。视点很多时用 limit/offset 分页，结果带 total 总数。', 'read-only', {
     type: 'object',
-    properties: {},
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 2000 },
+      offset: { type: 'integer', minimum: 0 },
+    },
   }),
   tool('navisworks_activate_viewpoint', '按 GUID 激活保存视点。', 'view-state-change', {
     type: 'object',

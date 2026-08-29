@@ -1,7 +1,8 @@
-import { Check, ChevronLeft, ChevronRight, ChevronUp, CircleStop, Gauge, LoaderCircle, Send, Sparkles } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, ChevronUp, CircleStop, Gauge, Send, Sparkles } from 'lucide-react'
 import { type KeyboardEvent, type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { DesktopSettings } from './chatTypes'
 import { ConversationColumn } from './ConversationColumn'
+import { pickHeroTitle } from './heroTitles'
 
 const REASONING_LABEL = { fast: '快速', deep: '深度' } as const
 
@@ -42,6 +43,13 @@ export function Composer({
   // panel sits too close to the window's left edge for a left cascade.
   const [cascadeSide, setCascadeSide] = useState<'left' | 'right'>('left')
   const canSend = serviceAvailable && !busy && draft.trim().length > 0
+  // Greeting is re-drawn whenever the composer docks back into the hero —
+  // i.e. per fresh conversation — so repeat visits see different lines.
+  const [heroTitle, setHeroTitle] = useState(pickHeroTitle)
+
+  useEffect(() => {
+    if (variant === 'hero') setHeroTitle(pickHeroTitle())
+  }, [variant])
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current
@@ -118,8 +126,7 @@ export function Composer({
       <ConversationColumn className="composer-column">
         {variant === 'hero' ? (
           <header className="composer-hero-heading">
-            <h2>开始处理 Navisworks 任务</h2>
-            <p>询问当前文档、元素属性、选择集或视点，Agent 会在这里展示回复和工具执行过程。</p>
+            <h2>{heroTitle}</h2>
           </header>
         ) : null}
         <form
@@ -261,7 +268,6 @@ export function Composer({
           <span className="sr-only" id="composer-service-status" aria-live="polite">
             {serviceAvailable ? (busy ? '助手正在生成回复' : '可以发送消息') : '桌面服务未连接'}
           </span>
-            {busy ? <LoaderCircle aria-hidden="true" className="composer-running-indicator" size={13} /> : null}
         </form>
       </ConversationColumn>
     </div>

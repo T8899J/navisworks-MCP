@@ -415,6 +415,39 @@ describe('desktop IPC session routes', () => {
   })
 })
 
+describe('sessions.summarizeTitle route', () => {
+  it('returns the model-suggested title when the agent supports summarization', async () => {
+    const agent = {
+      ...stubAgent(),
+      async summarizeTitle() {
+        return '三层风管排查'
+      },
+    }
+    const harness = createHarness({ ollama: agent })
+    try {
+      await expect(
+        harness.invoke('sessions.summarizeTitle', { text: '帮我把三层的所有风管隐藏掉' }),
+      ).resolves.toMatchObject({ ok: true, data: { title: '三层风管排查' } })
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('falls back to truncation when the agent cannot summarize', async () => {
+    // stubAgent() has no summarizeTitle — the route must still answer.
+    const harness = createHarness({ ollama: stubAgent() })
+    try {
+      const text = '帮我把三层的所有风管隐藏掉，然后截图对比前后差异'
+      await expect(harness.invoke('sessions.summarizeTitle', { text })).resolves.toMatchObject({
+        ok: true,
+        data: { title: text.slice(0, 28) },
+      })
+    } finally {
+      await harness.dispose()
+    }
+  })
+})
+
 describe('desktop IPC settings routes', () => {
   const baseSettings = {
     selectedModel: 'qwen3.5:9b-q4_K_M',

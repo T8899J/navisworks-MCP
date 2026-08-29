@@ -94,6 +94,8 @@ export interface OllamaAgentPort {
     input: OllamaRunInput,
     options: { signal: AbortSignal; onEvent: (event: OllamaStreamEvent) => void }
   ): Promise<OllamaRunResult>
+  /** Optional: model-generated conversation title; routes fall back to truncation. */
+  summarizeTitle?(text: string, signal?: AbortSignal): Promise<string>
   dispose?(): void | Promise<void>
 }
 
@@ -147,6 +149,18 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
     'sessions.list': routeHandler<'sessions.list'>(() => persistence.listSessions()),
     'sessions.get': routeHandler<'sessions.get'>(({ sessionId }) => persistence.getSession(sessionId)),
     'sessions.save': routeHandler<'sessions.save'>(({ session }) => persistence.saveSession(session)),
+    'sessions.summarizeTitle': routeHandler<'sessions.summarizeTitle'>(async ({ text }) => {
+      // Title summarization is best-effort: if the provider is off or the
+      // model stalls, fall back to plain truncation so the first message
+      // always ends up with a usable sidebar label either way.
+      const fallback = { title: text.trim().slice(0, 28) }
+      if (typeof dependencies.ollama.summarizeTitle !== 'function') return fallback
+      try {
+        return { title: await dependencies.ollama.summarizeTitle(text) }
+      } catch {
+        return fallback
+      }
+    }),
     'sessions.delete': routeHandler<'sessions.delete'>(async ({ sessionId }) => {
       // Cherry Studio lesson: terminate this session's in-flight inference
       // first, so a late run completion cannot resurrect the deleted session
@@ -699,6 +713,34 @@ export function broadcastNavisworksStatus(status: NavisworksStatus): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) emitTo(window.webContents, 'navisworks.status.changed', status)
   }
+}
+
+const NAVISWORKS_STATUS_POLL_MS = 5_000
+
+/**
+ * Polls the plugin endpoint so a Navisworks instance launched AFTER this app
+ * (or one that just closed) is picked up without a manual refresh.
+ * readNavisworksStatus never rejects — failures map to connected:false — and
+ * only changed snapshots are broadcast, so an idle setup stays quiet.
+ */
+export function startNavisworksStatusPolling(
+  bridge: NavisworksBridgeClient,
+  intervalMs: number = NAVISWORKS_STATUS_POLL_MS
+): () => void {
+  let lastSignature = ''
+  const timer = setInterval(() => {
+    void readNavisworksStatus(bridge)
+      .then((status) => {
+        const signature = JSON.stringify(status)
+        if (signature === lastSignature) return
+        lastSignature = signature
+        broadcastNavisworksStatus(status)
+      })
+      .catch(() => {
+        // Defensive: polling must survive even an unexpected rejection.
+      })
+  }, intervalMs)
+  return () => clearInterval(timer)
 }
 
 export function broadcastNativeThemeUpdated(state: AppearanceState): void {

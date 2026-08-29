@@ -46,6 +46,12 @@ export const desktopGateway = {
     await requireApi().request('sessions.save', { session })
   },
 
+  /** Model-generated conversation title; never throws — falls back inside IPC. */
+  async suggestSessionTitle(text: string): Promise<string> {
+    const response = await requireApi().request('sessions.summarizeTitle', { text })
+    return response.title
+  },
+
   async deleteSession(sessionId: string): Promise<void> {
     await requireApi().request('sessions.delete', { sessionId })
   },
