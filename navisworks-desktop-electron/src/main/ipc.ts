@@ -24,6 +24,7 @@ import {
   requestSchemas,
   toolNameSchema,
   type AppearanceState,
+  type ApiProfile,
   type AppSettings,
   type ChatEvent,
   type DesktopEventName,
@@ -63,9 +64,8 @@ export interface OllamaRunInput {
   reasoningMode?: 'fast' | 'deep'
   /** Tool names switched off in settings; honored fresh on every request. */
   disabledTools?: readonly string[]
-  /** Provider endpoint overrides, read fresh from settings on every run. */
-  providerBaseUrl?: string
-  providerApiKey?: string
+  /** API endpoint, read fresh from settings on every run. */
+  api?: OllamaEndpointOptions & { model?: string }
 }
 
 export interface OllamaHistoryEntry {
@@ -77,6 +77,11 @@ export interface OllamaRunResult {
   messageId?: string
   content: string
   thinkingText?: string
+  /** Prompt + completion tokens of the last model round, when reported. */
+  contextTokensUsed?: number
+  cacheHitRate?: number
+  /** True when automatic context compaction ran during this run. */
+  compacted?: boolean
 }
 
 export interface OllamaEndpointOptions {
@@ -92,10 +97,26 @@ export interface OllamaAgentPort {
   ): Promise<{ connected: boolean; message: string }>
   run(
     input: OllamaRunInput,
-    options: { signal: AbortSignal; onEvent: (event: OllamaStreamEvent) => void }
+    options: {
+      signal: AbortSignal
+      onEvent: (event: OllamaStreamEvent) => void
+      requestToolApproval: (
+        toolName: ToolName,
+        argumentsValue: Record<string, unknown>
+      ) => Promise<boolean>
+    }
   ): Promise<OllamaRunResult>
   /** Optional: model-generated conversation title; routes fall back to truncation. */
   summarizeTitle?(text: string, signal?: AbortSignal): Promise<string>
+  /** Manual /compact: summarizes a session's messages into one summary. */
+  compact?(
+    messages: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }>,
+    input: {
+      model?: string
+      api?: OllamaEndpointOptions & { model?: string }
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<string>
   dispose?(): void | Promise<void>
 }
 
@@ -108,6 +129,12 @@ export interface DesktopIpcDependencies {
   ollama: OllamaAgentPort
   appearance: AppearancePort
   senderTrust: SenderTrustOptions
+  secrets?: SecretProtector
+}
+
+export interface SecretProtector {
+  encrypt(value: string): string
+  decrypt(value: string): string
 }
 
 export interface AppearancePort {
@@ -141,8 +168,13 @@ function routeHandler<R extends IpcRoute>(handler: RouteHandler<R>): UntypedRout
 }
 
 export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => Promise<void> {
-  const persistence = new PersistenceFacade(dependencies.sessions, dependencies.settings)
-  const chatRuns = new ChatRunRegistry(dependencies.ollama, persistence)
+  const persistence = new PersistenceFacade(
+    dependencies.sessions,
+    dependencies.settings,
+    dependencies.secrets
+  )
+  const toolApprovals = new ToolApprovalRegistry()
+  const chatRuns = new ChatRunRegistry(dependencies.ollama, persistence, toolApprovals)
 
   const handlers = {
     'app.runtime.get': routeHandler<'app.runtime.get'>(() => dependencies.runtimeInfo),
@@ -174,6 +206,24 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       dependencies.appearance.setThemeMode(updated.themeMode)
       return updated
     }),
+    'api.profile.save': routeHandler<'api.profile.save'>((input) =>
+      persistence.saveApiProfile(input)
+    ),
+    'api.profile.delete': routeHandler<'api.profile.delete'>(({ profileId }) =>
+      persistence.deleteApiProfile(profileId)
+    ),
+    'api.profile.models.list': routeHandler<'api.profile.models.list'>(async ({ profileId }) => {
+      const endpoint = await persistence.getApiEndpoint(profileId)
+      if (!endpoint) throw new DesktopIpcError('NOT_FOUND', 'API 配置不存在。')
+      if (!endpoint.baseUrl) throw new DesktopIpcError('VALIDATION_FAILED', 'API 地址为空。')
+      return [...await dependencies.ollama.listModels(endpoint)]
+    }),
+    'api.profile.connection.test': routeHandler<'api.profile.connection.test'>(async ({ profileId }) => {
+      const endpoint = await persistence.getApiEndpoint(profileId)
+      if (!endpoint) throw new DesktopIpcError('NOT_FOUND', 'API 配置不存在。')
+      if (!endpoint.baseUrl) throw new DesktopIpcError('VALIDATION_FAILED', 'API 地址为空。')
+      return dependencies.ollama.testConnection(endpoint)
+    }),
     'appearance.get': routeHandler<'appearance.get'>(() => dependencies.appearance.getState()),
     'appearance.update': routeHandler<'appearance.update'>(async ({ themeMode }) => {
       const updated = await persistence.updateSettings({ themeMode })
@@ -191,11 +241,65 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
     'chat.abort': routeHandler<'chat.abort'>(({ sessionId, turnId }) => ({
       aborted: chatRuns.abort(sessionId, turnId)
     })),
+    'tool.approval.resolve': routeHandler<'tool.approval.resolve'>((input, context) => ({
+      resolved: toolApprovals.resolve(input.approvalId, input.decision === 'confirm', context.sender)
+    })),
+    'chat.compact': routeHandler<'chat.compact'>(async ({ sessionId }) => {
+      const compactFn = dependencies.ollama.compact
+      if (!compactFn) {
+        throw new DesktopIpcError('SERVICE_UNAVAILABLE', '当前版本不支持手动压缩。')
+      }
+      const session = await persistence.getSession(sessionId)
+      const messages = (session?.messages ?? [])
+        .filter((message) => (message.role === 'user' || message.role === 'assistant')
+          && !message.transient
+          && message.content.trim())
+        .map((message) => ({
+          role: message.role === 'user' ? ('user' as const) : ('assistant' as const),
+          content: message.content
+        }))
+      if (messages.length === 0) {
+        return { summary: '' }
+      }
+
+      const settings = await persistence.getSettings()
+      const activeEndpoint = settings.preferApiModel
+        ? await persistence.getApiEndpoint(settings.activeApiProfileId)
+        : null
+      const summary = await compactFn(
+        messages,
+        {
+          model: settings.selectedModel,
+          ...(activeEndpoint ? { api: activeEndpoint } : {})
+        }
+      )
+
+      // Replace the session transcript with the compact summary so the next
+      // message starts on a light context.
+      if (session) {
+        const now = new Date().toISOString()
+        await persistence.saveSession({
+          ...session,
+          updatedAt: now,
+          messages: [{
+            id: randomUUID(),
+            role: 'assistant',
+            content: `上下文已压缩。早期对话摘要：\n${summary}`,
+            createdAt: now,
+            tools: []
+          }]
+        })
+      }
+      return { summary }
+    }),
     'navisworks.status.get': routeHandler<'navisworks.status.get'>(() =>
       readNavisworksStatus(dependencies.bridge)
     ),
     'navisworks.tool.execute': routeHandler<'navisworks.tool.execute'>(async ({ toolName, arguments: args }) => {
       dependencies.tools.assertAllowed(toolName, args)
+      if (dependencies.tools.get(toolName)?.impact === 'view-state-change') {
+        throw new DesktopIpcError('VALIDATION_FAILED', '视图操作必须经过聊天操作确认。')
+      }
       return dependencies.bridge.call(toolName, args)
     })
   } satisfies Record<IpcRoute, UntypedRouteHandler>
@@ -233,6 +337,7 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
   return async () => {
     ipcMain.removeHandler(IPC_REQUEST_CHANNEL)
     chatRuns.abortAll()
+    toolApprovals.cancelAll()
     await dependencies.ollama.dispose?.()
   }
 }
@@ -242,7 +347,8 @@ export class ChatRunRegistry {
 
   constructor(
     private readonly agent: OllamaAgentPort,
-    private readonly persistence: PersistenceFacade
+    private readonly persistence: PersistenceFacade,
+    private readonly toolApprovals: ToolApprovalRegistry = new ToolApprovalRegistry()
   ) {}
 
   start(
@@ -329,13 +435,9 @@ export class ChatRunRegistry {
         throw controller.signal.reason
       }
       const disabledTools = settings.disabledTools
-      // Provider toggle gates chat entirely; endpoint config is read fresh so
-      // edits apply on the very next message.
-      if (settings.providerEnabled === false) {
-        throw new DesktopIpcError('SERVICE_UNAVAILABLE', '模型提供商已停用，请在设置中开启。')
-      }
-      const providerBaseUrl = settings.providerBaseUrl?.trim()
-      const providerApiKey = settings.providerApiKey?.trim()
+      const activeEndpoint = settings.preferApiModel
+        ? await this.persistence.getApiEndpoint(settings.activeApiProfileId)
+        : null
       const result = await this.agent.run(
         {
           sessionId: input.sessionId,
@@ -346,11 +448,15 @@ export class ChatRunRegistry {
           ...(input.model === undefined ? {} : { model: input.model }),
           ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
           ...(disabledTools.length === 0 ? {} : { disabledTools }),
-          ...(providerBaseUrl ? { providerBaseUrl } : {}),
-          ...(providerApiKey ? { providerApiKey } : {})
+          ...(activeEndpoint ? { api: activeEndpoint } : {})
         },
         {
           signal: controller.signal,
+          requestToolApproval: (toolName, argumentsValue) => this.toolApprovals.request({
+            ...base,
+            toolName,
+            arguments: argumentsValue
+          }, sender, controller.signal),
           onEvent: (event) => {
             if (controller.signal.aborted) return
             emitTo(sender, 'chat.chunk', { ...base, ...event })
@@ -363,7 +469,10 @@ export class ChatRunRegistry {
         messageId: result.messageId ?? messageId,
         kind: 'done',
         content: result.content,
-        ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText })
+        ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText }),
+        ...(result.contextTokensUsed === undefined ? {} : { contextTokensUsed: result.contextTokensUsed }),
+        ...(result.cacheHitRate === undefined ? {} : { cacheHitRate: result.cacheHitRate }),
+        ...(result.compacted ? { compacted: true } : {})
       })
     } catch (error) {
       const ipcError = controller.signal.aborted
@@ -378,6 +487,53 @@ export class ChatRunRegistry {
       this.#runs.delete(runId)
       settle()
     }
+  }
+}
+
+interface PendingToolApproval {
+  readonly senderId: number
+  readonly finish: (approved: boolean) => void
+}
+
+/** Main-process, one-shot authorization gate for model-requested view changes. */
+export class ToolApprovalRegistry {
+  readonly #pending = new Map<string, PendingToolApproval>()
+
+  request(
+    payload: Omit<EventPayload<'tool.approval.requested'>, 'approvalId'>,
+    sender: WebContents,
+    signal: AbortSignal
+  ): Promise<boolean> {
+    if (signal.aborted || sender.isDestroyed()) return Promise.resolve(false)
+    const approvalId = randomUUID()
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false
+      const finish = (approved: boolean): void => {
+        if (settled) return
+        settled = true
+        this.#pending.delete(approvalId)
+        signal.removeEventListener('abort', cancel)
+        sender.removeListener('destroyed', cancel)
+        resolve(approved)
+      }
+      const cancel = (): void => finish(false)
+      this.#pending.set(approvalId, { senderId: sender.id, finish })
+      signal.addEventListener('abort', cancel, { once: true })
+      sender.once('destroyed', cancel)
+      emitTo(sender, 'tool.approval.requested', { approvalId, ...payload })
+    })
+  }
+
+  resolve(approvalId: string, approved: boolean, sender: WebContents): boolean {
+    const pending = this.#pending.get(approvalId)
+    if (!pending || pending.senderId !== sender.id) return false
+    pending.finish(approved)
+    return true
+  }
+
+  cancelAll(): void {
+    for (const pending of [...this.#pending.values()]) pending.finish(false)
   }
 }
 
@@ -416,7 +572,8 @@ export class PersistenceFacade {
 
   constructor(
     private readonly sessions: JsonSessionRepository,
-    private readonly settings: JsonSettingsRepository
+    private readonly settings: JsonSettingsRepository,
+    private readonly secrets: SecretProtector = unavailableSecretProtector
   ) {}
 
   async listSessions(): Promise<SessionSummary[]> {
@@ -493,12 +650,12 @@ export class PersistenceFacade {
 
   async getSettings(): Promise<AppSettings> {
     await this.#writeTail
-    return toDesktopSettings((await this.settings.load()) ?? defaultPersistedSettings())
+    return toDesktopSettings(await this.#loadSettings())
   }
 
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
     return this.#serializeWrite(async () => {
-      const current = (await this.settings.load()) ?? defaultPersistedSettings()
+      const current = await this.#loadSettings()
       const selectedModel = patch.selectedModel ?? current.selectedModel
       const models = patch.models ?? current.models
       const next: PersistedSettings = {
@@ -509,15 +666,134 @@ export class PersistenceFacade {
         themeMode: patch.themeMode ?? current.themeMode ?? 'system',
         disabledTools: patch.disabledTools ?? current.disabledTools,
         fontScale: patch.fontScale ?? current.fontScale ?? 1,
-        providerEnabled: patch.providerEnabled ?? current.providerEnabled ?? true,
-        providerBaseUrl: patch.providerBaseUrl ?? current.providerBaseUrl ?? '',
-        providerApiKey: patch.providerApiKey ?? current.providerApiKey ?? ''
+        contextWindowTokens: patch.contextWindowTokens ?? current.contextWindowTokens ?? 32768,
+        preferApiModel: patch.preferApiModel ?? current.preferApiModel ?? false,
+        activeApiProfileId: validProfileId(
+          patch.activeApiProfileId,
+          current.activeApiProfileId,
+          current.apiProfiles
+        )
       }
       if (!(await this.settings.save(next))) {
         throw new DesktopIpcError('SERVICE_UNAVAILABLE', '无法保存设置。')
       }
       return toDesktopSettings(next)
     })
+  }
+
+  saveApiProfile(input: InputFor<'api.profile.save'>): Promise<AppSettings> {
+    return this.#serializeWrite(async () => {
+      const current = await this.#loadSettings()
+      const id = input.id?.trim() || randomUUID()
+      const existing = current.apiProfiles.find((profile) => profile.id === id)
+      const baseUrl = input.baseUrl.trim()
+      if (baseUrl) assertSafeProviderUrl(baseUrl)
+      let apiKeyCiphertext = existing?.apiKeyCiphertext ?? ''
+      if (input.clearApiKey) apiKeyCiphertext = ''
+      else if (input.apiKey !== undefined) {
+        try {
+          apiKeyCiphertext = input.apiKey ? this.secrets.encrypt(input.apiKey) : ''
+        } catch {
+          throw new DesktopIpcError('SERVICE_UNAVAILABLE', 'Windows 安全存储当前不可用。')
+        }
+      }
+      const profile: PersistedSettings['apiProfiles'][number] = {
+        id,
+        name: input.name.trim(),
+        baseUrl,
+        model: input.model.trim(),
+        apiKeyCiphertext,
+        legacyApiKey: '',
+      }
+      const apiProfiles = existing
+        ? current.apiProfiles.map((candidate) => candidate.id === id ? profile : candidate)
+        : [...current.apiProfiles, profile]
+      const next: PersistedSettings = {
+        ...current,
+        apiProfiles,
+        activeApiProfileId: current.activeApiProfileId ?? id,
+      }
+      await this.#saveSettings(next)
+      return toDesktopSettings(next)
+    })
+  }
+
+  deleteApiProfile(profileId: string): Promise<AppSettings> {
+    return this.#serializeWrite(async () => {
+      const current = await this.#loadSettings()
+      if (!current.apiProfiles.some((profile) => profile.id === profileId)) {
+        throw new DesktopIpcError('NOT_FOUND', 'API 配置不存在。')
+      }
+      const apiProfiles = current.apiProfiles.filter((profile) => profile.id !== profileId)
+      const deletedActive = current.activeApiProfileId === profileId
+      const next: PersistedSettings = {
+        ...current,
+        apiProfiles,
+        preferApiModel: deletedActive ? false : current.preferApiModel,
+        activeApiProfileId: deletedActive ? null : current.activeApiProfileId,
+      }
+      await this.#saveSettings(next)
+      return toDesktopSettings(next)
+    })
+  }
+
+  async getApiEndpoint(profileId: string | null): Promise<(OllamaEndpointOptions & { model: string }) | null> {
+    await this.#writeTail
+    if (!profileId) return null
+    const current = await this.#loadSettings()
+    const profile = current.apiProfiles.find((candidate) => candidate.id === profileId)
+    if (!profile) return null
+    if (profile.baseUrl) assertSafeProviderUrl(profile.baseUrl)
+    let apiKey = profile.legacyApiKey
+    if (profile.apiKeyCiphertext) {
+      try {
+        apiKey = this.secrets.decrypt(profile.apiKeyCiphertext)
+      } catch {
+        throw new DesktopIpcError('SERVICE_UNAVAILABLE', '无法读取安全保存的 API 密钥。')
+      }
+    }
+    return {
+      baseUrl: profile.baseUrl,
+      model: profile.model,
+      ...(apiKey ? { apiKey } : {}),
+    }
+  }
+
+  async #loadSettings(): Promise<PersistedSettings> {
+    const loaded = await this.settings.load()
+    const current: PersistedSettings = loaded
+      ? {
+          ...defaultPersistedSettings(),
+          ...loaded,
+          apiProfiles: loaded.apiProfiles ?? [],
+          activeApiProfileId: loaded.activeApiProfileId ?? null,
+        }
+      : defaultPersistedSettings()
+    let changed = false
+    const apiProfiles = current.apiProfiles.map((profile) => {
+      if (!profile.legacyApiKey || profile.apiKeyCiphertext) return profile
+      try {
+        const migrated = {
+          ...profile,
+          apiKeyCiphertext: this.secrets.encrypt(profile.legacyApiKey),
+          legacyApiKey: '',
+        }
+        changed = true
+        return migrated
+      } catch {
+        return profile
+      }
+    })
+    if (!changed) return current
+    const migrated = { ...current, apiProfiles }
+    await this.#saveSettings(migrated)
+    return migrated
+  }
+
+  async #saveSettings(settings: PersistedSettings): Promise<void> {
+    if (!(await this.settings.save(settings))) {
+      throw new DesktopIpcError('SERVICE_UNAVAILABLE', '无法保存设置。')
+    }
   }
 
   async requireWritableSessions(): Promise<ConversationSession[]> {
@@ -666,14 +942,14 @@ function defaultPersistedSettings(): PersistedSettings {
     reasoningMode: 'fast',
     activeSessionId: null,
     gpuVramGb: 8,
-    contextWindowTokens: 8192,
+    contextWindowTokens: 32768,
     numPredict: 2048,
     themeMode: 'system',
     disabledTools: [],
     fontScale: 1,
-    providerEnabled: true,
-    providerBaseUrl: '',
-    providerApiKey: ''
+    preferApiModel: false,
+    apiProfiles: [],
+    activeApiProfileId: null
   }
 }
 
@@ -683,6 +959,7 @@ function toDesktopSettings(settings: PersistedSettings): AppSettings {
     ? [...settings.models]
     : [settings.selectedModel, ...settings.models]
   const disabled = settings.disabledTools ?? []
+  const apiProfiles = settings.apiProfiles ?? []
   return {
     selectedModel: settings.selectedModel,
     models,
@@ -690,9 +967,47 @@ function toDesktopSettings(settings: PersistedSettings): AppSettings {
     themeMode: settings.themeMode ?? 'system',
     disabledTools: toolNameSchema.options.filter((name) => disabled.includes(name)),
     fontScale: Math.min(1.3, Math.max(0.85, settings.fontScale ?? 1)),
-    providerEnabled: settings.providerEnabled ?? true,
-    providerBaseUrl: settings.providerBaseUrl ?? '',
-    providerApiKey: settings.providerApiKey ?? ''
+    contextWindowTokens: settings.contextWindowTokens ?? 32768,
+    preferApiModel: settings.preferApiModel ?? false,
+    apiProfiles: apiProfiles.map((profile): ApiProfile => ({
+      id: profile.id,
+      name: profile.name,
+      baseUrl: profile.baseUrl,
+      model: profile.model,
+      hasApiKey: Boolean(profile.apiKeyCiphertext || profile.legacyApiKey),
+    })),
+    activeApiProfileId: settings.activeApiProfileId ?? null
+  }
+}
+
+const unavailableSecretProtector: SecretProtector = {
+  encrypt: () => { throw new Error('Secure storage unavailable') },
+  decrypt: () => { throw new Error('Secure storage unavailable') },
+}
+
+function validProfileId(
+  requested: string | null | undefined,
+  current: string | null,
+  profiles: PersistedSettings['apiProfiles']
+): string | null {
+  if (requested === undefined) return current
+  if (requested === null) return null
+  return profiles.some((profile) => profile.id === requested) ? requested : current
+}
+
+function assertSafeProviderUrl(value: string): void {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new DesktopIpcError('VALIDATION_FAILED', 'API 地址格式无效。')
+  }
+  if (url.protocol === 'https:') return
+  const loopback = url.hostname === 'localhost'
+    || url.hostname === '127.0.0.1'
+    || url.hostname === '[::1]'
+  if (url.protocol !== 'http:' || !loopback) {
+    throw new DesktopIpcError('VALIDATION_FAILED', 'API 地址必须使用 HTTPS；本机地址可以使用 HTTP。')
   }
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { OllamaAgent, type AgentBridgeClient } from '../ollamaAgent'
+import { AgentRuntime, type AgentBridgeClient } from '../agentRuntime'
 
 /** Builds a fetch response whose body is the ndjson stream Ollama actually sends. */
 function ndjsonResponse(chunks: Array<Record<string, unknown>>): Response {
@@ -10,7 +10,7 @@ function ndjsonResponse(chunks: Array<Record<string, unknown>>): Response {
   })
 }
 
-describe('Ollama streaming tool loop', () => {
+describe('AgentRuntime streaming tool loop', () => {
   it('executes an allowed tool then returns the second-round answer', async () => {
     let bridgeCalls = 0
     const bridge: AgentBridgeClient = {
@@ -46,9 +46,9 @@ describe('Ollama streaming tool loop', () => {
       return replies.shift() as unknown as Response
     }) as unknown as typeof fetch
     const events: string[] = []
-    const agent = new OllamaAgent({ bridgeClient: bridge, fetchImpl })
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl })
 
-    const result = await agent.run('检查连接', {
+    const result = await runtime.run('检查连接', {
       onEvent: (event) => events.push(event.phase === 'started' || event.phase === 'completed'
         ? `${event.phase}:${event.tool}`
         : `${event.phase}:${event.delta}`),
@@ -80,9 +80,9 @@ describe('Ollama streaming tool loop', () => {
       { done: true, prompt_eval_count: 10, eval_count: 6 },
     ])) as unknown as typeof fetch
     const deltas: string[] = []
-    const agent = new OllamaAgent({ bridgeClient: bridge, fetchImpl })
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl })
 
-    const result = await agent.run('你好', {
+    const result = await runtime.run('你好', {
       onEvent: (event) => {
         if (event.phase === 'thinking' || event.phase === 'text') deltas.push(`${event.phase}:${event.delta}`)
       },
@@ -118,11 +118,11 @@ describe('Ollama streaming tool loop', () => {
       // Second round: nothing left to say → the empty-response guard stops the run.
       return ndjsonResponse([{ done: true, prompt_eval_count: 5, eval_count: 0 }])
     }) as unknown as typeof fetch
-    const agent = new OllamaAgent({ bridgeClient: bridge, fetchImpl })
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl })
 
-    const result = await agent.run('看状态和文档')
+    const result = await runtime.run('看状态和文档')
     expect(result.isSuccess).toBe(false)
-    expect(result.errorCode).toBe('OLLAMA_EMPTY_RESPONSE')
+    expect(result.errorCode).toBe('MODEL_EMPTY_RESPONSE')
     expect(bridgeCalls).toEqual(['navisworks_status', 'navisworks_get_document'])
   })
 
@@ -145,9 +145,9 @@ describe('Ollama streaming tool loop', () => {
       ndjsonResponse([{ message: { role: 'assistant', content: '该工具不可用。' } }]),
     ]
     const fetchImpl = vi.fn(async () => replies.shift() as unknown as Response) as unknown as typeof fetch
-    const agent = new OllamaAgent({ bridgeClient: bridge, fetchImpl })
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl })
 
-    const result = await agent.run('运行脚本')
+    const result = await runtime.run('运行脚本')
     expect(result.isSuccess).toBe(true)
     expect(bridgeCalls).toBe(0)
   })
@@ -180,9 +180,9 @@ describe('Ollama streaming tool loop', () => {
         { done: true },
       ])
     }) as unknown as typeof fetch
-    const agent = new OllamaAgent({ bridgeClient: bridge, fetchImpl })
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl })
 
-    const result = await agent.run('查属性')
+    const result = await runtime.run('查属性')
     expect(result.isSuccess).toBe(true)
     expect(received[0]).toEqual({ itemIds: ['item-2-59'] })
   })
@@ -213,13 +213,9 @@ describe('Ollama streaming tool loop', () => {
         { done: true },
       ])
     }) as unknown as typeof fetch
-    const agent = new OllamaAgent({
-      bridgeClient: bridge,
-      fetchImpl,
-      disabledTools: ['navisworks_set_visibility'],
-    })
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl })
 
-    const result = await agent.run('隐藏构件')
+    const result = await runtime.run({ text: '隐藏构件', disabledTools: ['navisworks_set_visibility'] })
 
     const tools = (requestBodies[0]?.tools ?? []) as Array<{ function: { name: string } }>
     expect(tools.some((tool) => tool.function.name === 'navisworks_set_visibility')).toBe(false)
@@ -229,37 +225,148 @@ describe('Ollama streaming tool loop', () => {
     expect(result.isSuccess).toBe(true)
   })
 
-  it('sends bearer auth only when an api key is configured', async () => {
-    const bridge: AgentBridgeClient = { async call<T>() { return undefined as T } }
-    const seenHeaders: Array<Record<string, unknown>> = []
-    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      seenHeaders.push((init?.headers ?? {}) as Record<string, unknown>)
-      return ndjsonResponse([
-        { message: { role: 'assistant', content: '好。' } },
-        { done: true },
-      ])
-    }) as unknown as typeof fetch
+  it('does not execute a view-state tool until the approval callback confirms it', async () => {
+    const bridgeCall = vi.fn()
+    const makeRuntime = (decision: boolean) => {
+      const replies = [
+        ndjsonResponse([{ message: { role: 'assistant', content: '', tool_calls: [
+          { function: { name: 'navisworks_set_visibility', arguments: { action: 'hide', itemIds: ['1'] } } },
+        ] } }]),
+        ndjsonResponse([{ message: { role: 'assistant', content: '操作已处理。' } }]),
+      ]
+      const runtime = new AgentRuntime({
+        bridgeClient: {
+          async call<T>(method: string, parameters?: Record<string, unknown>) {
+            bridgeCall(method, parameters)
+            return { hidden: 1 } as T
+          },
+        },
+        fetchImpl: vi.fn(async () => replies.shift() as Response) as unknown as typeof fetch,
+      })
+      return runtime.run('隐藏构件', {
+        requestToolApproval: async () => decision,
+      })
+    }
 
-    const withKey = new OllamaAgent({ bridgeClient: bridge, fetchImpl, apiKey: ' sk-test ' })
-    await withKey.run('你好')
-    expect(seenHeaders[0]?.Authorization).toBe('Bearer sk-test')
+    await expect(makeRuntime(false)).resolves.toMatchObject({ isSuccess: true })
+    expect(bridgeCall).not.toHaveBeenCalled()
 
-    seenHeaders.length = 0
-    const withoutKey = new OllamaAgent({ bridgeClient: bridge, fetchImpl })
-    await withoutKey.run('你好')
-    expect(seenHeaders[0]?.Authorization).toBeUndefined()
+    await expect(makeRuntime(true)).resolves.toMatchObject({ isSuccess: true })
+    expect(bridgeCall).toHaveBeenCalledTimes(1)
   })
 
   it('propagates caller cancellation as AbortError', async () => {
     const controller = new AbortController()
     controller.abort()
-    const agent = new OllamaAgent({
+    const runtime = new AgentRuntime({
       bridgeClient: { call: vi.fn() },
       fetchImpl: vi.fn() as unknown as typeof fetch,
     })
 
-    await expect(agent.run('检查连接', { signal: controller.signal })).rejects.toEqual(
+    await expect(runtime.run('检查连接', { signal: controller.signal })).rejects.toEqual(
       expect.objectContaining({ name: 'AbortError' }),
     )
+  })
+
+  it('caps the local context window at 32K when building num_ctx', async () => {
+    const bridge: AgentBridgeClient = { async call<T>() { return undefined as T } }
+    const requestBodies: Array<Record<string, unknown>> = []
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return ndjsonResponse([
+        { message: { role: 'assistant', content: '好。' }, prompt_eval_count: 1, eval_count: 1 },
+      ])
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl, contextWindow: 65536 })
+
+    await runtime.run('你好')
+
+    const options = requestBodies[0]?.options as Record<string, unknown>
+    expect(options.num_ctx).toBe(32768)
+  })
+
+  it('auto-compacts older rounds when usage crosses 90% of the window', async () => {
+    const bridgeCalls: string[] = []
+    const bridge: AgentBridgeClient = {
+      async call(method) {
+        bridgeCalls.push(method)
+        return { marker: `结果${bridgeCalls.length}` } as never
+      },
+    }
+    // Window 1024 → trigger at 90% = 921.6 tokens of usage. Three tool rounds
+    // with big usage push past it; the fourth response is the final answer.
+    const toolCallChunk = (usage: number) => ndjsonResponse([
+      {
+        message: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ function: { name: 'navisworks_status', arguments: {} } }],
+        },
+        prompt_eval_count: usage,
+        eval_count: 0,
+      },
+    ])
+    const requestBodies: Array<Record<string, unknown>> = []
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      const calls = requestBodies.length
+      if (calls <= 3) return toolCallChunk(calls === 1 ? 450 : 1000)
+      // Compaction summarizer call (4th) — the compact summary text.
+      return ndjsonResponse([
+        { message: { role: 'assistant', content: '已完成第一、二轮；第三轮进行中。' } },
+      ])
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl, contextWindow: 1024 })
+
+    const result = await runtime.run('第一步：检查一个')
+
+    expect(result.isSuccess).toBe(true)
+    expect(result.compacted).toBe(true)
+    // 5th request = the final answer round, AFTER compaction: the summary
+    // replaced the early rounds.
+    const answerMessages = JSON.stringify(requestBodies[4]?.messages)
+    expect(answerMessages).toContain('压缩摘要')
+    expect(answerMessages).toContain('已完成第一、二轮')
+    expect(answerMessages).not.toContain('第一步')
+    // The recent rounds stay verbatim for live tool-result references.
+    expect(answerMessages).toContain('结果2')
+  })
+
+  it('keeps automatic and manual compaction local without an API endpoint', async () => {
+    let localCalls = 0
+    const toolCallChunk = () => ndjsonResponse([{
+      message: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ function: { name: 'navisworks_status', arguments: {} } }],
+      },
+      prompt_eval_count: 1000,
+      eval_count: 0,
+    }])
+    const fetchImpl = vi.fn(async () => {
+      localCalls += 1
+      if (localCalls <= 3) return toolCallChunk()
+      return ndjsonResponse([{
+        message: {
+          role: 'assistant',
+          content: localCalls === 4 ? '本地压缩摘要' : '本地最终回答',
+        },
+        prompt_eval_count: 10,
+        eval_count: 2,
+      }])
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({
+      bridgeClient: { async call<T>() { return { ok: true } as T } },
+      contextWindow: 1024,
+      fetchImpl,
+    })
+    const automatic = await runtime.run({ text: '只在本地执行' })
+    const manual = await runtime.compactConversation(
+      [{ role: 'user', content: '不要上传这段会话' }],
+      { model: 'local-model' },
+    )
+
+    expect(automatic.compacted).toBe(true)
+    expect(manual).toBe('本地最终回答')
   })
 })

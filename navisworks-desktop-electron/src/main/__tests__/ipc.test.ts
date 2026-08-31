@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('electron', () => ({
@@ -16,6 +17,7 @@ import {
   ChatRunRegistry,
   PersistenceFacade,
   registerDesktopIpc,
+  ToolApprovalRegistry,
   type DesktopIpcDependencies,
   type OllamaAgentPort,
 } from '../ipc'
@@ -155,17 +157,24 @@ function stubAgent(): OllamaAgentPort {
 }
 
 function fakeSender(): WebContents {
+  const events = new EventEmitter()
   return {
+    id: 1,
     isDestroyed: () => false,
     send: vi.fn(),
+    once: events.once.bind(events),
+    removeListener: events.removeListener.bind(events),
   } as unknown as WebContents
 }
 
 const TRUSTED_EVENT = {
   sender: {
+    id: 1,
     isDestroyed: () => false,
     getType: () => 'window',
     send: vi.fn(),
+    once: vi.fn(),
+    removeListener: vi.fn(),
   },
   senderFrame: { parent: null, url: `${DEV_ORIGIN}/` },
 } as unknown as IpcMainInvokeEvent
@@ -180,6 +189,9 @@ function createHarness(options: {
   ollama: OllamaAgentPort
   store?: SessionStore
   settings?: JsonSettingsRepository
+  secrets?: { encrypt(value: string): string; decrypt(value: string): string }
+  bridge?: NavisworksBridgeClient
+  tools?: ToolCatalog
 }): IpcHarness {
   const store = options.store ?? createSessionStore()
   const dependencies: DesktopIpcDependencies = {
@@ -192,14 +204,15 @@ function createHarness(options: {
     },
     sessions: store as unknown as JsonSessionRepository,
     settings: options.settings ?? settingsStub(),
-    bridge: {} as NavisworksBridgeClient,
-    tools: { assertAllowed: () => undefined } as unknown as ToolCatalog,
+    bridge: options.bridge ?? ({} as NavisworksBridgeClient),
+    tools: options.tools ?? ({ assertAllowed: () => undefined, get: () => undefined } as unknown as ToolCatalog),
     ollama: options.ollama,
     appearance: {
       getState: () => ({ themeMode: 'system', effectiveTheme: 'light' }),
       setThemeMode: (themeMode) => ({ themeMode, effectiveTheme: 'light' }),
     },
     senderTrust: { isPackaged: false, rendererRoot: 'D:\\app\\renderer', devServerUrl: DEV_ORIGIN },
+    secrets: options.secrets,
   }
 
   const dispose = registerDesktopIpc(dependencies)
@@ -294,6 +307,30 @@ describe('ChatRunRegistry.abortAndWait', () => {
     await expect(registry.abortAndWait('session-a')).resolves.toBe(true)
     expect(signals).toHaveLength(2)
     for (const signal of signals) expect(signal.aborted).toBe(true)
+  })
+})
+
+describe('ToolApprovalRegistry', () => {
+  it('binds a one-shot approval to the requesting renderer', async () => {
+    const registry = new ToolApprovalRegistry()
+    const sender = fakeSender()
+    const controller = new AbortController()
+    const pending = registry.request({
+      runId: 'run-1',
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      messageId: 'message-1',
+      toolName: 'navisworks_set_visibility',
+      arguments: { action: 'hide', itemIds: ['1'] },
+    }, sender, controller.signal)
+
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+    const payload = send.mock.calls[0]?.[2] as { approvalId: string }
+    expect(payload.approvalId).toBeTruthy()
+    expect(registry.resolve(payload.approvalId, true, { ...sender, id: 2 } as WebContents)).toBe(false)
+    expect(registry.resolve(payload.approvalId, true, sender)).toBe(true)
+    await expect(pending).resolves.toBe(true)
+    expect(registry.resolve(payload.approvalId, true, sender)).toBe(false)
   })
 })
 
@@ -415,6 +452,38 @@ describe('desktop IPC session routes', () => {
   })
 })
 
+describe('desktop IPC tool authorization', () => {
+  it('rejects direct renderer attempts to bypass confirmation for view changes', async () => {
+    const bridgeCall = vi.fn()
+    const harness = createHarness({
+      ollama: stubAgent(),
+      bridge: {
+        async call<T>(method: string, parameters?: Record<string, unknown>) {
+          bridgeCall(method, parameters)
+          return {} as T
+        },
+      } as NavisworksBridgeClient,
+      tools: {
+        assertAllowed: () => undefined,
+        get: () => ({ impact: 'view-state-change' }),
+      } as unknown as ToolCatalog,
+    })
+    try {
+      const result = await harness.invoke('navisworks.tool.execute', {
+        toolName: 'navisworks_set_visibility',
+        arguments: { action: 'hide', itemIds: ['1'] },
+      })
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: 'VALIDATION_FAILED' },
+      })
+      expect(bridgeCall).not.toHaveBeenCalled()
+    } finally {
+      await harness.dispose()
+    }
+  })
+})
+
 describe('sessions.summarizeTitle route', () => {
   it('returns the model-suggested title when the agent supports summarization', async () => {
     const agent = {
@@ -461,6 +530,9 @@ describe('desktop IPC settings routes', () => {
     numPredict: 2048,
     themeMode: 'system',
     disabledTools: [],
+    preferApiModel: false,
+    apiProfiles: [],
+    activeApiProfileId: null,
   }
 
   it('merges a disabledTools patch and serves it back from settings.get', async () => {
@@ -486,6 +558,106 @@ describe('desktop IPC settings routes', () => {
           'navisworks_set_visibility',
         ])
       }
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('saves an API profile without returning its plaintext key', async () => {
+    const harness = createHarness({
+      ollama: stubAgent(),
+      settings: statefulSettingsStub({ ...baseSettings }),
+      secrets: {
+        encrypt: (value) => `encrypted:${value}`,
+        decrypt: (value) => value.replace(/^encrypted:/, ''),
+      },
+    })
+    try {
+      const updated = await harness.invoke('api.profile.save', {
+        name: '云端',
+        baseUrl: 'https://cloud.example.com/v1',
+        model: 'qwen-plus',
+        apiKey: 'sk-secret',
+      })
+      expect(updated).toMatchObject({ ok: true })
+      if (updated.ok) {
+        expect(updated.data).toMatchObject({
+          apiProfiles: [expect.objectContaining({ name: '云端', hasApiKey: true })],
+        })
+        expect(JSON.stringify(updated.data)).not.toContain('sk-secret')
+      }
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('rejects insecure remote API addresses while allowing local HTTP endpoints', async () => {
+    const harness = createHarness({
+      ollama: stubAgent(),
+      settings: statefulSettingsStub({ ...baseSettings }),
+    })
+    try {
+      await expect(harness.invoke('api.profile.save', {
+        name: '远程 HTTP',
+        baseUrl: 'http://192.168.1.20:8080/v1',
+        model: 'model-a',
+      })).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'VALIDATION_FAILED' },
+      })
+      await expect(harness.invoke('api.profile.save', {
+        name: '本机接口',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        model: 'model-a',
+      })).resolves.toMatchObject({ ok: true })
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('migrates a legacy plaintext key before exposing settings to the renderer', async () => {
+    let savedSettings: unknown
+    const settings = {
+      async load() {
+        return {
+          ...baseSettings,
+          apiProfiles: [{
+            id: 'legacy-profile',
+            name: '旧配置',
+            baseUrl: 'https://legacy.example.com/v1',
+            model: 'legacy-model',
+            apiKeyCiphertext: '',
+            legacyApiKey: 'sk-legacy',
+          }],
+          activeApiProfileId: 'legacy-profile',
+        }
+      },
+      async save(next: unknown) {
+        savedSettings = next
+        return true
+      },
+    } as unknown as JsonSettingsRepository
+    const harness = createHarness({
+      ollama: stubAgent(),
+      settings,
+      secrets: {
+        encrypt: (value) => `encrypted:${value}`,
+        decrypt: (value) => value.replace(/^encrypted:/, ''),
+      },
+    })
+    try {
+      const got = await harness.invoke('settings.get', undefined)
+      expect(got).toMatchObject({
+        ok: true,
+        data: { apiProfiles: [expect.objectContaining({ hasApiKey: true })] },
+      })
+      expect(JSON.stringify(got)).not.toContain('sk-legacy')
+      expect(savedSettings).toMatchObject({
+        apiProfiles: [expect.objectContaining({
+          apiKeyCiphertext: 'encrypted:sk-legacy',
+          legacyApiKey: '',
+        })],
+      })
     } finally {
       await harness.dispose()
     }
@@ -517,7 +689,7 @@ describe('desktop IPC settings routes', () => {
     }
   })
 
-  it('passes provider endpoint settings into the run', async () => {
+  it('passes the active API profile into the run', async () => {
     const seen: Array<Record<string, unknown>> = []
     const agent: OllamaAgentPort = {
       ...stubAgent(),
@@ -530,47 +702,59 @@ describe('desktop IPC settings routes', () => {
       ollama: agent,
       settings: statefulSettingsStub({
         ...baseSettings,
-        providerBaseUrl: 'http://192.168.1.20:11434',
-        providerApiKey: 'sk-test',
+        preferApiModel: true,
+        apiProfiles: [{
+          id: 'active-profile',
+          name: '当前',
+          baseUrl: 'https://active.example.com/v1',
+          model: 'active-model',
+          apiKeyCiphertext: 'encrypted:active-key',
+          legacyApiKey: '',
+        }],
+        activeApiProfileId: 'active-profile',
       }),
+      secrets: {
+        encrypt: (value) => `encrypted:${value}`,
+        decrypt: (value) => value.replace(/^encrypted:/, ''),
+      },
     })
     try {
       const started = await harness.invoke('chat.start', chatStartInput())
       expect(started).toMatchObject({ ok: true })
       await vi.waitFor(() => expect(seen).toHaveLength(1))
-      expect(seen[0]?.providerBaseUrl).toBe('http://192.168.1.20:11434')
-      expect(seen[0]?.providerApiKey).toBe('sk-test')
+      expect(seen[0]?.api).toEqual({
+        baseUrl: 'https://active.example.com/v1',
+        apiKey: 'active-key',
+        model: 'active-model',
+      })
     } finally {
       await harness.dispose()
     }
   })
 
-  it('rejects chat runs while the provider is disabled', async () => {
-    const run = vi.fn(async () => ({ content: '' }))
+  it('runs chat locally when no API profile is active', async () => {
+    const run = vi.fn(async (_input: unknown) => ({ content: '本地回答。' }))
     const agent: OllamaAgentPort = {
       ...stubAgent(),
       run: run as unknown as OllamaAgentPort['run'],
     }
     const harness = createHarness({
       ollama: agent,
-      settings: statefulSettingsStub({
-        ...baseSettings,
-        providerEnabled: false,
-      }),
+      settings: statefulSettingsStub({ ...baseSettings }),
     })
     try {
       const started = await harness.invoke('chat.start', chatStartInput())
       expect(started).toMatchObject({ ok: true }) // start() returns before the run executes
-      // The run is refused before reaching the agent; a chat.error explains why.
+      // The done event proves the local run was never gated.
       const sender = TRUSTED_EVENT.sender as unknown as { send: ReturnType<typeof vi.fn> }
       await vi.waitFor(() => {
-        if (!sender.send.mock.calls.some((call) => call[1] === 'chat.error')) {
-          throw new Error('chat.error not emitted yet')
+        if (!sender.send.mock.calls.some((call) => call[1] === 'chat.done')) {
+          throw new Error('chat.done not emitted yet')
         }
       })
-      expect(run).not.toHaveBeenCalled()
-      const errorCall = sender.send.mock.calls.find((call) => call[1] === 'chat.error')
-      expect(JSON.stringify(errorCall?.[2])).toContain('模型提供商已停用')
+      expect(run).toHaveBeenCalledTimes(1)
+      const runInput = run.mock.calls[0]?.[0] as { api?: unknown }
+      expect(runInput.api).toBeUndefined()
     } finally {
       await harness.dispose()
     }

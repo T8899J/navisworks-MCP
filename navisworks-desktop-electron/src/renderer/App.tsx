@@ -15,6 +15,7 @@ import {
   type DesktopSettings,
   type NavisworksStatus,
   type SessionSummary,
+  type ToolApprovalRequest,
   createId,
   normalizeStatus
 } from './chatTypes'
@@ -44,9 +45,10 @@ const DEFAULT_SETTINGS: DesktopSettings = {
   themeMode: 'system',
   disabledTools: [],
   fontScale: 1,
-  providerEnabled: true,
-  providerBaseUrl: '',
-  providerApiKey: ''
+  contextWindowTokens: 32768,
+  preferApiModel: false,
+  apiProfiles: [],
+  activeApiProfileId: null
 }
 
 const DEFAULT_NAVISWORKS_STATUS: NavisworksStatus = {
@@ -167,6 +169,11 @@ export default function App() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS)
   const [appearance, setAppearance] = useState<AppearanceState>(systemAppearance)
   const [navisworks, setNavisworks] = useState(DEFAULT_NAVISWORKS_STATUS)
+  // Round-trip latency of the last cloud connectivity test; null until run.
+  const [cloudLatency, setCloudLatency] = useState<{ ok: boolean; ms: number } | null>(null)
+  // Context-ring usage of the active session: tokens of the last round plus
+  // the backend's cache hit rate, when it reports one.
+  const [contextUsage, setContextUsage] = useState<{ used: number; cacheHitRate?: number } | null>(null)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo>()
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
@@ -180,10 +187,18 @@ export default function App() {
   // In-app delete confirmation target. Native dialogs are off-limits:
   // Electron's window.confirm() leaves the renderer unable to focus inputs.
   const [pendingDeleteSession, setPendingDeleteSession] = useState<SessionSummary | null>(null)
+  const [pendingToolApproval, setPendingToolApproval] = useState<ToolApprovalRequest | null>(null)
+  const [approvalResolving, setApprovalResolving] = useState(false)
   const [sessionTransitioning, setSessionTransitioning] = useState(false)
   const [deletingSessionId, setDeletingSessionId] = useState<string>()
   const [loading, setLoading] = useState(serviceAvailable)
   const [notice, setNotice] = useState(serviceAvailable ? '' : '桌面服务未连接，请通过 Electron 启动应用。')
+  // Notices float above every overlay and dismiss themselves after 3s.
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(''), 3000)
+    return () => window.clearTimeout(timer)
+  }, [notice])
   const [composerClearance, setComposerClearance] = useState(176)
   const composerDockRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<ChatSession | undefined>(undefined)
@@ -503,6 +518,7 @@ export default function App() {
       if (event.kind === 'done' || event.kind === 'error') {
         setBusy(false)
         setTurnId(undefined)
+        setPendingToolApproval((current) => current?.sessionId === event.sessionId ? null : current)
         // A late completion for a session already removed from the list must
         // never resurrect it through sessions.save; only clear the run state.
         if (shouldPersistChatCompletion(sessionsRef.current, event.sessionId)) {
@@ -513,12 +529,34 @@ export default function App() {
 
     const unsubscribers = [
       desktopGateway.subscribe('chat.chunk', (event) => applyChatEvent(event as ChatStreamEvent)),
-      desktopGateway.subscribe('chat.done', (event) => applyChatEvent(event as ChatStreamEvent)),
+      desktopGateway.subscribe('chat.done', (event) => {
+        const done = event as ChatStreamEvent
+        if (typeof done.contextTokensUsed === 'number') {
+          setContextUsage({
+            used: done.contextTokensUsed,
+            ...(typeof done.cacheHitRate === 'number' ? { cacheHitRate: done.cacheHitRate } : {})
+          })
+        }
+        if (done.compacted) {
+          setNotice('上下文已接近上限，早期过程已自动压缩为摘要')
+        }
+        applyChatEvent(done)
+      }),
       desktopGateway.subscribe('chat.error', (event) => applyChatEvent(event as ChatStreamEvent)),
+      desktopGateway.subscribe('tool.approval.requested', (event) => {
+        const approval = event as ToolApprovalRequest
+        if (approval.sessionId === activeSessionIdRef.current) setPendingToolApproval(approval)
+      }),
       desktopGateway.subscribe('navisworks.status.changed', (event) => setNavisworks(normalizeStatus(event)))
     ]
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
   }, [activeSessionId, persistSession, serviceAvailable])
+
+  // Context-ring data: the finished run's token usage feeds the composer's
+  // usage ring; switching sessions clears it until the next reply lands.
+  useEffect(() => {
+    setContextUsage(null)
+  }, [activeSessionId])
 
   // Escape dismisses the in-app delete confirmation; clicking the dimmed
   // backdrop cancels too.
@@ -636,6 +674,21 @@ export default function App() {
       await desktopGateway.abortChat(activeSessionId, turnId)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '停止生成失败')
+    }
+  }
+
+  const resolveToolApproval = async (decision: 'confirm' | 'cancel') => {
+    const approval = pendingToolApproval
+    if (!approval || approvalResolving) return
+    setApprovalResolving(true)
+    try {
+      const resolved = await desktopGateway.resolveToolApproval(approval.approvalId, decision)
+      if (!resolved) setNotice('该操作确认已经失效。')
+      setPendingToolApproval((current) => current?.approvalId === approval.approvalId ? null : current)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '无法提交操作确认')
+    } finally {
+      setApprovalResolving(false)
     }
   }
 
@@ -764,16 +817,11 @@ export default function App() {
     }
   }
 
-  // Provider endpoint from saved settings; empty base falls back to the
-  // main-process default (localhost:11434).
-  const providerEndpoint = () => ({
-    ...(settings.providerBaseUrl ? { baseUrl: settings.providerBaseUrl } : {}),
-    ...(settings.providerApiKey ? { apiKey: settings.providerApiKey } : {})
-  })
-
   const refreshModels = async () => {
     try {
-      const models = await desktopGateway.listModels(providerEndpoint())
+      // Always the LOCAL Ollama list: the model dropdown selects the local
+      // worker regardless of the active API endpoint configuration.
+      const models = await desktopGateway.listModels()
       if (models.length === 0) {
         setNotice('Ollama 当前没有可用模型。')
         return
@@ -788,14 +836,38 @@ export default function App() {
     }
   }
 
-  const testOllama = async (): Promise<string> => {
+  const testApiProfile = async (profileId: string): Promise<{ connected: boolean; message: string }> => {
+    const started = Date.now()
     try {
-      const result = await desktopGateway.testOllama(settings.selectedModel, providerEndpoint())
+      const result = await desktopGateway.testApiProfile(profileId)
+      setCloudLatency({ ok: result.connected, ms: Date.now() - started })
       if (!result.connected) setNotice(result.message)
-      return result.message
+      return result
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Ollama 连接测试失败')
+      setCloudLatency({ ok: false, ms: Date.now() - started })
+      setNotice(error instanceof Error ? error.message : '云端连接测试失败')
       throw error
+    }
+  }
+
+  // Manual /compact: summarize the active session's transcript and replace
+  // it, so the next message starts on a light context.
+  const runCompact = async () => {
+    const sessionId = activeSessionId
+    if (!sessionId || busy || !serviceAvailable) return
+    setBusy(true)
+    try {
+      const { summary } = await desktopGateway.compactSession(sessionId)
+      if (!summary) {
+        setNotice('当前会话还没有可压缩的内容')
+        return
+      }
+      setSession(await desktopGateway.getSession(sessionId))
+      setNotice('已压缩当前会话上下文')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '压缩上下文失败')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -881,20 +953,19 @@ export default function App() {
             busy={busy}
             settings={settings}
             serviceAvailable={serviceAvailable}
+            contextUsage={contextUsage}
+            approval={pendingToolApproval}
+            approvalResolving={approvalResolving}
             onDraftChange={setDraft}
             onSend={() => void sendText(draft)}
             onStop={() => void stop()}
-            onModelChange={(selectedModel) => void updateSettings({ ...settings, selectedModel })}
+            onResolveApproval={(decision) => void resolveToolApproval(decision)}
+            onModelChange={(selectedModel) => void updateSettings({ ...settings, selectedModel, preferApiModel: false })}
+            onApiModelPick={(activeApiProfileId) => void updateSettings({ ...settings, activeApiProfileId, preferApiModel: true })}
+            onSlashCommand={(cmd) => { if (cmd === 'compact') void runCompact() }}
             onReasoningChange={(reasoningMode) => void updateSettings({ ...settings, reasoningMode })}
           />
 
-          {notice ? (
-            <div className="notice-toast" role="status">
-              <CircleAlertIcon />
-              <span>{notice}</span>
-              <button type="button" onClick={() => setNotice('')} aria-label="关闭提示">×</button>
-            </div>
-          ) : null}
         </div>
       </main>
 
@@ -905,6 +976,15 @@ export default function App() {
           onClose={() => setSearchOpen(false)}
           onSelect={selectSession}
         />
+      ) : null}
+
+      {/* Toast floats above every overlay (settings included) and dismisses
+          itself after 3 seconds - no manual close. */}
+      {notice ? (
+        <div className="notice-toast" role="status">
+          <CircleAlertIcon />
+          <span>{notice}</span>
+        </div>
       ) : null}
 
       {pendingDeleteSession ? (
@@ -950,11 +1030,23 @@ export default function App() {
         onThemeModeChange={updateAppearance}
         onFontScaleChange={(fontScale) => updateSettings({ ...settings, fontScale })}
         onProviderChange={(patch) => updateSettings({ ...settings, ...patch })}
+        onSaveApiProfile={async (profile) => {
+          const saved = await desktopGateway.saveApiProfile(profile)
+          setSettings(saved)
+          return saved
+        }}
+        onDeleteApiProfile={async (profileId) => {
+          const saved = await desktopGateway.deleteApiProfile(profileId)
+          setSettings(saved)
+          return saved
+        }}
         onModelChange={(selectedModel) => updateSettings({ ...settings, selectedModel })}
-        onReasoningChange={(reasoningMode) => updateSettings({ ...settings, reasoningMode })}
         onDisabledToolsChange={(disabledTools) => updateSettings({ ...settings, disabledTools })}
         onRefreshModels={refreshModels}
-        onTestOllama={testOllama}
+        onFetchCloudModels={(profileId) => desktopGateway.listApiProfileModels(profileId)}
+        cloudLatency={cloudLatency}
+        onNotice={setNotice}
+        onTestApiProfile={testApiProfile}
         onRefreshNavisworks={refreshNavisworks}
       />
     </div>

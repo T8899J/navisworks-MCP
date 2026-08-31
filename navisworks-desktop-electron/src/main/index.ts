@@ -3,7 +3,7 @@ import { appendFile, mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { app, BrowserWindow, Menu, nativeTheme } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, safeStorage } from 'electron'
 
 import { NativeAppearanceService } from './appearance'
 import { NavisworksBridgeClient } from './bridgeClient'
@@ -18,12 +18,13 @@ import {
   type OllamaRunResult,
   type OllamaStreamEvent
 } from './ipc'
-import { OllamaAgent, type AgentRunEvent, type OllamaAgentOptions } from './ollamaAgent'
+import { AgentRuntime, type AgentRunEvent } from './agentRuntime'
+import { ModelRouter } from './model/modelRouter'
 import { JsonSessionRepository, JsonSettingsRepository } from './sessionRepository'
 import { denyAllPermissions, installProductionContentSecurityPolicy, secureWindowNavigation } from './security/windowSecurity'
 import type { SenderTrustOptions } from './security/validateSender'
 import { ToolCatalog } from './toolCatalog'
-import { DesktopIpcError, type RuntimeInfo } from '../shared/ipc'
+import { DesktopIpcError, type RuntimeInfo, type ToolName } from '../shared/ipc'
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url))
 const rendererRoot = join(moduleDirectory, '../renderer')
@@ -74,25 +75,16 @@ async function startApplication(): Promise<void> {
   appearance.start()
   const bridge = new NavisworksBridgeClient()
   const tools = new ToolCatalog()
-  const ollamaDefaults = {
+  // One runtime serves every run: model/reasoning/disabled-tools and the
+  // active API endpoint all arrive per request instead of per instance.
+  const runtime = new AgentRuntime({
     bridgeClient: bridge,
     model: persistedSettings?.selectedModel,
     think: persistedSettings?.reasoningMode === 'deep',
     contextWindow: persistedSettings?.contextWindowTokens,
     numPredict: persistedSettings?.numPredict
-  }
-  const rawOllama = new OllamaAgent(ollamaDefaults)
-  const ollama = adaptOllamaAgent(rawOllama, (input) => new OllamaAgent({
-    ...ollamaDefaults,
-    ...ollamaDefaults,
-    model: input.model?.trim() || ollamaDefaults.model,
-    think: input.reasoningMode === undefined
-      ? ollamaDefaults.think
-      : input.reasoningMode === 'deep',
-    ...(input.disabledTools === undefined ? {} : { disabledTools: input.disabledTools }),
-    ...(input.providerBaseUrl ? { baseUrl: input.providerBaseUrl } : {}),
-    ...(input.providerApiKey ? { apiKey: input.providerApiKey } : {})
-  }), ollamaDefaults)
+  })
+  const ollama = adaptModelAgent(runtime, new ModelRouter())
   const senderTrust: SenderTrustOptions = {
     isPackaged: app.isPackaged,
     rendererRoot,
@@ -114,7 +106,17 @@ async function startApplication(): Promise<void> {
     tools,
     ollama,
     appearance,
-    senderTrust
+    senderTrust,
+    secrets: {
+      encrypt(value) {
+        if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage unavailable')
+        return safeStorage.encryptString(value).toString('base64')
+      },
+      decrypt(value) {
+        if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage unavailable')
+        return safeStorage.decryptString(Buffer.from(value, 'base64'))
+      }
+    }
   })
   // Detect Navisworks appearing/disappearing without a manual refresh.
   const disposeStatusPolling = startNavisworksStatusPolling(bridge)
@@ -191,65 +193,69 @@ function applyWindowAppearance(state: import('../shared/ipc').AppearanceState): 
   broadcastNativeThemeUpdated(state)
 }
 
-function adaptOllamaAgent(
-  agent: OllamaAgent,
-  createRunAgent: (input: OllamaRunInput) => OllamaAgent,
-  probeDefaults: OllamaAgentOptions
-): OllamaAgentPort {
-  // Probe calls honor per-call endpoint overrides so the settings page can
-  // test an unsaved address/key; without overrides the shared instance (and
-  // its startup defaults) is reused.
-  const probeFor = (options?: OllamaEndpointOptions): OllamaAgent => {
-    if (!options?.baseUrl && !options?.apiKey) return agent
-    return new OllamaAgent({
-      ...probeDefaults,
-      ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
-      ...(options.apiKey ? { apiKey: options.apiKey } : {})
-    })
-  }
+function adaptModelAgent(runtime: AgentRuntime, router: ModelRouter): OllamaAgentPort {
   return {
+    // No overrides → the LOCAL Ollama list (model dropdown). Overrides with a
+    // baseUrl → list models from that OpenAI-compatible endpoint (the
+    // settings page's API-model fetch).
     listModels: async (options, signal) => {
-      const probe = probeFor(options)
-      try {
-        return await probe.listModels(signal)
-      } finally {
-        if (probe !== agent) await probe.dispose()
-      }
+      const baseUrl = options?.baseUrl?.trim()
+      if (!baseUrl) return router.local().listModels(signal)
+      const provider = router.forEndpoint({
+        kind: 'openai',
+        baseUrl,
+        ...(options?.apiKey ? { apiKey: options.apiKey } : {})
+      })
+      return provider.listModels(signal)
     },
+    // Connectivity-only check for the API endpoint: verifies the address
+    // answers (/models), never validates a specific model name.
     testConnection: async (options, signal) => {
-      const probe = probeFor(options)
+      const baseUrl = options?.baseUrl?.trim()
+      if (!baseUrl) {
+        return { connected: false, message: '云端 API 地址为空。' }
+      }
+      const provider = router.forEndpoint({
+        kind: 'openai',
+        baseUrl,
+        ...(options?.apiKey ? { apiKey: options.apiKey } : {})
+      })
       try {
-        const result = await probe.testConnection(signal)
-        return { connected: result.isSuccess, message: result.message }
-      } finally {
-        if (probe !== agent) await probe.dispose()
+        const models = await provider.listModels(signal)
+        return { connected: true, message: `端点连接正常，共 ${models.length} 个模型` }
+      } catch (error) {
+        if (signal?.aborted) throw error
+        return {
+          connected: false,
+          message: error instanceof Error ? error.message : String(error)
+        }
       }
     },
-    run: async (input, options) => {
-      // Model/reasoning are immutable OllamaAgent constructor options. Create a
-      // request-scoped instance so the UI selection is honored on every turn
-      // without mutating or racing the shared probe/list client.
-      const runAgent = createRunAgent(input)
-      try {
-        return await runOllamaAgent(runAgent, input, options)
-      } finally {
-        runAgent.dispose()
-      }
-    },
-    // Title summaries share the default instance (its model = the persisted
-    // selection); the method itself forces think:false and a tiny budget.
-    summarizeTitle: (text, signal) => agent.summarizeTitle(text, signal),
-    dispose: () => agent.dispose()
+    run: (input, options) => runAgent(runtime, input, options),
+    // Title summaries stay on the local model; the method itself forces a
+    // tiny budget so retitleing never competes with the main reply.
+    summarizeTitle: (text, signal) => runtime.summarizeTitle(text, signal),
+    // Manual /compact follows the active chat endpoint, or the local model.
+    compact: (messages, input, options) =>
+      runtime.compactConversation(messages, input, options?.signal),
+    dispose: () => runtime.dispose()
   }
 }
 
-async function runOllamaAgent(
-  agent: OllamaAgent,
+async function runAgent(
+  runtime: AgentRuntime,
   input: OllamaRunInput,
-  options: { signal: AbortSignal; onEvent: (event: OllamaStreamEvent) => void }
+  options: {
+    signal: AbortSignal
+    onEvent: (event: OllamaStreamEvent) => void
+    requestToolApproval: (
+      toolName: ToolName,
+      argumentsValue: Record<string, unknown>
+    ) => Promise<boolean>
+  }
 ): Promise<OllamaRunResult> {
   const activeToolCalls = new Map<string, string[]>()
-  const onToolEvent = (event: AgentRunEvent): void => {
+  const onAgentEvent = (event: AgentRunEvent): void => {
     if (event.phase === 'text') {
       options.onEvent({ kind: 'text', delta: event.delta })
       return
@@ -287,11 +293,21 @@ async function runOllamaAgent(
     })
   }
 
-  const result = await agent.run(input.text, {
-    history: input.history,
-    signal: options.signal,
-    onEvent: onToolEvent
-  })
+  const result = await runtime.run(
+    {
+      text: input.text,
+      history: input.history,
+      ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
+      ...(input.disabledTools === undefined ? {} : { disabledTools: input.disabledTools }),
+      ...(input.api === undefined ? {} : { api: input.api })
+    },
+    {
+      signal: options.signal,
+      requestToolApproval: options.requestToolApproval,
+      onEvent: onAgentEvent
+    }
+  )
   if (!result.isSuccess) {
     throw new DesktopIpcError('SERVICE_UNAVAILABLE', result.message, {
       code: result.errorCode,
@@ -300,7 +316,10 @@ async function runOllamaAgent(
   }
   return {
     content: result.message,
-    ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText })
+    ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText }),
+    ...(result.cacheHitRate === undefined ? {} : { cacheHitRate: result.cacheHitRate }),
+    ...(result.compacted ? { compacted: true } : {}),
+    contextTokensUsed: result.contextTokensUsed
   }
 }
 

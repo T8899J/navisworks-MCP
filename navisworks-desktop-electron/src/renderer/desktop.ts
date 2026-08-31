@@ -6,6 +6,7 @@ import {
   type DesktopSettings,
   type NavisworksStatus,
   type SessionSummary,
+  type ToolApprovalRequest,
   normalizeSession,
   normalizeSettings,
   normalizeStatus,
@@ -64,6 +65,34 @@ export const desktopGateway = {
     return normalizeSettings(await requireApi().request('settings.update', { settings }))
   },
 
+  async saveApiProfile(input: {
+    id?: string
+    name: string
+    baseUrl: string
+    model: string
+    apiKey?: string
+    clearApiKey?: boolean
+  }): Promise<DesktopSettings> {
+    return normalizeSettings(await requireApi().request('api.profile.save', input))
+  },
+
+  async deleteApiProfile(profileId: string): Promise<DesktopSettings> {
+    return normalizeSettings(await requireApi().request('api.profile.delete', { profileId }))
+  },
+
+  async listApiProfileModels(profileId: string): Promise<string[]> {
+    return [...await requireApi().request('api.profile.models.list', { profileId })]
+  },
+
+  async testApiProfile(profileId: string): Promise<{ connected: boolean; message: string }> {
+    return requireApi().request('api.profile.connection.test', { profileId })
+  },
+
+  async compactSession(sessionId: string): Promise<{ summary: string }> {
+    const response = await requireApi().request('chat.compact', { sessionId })
+    return response as { summary: string }
+  },
+
   async listModels(endpoint?: { baseUrl?: string; apiKey?: string }): Promise<string[]> {
     return [...await requireApi().request('ollama.models.list', endpoint)]
   },
@@ -98,7 +127,18 @@ export const desktopGateway = {
     await requireApi().request('chat.abort', { sessionId, ...(turnId ? { turnId } : {}) })
   },
 
-  subscribe(event: DesktopEventName, listener: (event: ChatStreamEvent | NavisworksStatus) => void): () => void {
+  async resolveToolApproval(
+    approvalId: string,
+    decision: 'confirm' | 'cancel'
+  ): Promise<boolean> {
+    const response = await requireApi().request('tool.approval.resolve', { approvalId, decision })
+    return response.resolved
+  },
+
+  subscribe(
+    event: DesktopEventName,
+    listener: (event: ChatStreamEvent | NavisworksStatus | ToolApprovalRequest) => void
+  ): () => void {
     const desktop = api()
     if (!desktop) return () => undefined
     return desktop.subscribe(event, listener as never)

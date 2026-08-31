@@ -42,6 +42,16 @@ export interface ManagedExtension {
   isEnabled: boolean
 }
 
+export interface ApiProfileSettings {
+  id: string
+  name: string
+  baseUrl: string
+  model: string
+  apiKeyCiphertext: string
+  /** Read only during one-time migration; never written back to disk. */
+  legacyApiKey: string
+}
+
 export interface AppSettings {
   selectedModel: string
   models: string[]
@@ -55,9 +65,10 @@ export interface AppSettings {
   themeMode: ThemeMode
   disabledTools: string[]
   fontScale: number
-  providerEnabled: boolean
-  providerBaseUrl: string
-  providerApiKey: string
+  /** When true, chat completions run on the API model instead of local. */
+  preferApiModel: boolean
+  apiProfiles: ApiProfileSettings[]
+  activeApiProfileId: string | null
 }
 
 /** Exact PascalCase disk contract written by the WPF System.Text.Json model. */
@@ -99,6 +110,14 @@ export interface WpfManagedExtensionSnapshot {
   TypeLabel?: string
 }
 
+export interface WpfApiProfileSnapshot {
+  Id: string
+  Name: string
+  BaseUrl: string
+  Model: string
+  ApiKeyCiphertext: string
+}
+
 /** Exact PascalCase disk contract written by AppSettingsSnapshot. */
 export interface WpfAppSettingsSnapshot {
   SelectedModel: string
@@ -116,10 +135,13 @@ export interface WpfAppSettingsSnapshot {
   DisabledTools?: string[] | null
   /** Electron-only extension: global UI font zoom (0.85–1.3). */
   FontScale?: number | null
-  /** Electron-only extensions: model provider connection settings. */
-  ProviderEnabled?: boolean | null
+  /** Electron-only extensions: API endpoint settings. */
+  PreferApiModel?: boolean | null
   ProviderBaseUrl?: string | null
   ProviderApiKey?: string | null
+  CloudModel?: string | null
+  ApiProfiles?: WpfApiProfileSnapshot[] | null
+  ActiveApiProfileId?: string | null
 }
 
 export type SessionLoadSource = 'none' | 'primary' | 'backup' | 'unavailable'
@@ -217,14 +239,14 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   reasoningMode: 'fast',
   activeSessionId: null,
   gpuVramGb: 8,
-  contextWindowTokens: 8192,
+  contextWindowTokens: 32768,
   numPredict: 2048,
   themeMode: 'system',
   disabledTools: [],
   fontScale: 1,
-  providerEnabled: true,
-  providerBaseUrl: '',
-  providerApiKey: '',
+  preferApiModel: false,
+  apiProfiles: [],
+  activeApiProfileId: null,
 }
 
 /**
@@ -399,6 +421,22 @@ function toWpfToolCallSnapshot(tool: PersistedToolCall): WpfToolCallSnapshot {
 }
 
 function fromWpfSettingsSnapshot(snapshot: WpfAppSettingsSnapshot): AppSettings {
+  const apiProfiles = (snapshot.ApiProfiles ?? []).map(fromWpfApiProfileSnapshot)
+  const hasStoredProfiles = apiProfiles.length > 0
+  if (
+    apiProfiles.length === 0
+    && (snapshot.ProviderBaseUrl || snapshot.ProviderApiKey || snapshot.CloudModel)
+  ) {
+    apiProfiles.push({
+      id: 'legacy-default-api',
+      name: '默认 API',
+      baseUrl: optionalString(snapshot.ProviderBaseUrl, ''),
+      model: optionalString(snapshot.CloudModel, ''),
+      apiKeyCiphertext: '',
+      legacyApiKey: optionalString(snapshot.ProviderApiKey, ''),
+    })
+  }
+  const fallbackProfileId = apiProfiles[0]?.id ?? null
   return {
     selectedModel: snapshot.SelectedModel,
     models: snapshot.Models,
@@ -412,13 +450,14 @@ function fromWpfSettingsSnapshot(snapshot: WpfAppSettingsSnapshot): AppSettings 
     themeMode: snapshot.ThemeMode,
     disabledTools: snapshot.DisabledTools ?? [],
     fontScale: clampFontScale(optionalFiniteNumber(snapshot.FontScale, 1)),
-    providerEnabled: optionalBoolean(snapshot.ProviderEnabled, true),
-    providerBaseUrl: optionalString(snapshot.ProviderBaseUrl, ''),
-    providerApiKey: optionalString(snapshot.ProviderApiKey, ''),
+    preferApiModel: optionalBoolean(snapshot.PreferApiModel, false),
+    apiProfiles,
+    activeApiProfileId: hasStoredProfiles ? snapshot.ActiveApiProfileId ?? null : fallbackProfileId,
   }
 }
 
 function toWpfSettingsSnapshot(settings: AppSettings): WpfAppSettingsSnapshot {
+  const activeProfile = settings.apiProfiles.find((profile) => profile.id === settings.activeApiProfileId)
   return {
     SelectedModel: settings.selectedModel,
     Models: settings.models,
@@ -432,9 +471,12 @@ function toWpfSettingsSnapshot(settings: AppSettings): WpfAppSettingsSnapshot {
     ThemeMode: settings.themeMode,
     DisabledTools: settings.disabledTools,
     FontScale: settings.fontScale,
-    ProviderEnabled: settings.providerEnabled,
-    ProviderBaseUrl: settings.providerBaseUrl,
-    ProviderApiKey: settings.providerApiKey,
+    PreferApiModel: settings.preferApiModel,
+    ProviderBaseUrl: activeProfile?.baseUrl ?? '',
+    ProviderApiKey: '',
+    CloudModel: activeProfile?.model ?? '',
+    ApiProfiles: settings.apiProfiles.map(toWpfApiProfileSnapshot),
+    ActiveApiProfileId: settings.activeApiProfileId,
   }
 }
 
@@ -459,6 +501,27 @@ function toWpfExtensionSnapshot(extension: ManagedExtension): WpfManagedExtensio
     Type: extension.type,
     IsEnabled: extension.isEnabled,
     TypeLabel: extension.type === 'plugin' ? '插件' : '技能',
+  }
+}
+
+function fromWpfApiProfileSnapshot(snapshot: WpfApiProfileSnapshot): ApiProfileSettings {
+  return {
+    id: snapshot.Id,
+    name: snapshot.Name,
+    baseUrl: snapshot.BaseUrl,
+    model: snapshot.Model,
+    apiKeyCiphertext: snapshot.ApiKeyCiphertext,
+    legacyApiKey: '',
+  }
+}
+
+function toWpfApiProfileSnapshot(profile: ApiProfileSettings): WpfApiProfileSnapshot {
+  return {
+    Id: profile.id,
+    Name: profile.name,
+    BaseUrl: profile.baseUrl,
+    Model: profile.model,
+    ApiKeyCiphertext: profile.apiKeyCiphertext,
   }
 }
 
@@ -563,7 +626,7 @@ function parseWpfSettingsSnapshot(value: unknown): WpfAppSettingsSnapshot {
     GpuVramGb: optionalFiniteNumber(entry.GpuVramGb, 8),
     CustomProfileContextWindowTokens: optionalFiniteInteger(
       entry.CustomProfileContextWindowTokens,
-      8192,
+      32768,
     ),
     CustomProfileNumPredict: optionalFiniteInteger(entry.CustomProfileNumPredict, 2048),
     ThemeMode: optionalThemeMode(entry.ThemeMode),
@@ -573,9 +636,25 @@ function parseWpfSettingsSnapshot(value: unknown): WpfAppSettingsSnapshot {
       (toolNameSchema.options as readonly string[]).includes(name)
     ),
     FontScale: optionalFiniteNumber(entry.FontScale, 1),
-    ProviderEnabled: optionalBoolean(entry.ProviderEnabled, true),
+    PreferApiModel: typeof entry.PreferApiModel === 'boolean'
+      ? entry.PreferApiModel
+      : null,
     ProviderBaseUrl: optionalString(entry.ProviderBaseUrl, ''),
     ProviderApiKey: optionalString(entry.ProviderApiKey, ''),
+    CloudModel: optionalString(entry.CloudModel, ''),
+    ApiProfiles: optionalObjectArray(entry.ApiProfiles).map(parseWpfApiProfileSnapshot),
+    ActiveApiProfileId: nullableString(entry.ActiveApiProfileId),
+  }
+}
+
+function parseWpfApiProfileSnapshot(value: unknown): WpfApiProfileSnapshot {
+  const entry = requireObject(value, 'API profile')
+  return {
+    Id: optionalString(entry.Id, ''),
+    Name: optionalString(entry.Name, 'API'),
+    BaseUrl: optionalString(entry.BaseUrl, ''),
+    Model: optionalString(entry.Model, ''),
+    ApiKeyCiphertext: optionalString(entry.ApiKeyCiphertext, ''),
   }
 }
 

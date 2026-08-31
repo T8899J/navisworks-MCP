@@ -27,12 +27,18 @@ const allowedRoutes = new Set<IpcRoute>([
   'sessions.summarizeTitle',
   'settings.get',
   'settings.update',
+  'api.profile.save',
+  'api.profile.delete',
+  'api.profile.models.list',
+  'api.profile.connection.test',
   'appearance.get',
   'appearance.update',
   'ollama.models.list',
   'ollama.connection.test',
   'chat.start',
   'chat.abort',
+  'tool.approval.resolve',
+  'chat.compact',
   'navisworks.status.get',
   'navisworks.tool.execute'
 ])
@@ -41,6 +47,7 @@ const allowedEvents = new Set<DesktopEventName>([
   'chat.chunk',
   'chat.done',
   'chat.error',
+  'tool.approval.requested',
   'navisworks.status.changed',
   'nativeTheme.updated'
 ])

@@ -1,4 +1,6 @@
-import { toolNameSchema, type ToolName } from '../shared/ipc'
+import { toolNameSchema, type ApiProfile, type ToolApprovalRequest, type ToolName } from '../shared/ipc'
+
+export type { ApiProfile, ToolApprovalRequest }
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'error'
 
@@ -43,9 +45,11 @@ export interface DesktopSettings {
   themeMode: 'system' | 'light' | 'dark'
   disabledTools: ToolName[]
   fontScale: number
-  providerEnabled: boolean
-  providerBaseUrl: string
-  providerApiKey: string
+  /** Local model context window (tokens); the runtime caps it at 32K. */
+  contextWindowTokens: number
+  preferApiModel: boolean
+  apiProfiles: ApiProfile[]
+  activeApiProfileId: string | null
 }
 
 export interface NavisworksStatus {
@@ -68,6 +72,9 @@ export interface ChatStreamEvent {
   toolName?: string
   arguments?: unknown
   result?: unknown
+  contextTokensUsed?: number
+  cacheHitRate?: number
+  compacted?: boolean
   error?: string | { code: string; message: string }
 }
 
@@ -192,6 +199,17 @@ export function normalizeSettings(value: unknown): DesktopSettings {
   )
 
   const rawFontScale = Number(source.fontScale ?? source.FontScale ?? 1)
+  const rawApiProfiles = Array.isArray(source.apiProfiles) ? source.apiProfiles : []
+  const apiProfiles = rawApiProfiles.map((value, index): ApiProfile => {
+    const profile = asRecord(value)
+    return {
+      id: String(profile.id ?? `api-${index}`),
+      name: String(profile.name ?? 'API'),
+      baseUrl: String(profile.baseUrl ?? ''),
+      model: String(profile.model ?? ''),
+      hasApiKey: Boolean(profile.hasApiKey)
+    }
+  })
 
   return {
     selectedModel,
@@ -200,9 +218,15 @@ export function normalizeSettings(value: unknown): DesktopSettings {
     themeMode: source.themeMode === 'light' || source.themeMode === 'dark' ? source.themeMode : 'system',
     disabledTools: toolNameSchema.options.filter((name) => rawDisabled.has(name)),
     fontScale: Number.isFinite(rawFontScale) ? Math.min(1.3, Math.max(0.85, rawFontScale)) : 1,
-    providerEnabled: Boolean(source.providerEnabled ?? source.ProviderEnabled ?? true),
-    providerBaseUrl: String(source.providerBaseUrl ?? source.ProviderBaseUrl ?? ''),
-    providerApiKey: String(source.providerApiKey ?? source.ProviderApiKey ?? '')
+    contextWindowTokens: Number(
+      source.contextWindowTokens
+        ?? source.ContextTokensUsed
+        ?? source.CustomProfileContextWindowTokens
+        ?? 32768
+    ) || 32768,
+    preferApiModel: Boolean(source.preferApiModel ?? source.PreferApiModel ?? false),
+    apiProfiles,
+    activeApiProfileId: typeof source.activeApiProfileId === 'string' ? source.activeApiProfileId : null
   }
 }
 

@@ -90,6 +90,14 @@ export const toolNameSchema = z.enum([
   'navisworks_activate_viewpoint'
 ])
 
+export const apiProfileSchema = z.strictObject({
+  id: nonEmptyString,
+  name: nonEmptyString,
+  baseUrl: z.string(),
+  model: z.string(),
+  hasApiKey: z.boolean()
+})
+
 export const appSettingsSchema = z.strictObject({
   selectedModel: z.string(),
   models: z.array(z.string()),
@@ -97,9 +105,10 @@ export const appSettingsSchema = z.strictObject({
   themeMode: themeModeSchema,
   disabledTools: z.array(toolNameSchema),
   fontScale: z.number().min(0.85).max(1.3),
-  providerEnabled: z.boolean(),
-  providerBaseUrl: z.string(),
-  providerApiKey: z.string()
+  contextWindowTokens: z.number().int().min(1024).max(1_000_000),
+  preferApiModel: z.boolean(),
+  apiProfiles: z.array(apiProfileSchema),
+  activeApiProfileId: z.string().nullable()
 })
 
 export const navisworksStatusSchema = z.strictObject({
@@ -152,6 +161,29 @@ export const requestSchemas = {
     input: z.strictObject({ settings: appSettingsSchema.partial() }),
     output: appSettingsSchema
   },
+  'api.profile.save': {
+    input: z.strictObject({
+      id: z.string().optional(),
+      name: z.string().trim().min(1).max(60),
+      baseUrl: z.string().trim().max(2048),
+      model: z.string().trim().max(200),
+      apiKey: z.string().max(4096).optional(),
+      clearApiKey: z.boolean().optional()
+    }),
+    output: appSettingsSchema
+  },
+  'api.profile.delete': {
+    input: z.strictObject({ profileId: nonEmptyString }),
+    output: appSettingsSchema
+  },
+  'api.profile.models.list': {
+    input: z.strictObject({ profileId: nonEmptyString }),
+    output: z.array(z.string())
+  },
+  'api.profile.connection.test': {
+    input: z.strictObject({ profileId: nonEmptyString }),
+    output: z.strictObject({ connected: z.boolean(), message: z.string() })
+  },
   'appearance.get': {
     input: emptyInput,
     output: appearanceStateSchema
@@ -196,6 +228,17 @@ export const requestSchemas = {
     }),
     output: z.strictObject({ aborted: z.boolean() })
   },
+  'tool.approval.resolve': {
+    input: z.strictObject({
+      approvalId: nonEmptyString,
+      decision: z.enum(['confirm', 'cancel'])
+    }),
+    output: z.strictObject({ resolved: z.boolean() })
+  },
+  'chat.compact': {
+    input: z.strictObject({ sessionId: nonEmptyString }),
+    output: z.strictObject({ summary: z.string() })
+  },
   'navisworks.status.get': {
     input: emptyInput,
     output: navisworksStatusSchema
@@ -239,7 +282,10 @@ export const chatEventSchema = z.discriminatedUnion('kind', [
     ...chatEventBase,
     kind: z.literal('done'),
     content: z.string(),
-    thinkingText: z.string().optional()
+    thinkingText: z.string().optional(),
+    contextTokensUsed: z.number().optional(),
+    cacheHitRate: z.number().optional(),
+    compacted: z.boolean().optional()
   }),
   z.strictObject({
     ...chatEventBase,
@@ -273,7 +319,10 @@ const chatDoneEventSchema = z.strictObject({
   ...chatEventBase,
   kind: z.literal('done'),
   content: z.string(),
-  thinkingText: z.string().optional()
+  thinkingText: z.string().optional(),
+  contextTokensUsed: z.number().optional(),
+  cacheHitRate: z.number().optional(),
+  compacted: z.boolean().optional()
 })
 
 const chatErrorEventSchema = z.strictObject({
@@ -286,6 +335,15 @@ export const eventSchemas = {
   'chat.chunk': chatChunkEventSchema,
   'chat.done': chatDoneEventSchema,
   'chat.error': chatErrorEventSchema,
+  'tool.approval.requested': z.strictObject({
+    approvalId: nonEmptyString,
+    runId: nonEmptyString,
+    sessionId: nonEmptyString,
+    turnId: nonEmptyString,
+    messageId: nonEmptyString,
+    toolName: toolNameSchema,
+    arguments: z.record(z.string(), z.unknown())
+  }),
   'navisworks.status.changed': navisworksStatusSchema,
   'nativeTheme.updated': appearanceStateSchema
 } as const
@@ -301,9 +359,11 @@ export type ChatEvent = z.output<typeof chatEventSchema>
 export type Session = z.output<typeof sessionSchema>
 export type SessionSummary = z.output<typeof sessionSummarySchema>
 export type AppSettings = z.output<typeof appSettingsSchema>
+export type ApiProfile = z.output<typeof apiProfileSchema>
 export type AppearanceState = z.output<typeof appearanceStateSchema>
 export type ThemeMode = z.output<typeof themeModeSchema>
 export type EffectiveTheme = z.output<typeof effectiveThemeSchema>
 export type NavisworksStatus = z.output<typeof navisworksStatusSchema>
 export type RuntimeInfo = z.output<typeof runtimeInfoSchema>
 export type ToolName = z.output<typeof toolNameSchema>
+export type ToolApprovalRequest = z.output<typeof eventSchemas['tool.approval.requested']>
