@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading.Tasks;
 using Autodesk.Navisworks.Api;
 
 namespace NavisworksCodexMcp.Plugin
@@ -10,17 +11,38 @@ namespace NavisworksCodexMcp.Plugin
     {
         private const int MaxCachedItems = 5000;
         private const int MaxPropertiesPerItem = 250;
-        private const int MaxSearchScannedItems = 100000;
-        private const int MaxSearchMilliseconds = 5000;
-        private const int MaxViewpointEntries = 500;
+        // Hard fuse for the cumulative scan across resumes; the per-call wall
+        // budget below is the real limiter. Raised from 100k because real
+        // federated models (500k+ items) were unreachable behind the old cap.
+        private const int MaxSearchScannedItems = 2000000;
+        // Per-call wall budget for the chunked scan. Must stay well below the
+        // desktop bridge client's 15 s request timeout so the response can
+        // still be written back.
+        private const int MaxSearchMilliseconds = 10000;
+        // UI-thread slice per dispatch; the gaps between slices let the
+        // message pump run so Navisworks stays responsive during a scan.
+        private const int SearchSliceMilliseconds = 500;
+        // Do not begin the property phase with less than this left in the
+        // call's budget - a doomed partial property pass helps nobody.
+        private const int MinSliceBudgetToStartPropertyPhase = 1500;
+        private const int MaxViewpointEntries = 2000;
+        private const int DefaultViewpointEntries = 500;
         private const int MaxTextLength = 1000;
 
         private readonly Dictionary<string, ModelItem> itemCache =
             new Dictionary<string, ModelItem>(StringComparer.Ordinal);
         private readonly Queue<string> itemOrder = new Queue<string>();
+        private readonly object searchSessionSyncRoot = new object();
+        private SearchSession activeSearch;
         private Document cachedDocument;
         private int cacheGeneration = 1;
         private int itemSequence;
+        // Stable for the whole plugin lifetime; the client uses it to tell two
+        // separate bridge connections (old and new process) apart.
+        private readonly string bridgeSessionId = Guid.NewGuid().ToString("D");
+        // Re-minted on every document activation/switch/reopen (ResetSessionState).
+        // null when no document is open. The client keys all document-bound state on it.
+        private string documentInstanceId;
 
         public object Execute(
             string method,
@@ -32,12 +54,12 @@ namespace NavisworksCodexMcp.Plugin
             {
                 case "navisworks_status":
                     return GetStatus();
+                // navisworks_find_items is dispatched through ExecuteAsync:
+                // its chunked scan needs UI-thread slices, not one blocking call.
                 case "navisworks_get_document":
                     return GetDocument();
                 case "navisworks_get_selection":
                     return GetSelection(parameters);
-                case "navisworks_find_items":
-                    return FindItems(parameters);
                 case "navisworks_get_item_properties":
                     return GetItemProperties(parameters);
                 case "navisworks_select_items":
@@ -45,7 +67,7 @@ namespace NavisworksCodexMcp.Plugin
                 case "navisworks_set_visibility":
                     return SetVisibility(parameters);
                 case "navisworks_list_viewpoints":
-                    return ListViewpoints();
+                    return ListViewpoints(parameters);
                 case "navisworks_activate_viewpoint":
                     return ActivateViewpoint(parameters);
                 default:
@@ -62,6 +84,42 @@ namespace NavisworksCodexMcp.Plugin
             itemSequence = 0;
             cacheGeneration++;
             cachedDocument = Application.ActiveDocument;
+            // A fresh document instance (open / switch / close-and-reopen) gets a fresh
+            // id; with no document there is no instance to identify.
+            documentInstanceId =
+                cachedDocument != null && !cachedDocument.IsClear
+                    ? Guid.NewGuid().ToString("D")
+                    : null;
+            DiscardActiveSearch();
+        }
+
+        private void DiscardActiveSearch()
+        {
+            lock (searchSessionSyncRoot)
+            {
+                if (activeSearch != null)
+                {
+                    activeSearch.Discarded = true;
+                    // The enumerator touches Navisworks objects, so off the UI
+                    // thread it is only dropped, never disposed; the concrete
+                    // enumerator holds no unmanaged resources of its own.
+                    activeSearch.Enumerator = null;
+                    activeSearch = null;
+                }
+            }
+        }
+
+        private void DiscardActiveSearch(SearchSession session)
+        {
+            session.Discarded = true;
+            session.Enumerator = null;
+            lock (searchSessionSyncRoot)
+            {
+                if (ReferenceEquals(activeSearch, session))
+                {
+                    activeSearch = null;
+                }
+            }
         }
 
         private object GetStatus()
@@ -76,8 +134,14 @@ namespace NavisworksCodexMcp.Plugin
                 { "hostRuntimeMinor", Application.Version.RuntimeMinor },
                 { "processId", Process.GetCurrentProcess().Id },
                 { "hasDocument", document != null && !document.IsClear },
-                { "sessionGeneration", cacheGeneration }
+                { "sessionGeneration", cacheGeneration },
+                { "bridgeSessionId", bridgeSessionId }
             };
+
+            if (documentInstanceId != null)
+            {
+                result["documentInstanceId"] = documentInstanceId;
+            }
 
             if (document != null)
             {
@@ -119,7 +183,9 @@ namespace NavisworksCodexMcp.Plugin
                 { "modelCount", document.Models.Count },
                 { "models", models },
                 { "selectionCount", document.CurrentSelection.SelectedItems.Count },
-                { "savedViewpointCount", CountSavedViewpoints(document) }
+                { "savedViewpointCount", CountSavedViewpoints(document) },
+                { "bridgeSessionId", bridgeSessionId },
+                { "documentInstanceId", documentInstanceId }
             };
         }
 
@@ -166,9 +232,36 @@ namespace NavisworksCodexMcp.Plugin
             };
         }
 
-        private object FindItems(Dictionary<string, object> parameters)
+        // ---- navisworks_find_items: chunked, resumable scan ----------------
+        //
+        // The scan runs in SearchSliceMilliseconds slices on the UI thread;
+        // between slices the await returns to the pipe-handler thread so the
+        // message pump keeps Navisworks responsive. A call stops after
+        // MaxSearchMilliseconds; repeating the exact same query resumes from
+        // the stored enumerator, so arbitrarily large models become reachable
+        // across retries.
+
+        public async Task<object> ExecuteAsync(
+            string method,
+            Dictionary<string, object> parameters,
+            UiDispatcher dispatcher)
         {
-            Document document = RequireDocument();
+            if (method == "navisworks_find_items")
+            {
+                return await FindItemsResumableAsync(parameters, dispatcher)
+                    .ConfigureAwait(false);
+            }
+
+            return await dispatcher.InvokeAsync(
+                () => Execute(method, parameters)).ConfigureAwait(false);
+        }
+
+        private async Task<object> FindItemsResumableAsync(
+            Dictionary<string, object> parameters,
+            UiDispatcher dispatcher)
+        {
+            // Parameter validation is pure dictionary parsing and runs on the
+            // request thread; only the scan slices touch Navisworks objects.
             string query = GetRequiredString(parameters, "query", 200);
             string scope = GetChoice(
                 parameters,
@@ -190,6 +283,7 @@ namespace NavisworksCodexMcp.Plugin
                 "caseSensitive",
                 false);
             int limit = GetInteger(parameters, "limit", 50, 1, 100);
+
             bool searchNames = scope == "names" || scope == "all";
             bool searchProperties =
                 scope == "properties"
@@ -197,73 +291,333 @@ namespace NavisworksCodexMcp.Plugin
                 || category != null
                 || property != null;
 
-            var stopwatch = Stopwatch.StartNew();
-            var items = new List<object>();
-            int scannedCount = 0;
-            bool timedOut = false;
-            bool scanLimitReached = false;
-            bool resultLimitReached = false;
+            string sessionKey = BuildSearchSessionKey(
+                query,
+                scope,
+                category,
+                property,
+                matchMode,
+                caseSensitive,
+                limit);
 
-            foreach (ModelItem item in document.Models.RootItemDescendantsAndSelf)
+            SearchSession session;
+            bool resumed;
+            lock (searchSessionSyncRoot)
             {
-                scannedCount++;
-
-                if (scannedCount > MaxSearchScannedItems)
+                resumed = activeSearch != null
+                    && !activeSearch.Discarded
+                    && activeSearch.Key == sessionKey;
+                if (!resumed)
                 {
-                    scanLimitReached = true;
+                    activeSearch = new SearchSession(
+                        sessionKey,
+                        query,
+                        category,
+                        property,
+                        matchMode,
+                        caseSensitive,
+                        limit,
+                        searchNames,
+                        searchProperties);
+                }
+
+                session = activeSearch;
+            }
+
+            if (SearchContinuationPolicy.ShouldResetPage(
+                session.PageFull,
+                resumed))
+            {
+                session.Matches.Clear();
+                session.MatchPhase = null;
+                session.PageFull = false;
+            }
+
+            var callWatch = Stopwatch.StartNew();
+            while (!session.Complete
+                && !session.PageFull
+                && session.ScannedTotal < MaxSearchScannedItems
+                && callWatch.ElapsedMilliseconds < MaxSearchMilliseconds)
+            {
+                long remainingCallMilliseconds =
+                    MaxSearchMilliseconds - callWatch.ElapsedMilliseconds;
+                await dispatcher.InvokeAsync<SearchSession>(
+                    () => ScanSearchSlice(session, remainingCallMilliseconds))
+                    .ConfigureAwait(false);
+            }
+            callWatch.Stop();
+
+            bool timedOut = !session.Complete
+                && callWatch.ElapsedMilliseconds >= MaxSearchMilliseconds;
+
+            if (!SearchContinuationPolicy.ShouldRetainSession(
+                session.Complete))
+            {
+                lock (searchSessionSyncRoot)
+                {
+                    if (ReferenceEquals(activeSearch, session))
+                    {
+                        activeSearch = null;
+                    }
+                }
+            }
+
+            return BuildSearchResult(
+                session,
+                resumed,
+                callWatch.ElapsedMilliseconds,
+                timedOut);
+        }
+
+        private SearchSession ScanSearchSlice(
+            SearchSession session,
+            long remainingCallMilliseconds)
+        {
+            Document activeDocument = Application.ActiveDocument;
+            if (session.Document == null)
+            {
+                if (activeDocument == null || activeDocument.IsClear)
+                {
+                    DiscardActiveSearch(session);
+                    throw new BridgeException(
+                        "NO_DOCUMENT",
+                        "No Navisworks document is open.");
+                }
+
+                session.Document = activeDocument;
+                cachedDocument = activeDocument;
+            }
+            else if (!ReferenceEquals(activeDocument, session.Document))
+            {
+                DiscardActiveSearch(session);
+                throw new BridgeException(
+                    "DOCUMENT_CHANGED",
+                    "The active document changed during the search. "
+                    + "Run the same query again.");
+            }
+
+            var sliceWatch = Stopwatch.StartNew();
+            while (sliceWatch.ElapsedMilliseconds < SearchSliceMilliseconds)
+            {
+                if (session.ScannedTotal >= MaxSearchScannedItems)
+                {
+                    session.Complete = true;
                     break;
                 }
 
-                if (stopwatch.ElapsedMilliseconds > MaxSearchMilliseconds)
+                if (session.Enumerator == null)
                 {
-                    timedOut = true;
-                    break;
+                    session.Enumerator = session.Document.Models
+                        .RootItemDescendantsAndSelf.GetEnumerator();
                 }
 
-                Dictionary<string, object> match = FindMatch(
-                    item,
-                    query,
-                    searchNames,
-                    searchProperties,
-                    category,
-                    property,
-                    matchMode,
-                    caseSensitive);
+                if (!session.Enumerator.MoveNext())
+                {
+                    session.PhaseIndex++;
+                    session.Enumerator = null;
+
+                    if (!SearchContinuationPolicy.ShouldAdvancePhase(
+                        session.PhaseIndex,
+                        session.Phases.Count))
+                    {
+                        session.Complete = true;
+                        break;
+                    }
+
+                    // The property phase exists but this call's budget cannot
+                    // fund a useful pass. Leave the session mid-transition; an
+                    // identical retry resumes straight into the property pass.
+                    if (remainingCallMilliseconds
+                        < MinSliceBudgetToStartPropertyPhase)
+                    {
+                        break;
+                    }
+
+                    continue;
+                }
+
+                session.ScannedTotal++;
+                ModelItem item = session.Enumerator.Current;
+                Dictionary<string, object> match;
+                if (session.CurrentPhase == SearchPhase.Names)
+                {
+                    match = MatchName(
+                        item,
+                        session.Query,
+                        session.MatchMode,
+                        session.CaseSensitive);
+                }
+                else
+                {
+                    // scope=all traverses the tree once per match source. Skip
+                    // name matches during the property phase so the union has
+                    // no duplicate items.
+                    if (session.SearchNames
+                        && MatchName(
+                            item,
+                            session.Query,
+                            session.MatchMode,
+                            session.CaseSensitive) != null)
+                    {
+                        continue;
+                    }
+
+                    match = MatchProperties(
+                        item,
+                        session.Query,
+                        session.CategoryFilter,
+                        session.PropertyFilter,
+                        session.MatchMode,
+                        session.CaseSensitive);
+                }
                 if (match == null)
                 {
                     continue;
                 }
 
-                if (items.Count >= limit)
-                {
-                    // A match beyond the requested limit exists: only now is
-                    // the result set genuinely truncated. Exactly `limit`
-                    // matches end the loop naturally with truncated=false.
-                    resultLimitReached = true;
-                    break;
-                }
-
                 string itemId = RegisterItem(item);
                 Dictionary<string, object> summary = SummarizeItem(item, itemId);
                 summary["match"] = match;
-                items.Add(summary);
+                session.Matches.Add(summary);
+                string matchedPhase = session.CurrentPhase == SearchPhase.Names
+                    ? "names"
+                    : "properties";
+                session.MatchPhase = session.MatchPhase == null
+                    || session.MatchPhase == matchedPhase
+                        ? matchedPhase
+                        : "mixed";
+                if (SearchContinuationPolicy.IsPageFull(
+                    session.Matches.Count,
+                    session.Limit))
+                {
+                    // Keep the enumerator immediately after the last returned
+                    // item. An identical retry clears the page buffer and
+                    // resumes from this exact breakpoint.
+                    session.PageFull = true;
+                    break;
+                }
             }
 
-            stopwatch.Stop();
+            return session;
+        }
+
+        private static string BuildSearchSessionKey(
+            string query,
+            string scope,
+            string category,
+            string property,
+            string matchMode,
+            bool caseSensitive,
+            int limit)
+        {
+            // Length-prefixing keeps distinct values from concatenating into
+            // one identical key.
+            return string.Join(
+                "|",
+                new[]
+                {
+                    scope,
+                    query.Length + ":" + query,
+                    (category ?? string.Empty).Length + ":"
+                        + (category ?? string.Empty),
+                    (property ?? string.Empty).Length + ":"
+                        + (property ?? string.Empty),
+                    matchMode,
+                    caseSensitive ? "1" : "0",
+                    limit.ToString()
+                });
+        }
+
+        private static object BuildSearchResult(
+            SearchSession session,
+            bool resumed,
+            long callElapsedMilliseconds,
+            bool timedOut)
+        {
             return new Dictionary<string, object>
             {
-                { "query", query },
-                { "returnedCount", items.Count },
-                { "scannedCount", scannedCount },
-                { "elapsedMilliseconds", stopwatch.ElapsedMilliseconds },
-                {
-                    "truncated",
-                    timedOut || scanLimitReached || resultLimitReached
-                },
+                { "query", session.Query },
+                { "returnedCount", session.Matches.Count },
+                // Cumulative across resumed calls so callers can watch the
+                // scan progress through a large model.
+                { "scannedCount", session.ScannedTotal },
+                { "elapsedMilliseconds", callElapsedMilliseconds },
+                // truncated means "the tree was not fully covered yet" - a
+                // repeated identical query resumes from the breakpoint.
+                { "truncated", !session.Complete },
                 { "timedOut", timedOut },
-                { "scanLimitReached", scanLimitReached },
-                { "items", items }
+                { "scanLimitReached", session.ScannedTotal >= MaxSearchScannedItems },
+                { "scanCompleted", session.Complete },
+                { "scanResumed", resumed },
+                { "matchPhase", session.MatchPhase },
+                { "items", session.Matches }
             };
+        }
+
+        private enum SearchPhase
+        {
+            Names,
+            Properties
+        }
+
+        private sealed class SearchSession
+        {
+            internal SearchSession(
+                string key,
+                string query,
+                string categoryFilter,
+                string propertyFilter,
+                string matchMode,
+                bool caseSensitive,
+                int limit,
+                bool searchNames,
+                bool searchProperties)
+            {
+                Key = key;
+                Query = query;
+                CategoryFilter = categoryFilter;
+                PropertyFilter = propertyFilter;
+                MatchMode = matchMode;
+                CaseSensitive = caseSensitive;
+                Limit = limit;
+                SearchNames = searchNames;
+                Phases = new List<SearchPhase>();
+                if (searchNames)
+                {
+                    Phases.Add(SearchPhase.Names);
+                }
+
+                if (searchProperties)
+                {
+                    Phases.Add(SearchPhase.Properties);
+                }
+
+                Complete = Phases.Count == 0;
+            }
+
+            internal readonly string Key;
+            internal readonly string Query;
+            internal readonly string CategoryFilter;
+            internal readonly string PropertyFilter;
+            internal readonly string MatchMode;
+            internal readonly bool CaseSensitive;
+            internal readonly int Limit;
+            internal readonly bool SearchNames;
+            internal readonly List<SearchPhase> Phases;
+            internal int PhaseIndex;
+            internal Document Document;
+            internal IEnumerator<ModelItem> Enumerator;
+            internal readonly List<object> Matches = new List<object>();
+            internal long ScannedTotal;
+            internal string MatchPhase;
+            internal bool PageFull;
+            internal bool Complete;
+            internal bool Discarded;
+
+            internal SearchPhase CurrentPhase
+            {
+                get { return Phases[PhaseIndex]; }
+            }
         }
 
         private object GetItemProperties(Dictionary<string, object> parameters)
@@ -398,22 +752,35 @@ namespace NavisworksCodexMcp.Plugin
             };
         }
 
-        private object ListViewpoints()
+        private object ListViewpoints(Dictionary<string, object> parameters)
         {
             Document document = RequireDocument();
+            int limit = GetInteger(
+                parameters,
+                "limit",
+                DefaultViewpointEntries,
+                1,
+                MaxViewpointEntries);
+            int offset = GetInteger(parameters, "offset", 0, 0, int.MaxValue);
             var entries = new List<object>();
-            bool truncated = false;
+            int total = 0;
 
-            AppendSavedItems(
+            CollectSavedItems(
                 document.SavedViewpoints.RootItem.Children,
                 string.Empty,
                 entries,
-                ref truncated);
+                offset,
+                limit,
+                ref total);
 
             return new Dictionary<string, object>
             {
                 { "returnedCount", entries.Count },
-                { "truncated", truncated },
+                { "total", total },
+                { "offset", offset },
+                // Folder names are not separate entries; they live inside the
+                // children's "path" so a page is spent on viewpoints only.
+                { "truncated", offset + entries.Count < total },
                 { "entries", entries }
             };
         }
@@ -469,11 +836,9 @@ namespace NavisworksCodexMcp.Plugin
             };
         }
 
-        private Dictionary<string, object> FindMatch(
+        private Dictionary<string, object> MatchProperties(
             ModelItem item,
             string query,
-            bool searchNames,
-            bool searchProperties,
             string categoryFilter,
             string propertyFilter,
             string matchMode,
@@ -481,24 +846,6 @@ namespace NavisworksCodexMcp.Plugin
         {
             try
             {
-                if (searchNames)
-                {
-                    Dictionary<string, object> nameMatch = MatchName(
-                        item,
-                        query,
-                        matchMode,
-                        caseSensitive);
-                    if (nameMatch != null)
-                    {
-                        return nameMatch;
-                    }
-                }
-
-                if (!searchProperties)
-                {
-                    return null;
-                }
-
                 foreach (PropertyCategory category in item.PropertyCategories)
                 {
                     if (!MatchesFilter(
@@ -798,47 +1145,45 @@ namespace NavisworksCodexMcp.Plugin
             }
         }
 
-        private static void AppendSavedItems(
+        private static void CollectSavedItems(
             SavedItemCollection items,
             string parentPath,
             List<object> entries,
-            ref bool truncated)
+            int offset,
+            int limit,
+            ref int total)
         {
             foreach (SavedItem item in items)
             {
-                if (entries.Count >= MaxViewpointEntries)
-                {
-                    truncated = true;
-                    return;
-                }
-
+                var group = item as GroupItem;
                 string itemPath = string.IsNullOrEmpty(parentPath)
                     ? item.DisplayName
                     : parentPath + "/" + item.DisplayName;
-                var entry = new Dictionary<string, object>
-                {
-                    { "displayName", LimitText(item.DisplayName) },
-                    { "path", LimitText(itemPath) },
-                    { "guid", item.Guid.ToString("D") },
-                    {
-                        "type",
-                        item is SavedViewpoint ? "viewpoint" : "folder"
-                    }
-                };
-                entries.Add(entry);
 
-                var group = item as GroupItem;
+                if (item is SavedViewpoint)
+                {
+                    total++;
+                    if (total > offset && entries.Count < limit)
+                    {
+                        entries.Add(new Dictionary<string, object>
+                        {
+                            { "displayName", LimitText(item.DisplayName) },
+                            { "path", LimitText(itemPath) },
+                            { "guid", item.Guid.ToString("D") },
+                            { "type", "viewpoint" }
+                        });
+                    }
+                }
+
                 if (group != null)
                 {
-                    AppendSavedItems(
+                    CollectSavedItems(
                         group.Children,
                         itemPath,
                         entries,
-                        ref truncated);
-                    if (truncated)
-                    {
-                        return;
-                    }
+                        offset,
+                        limit,
+                        ref total);
                 }
             }
         }
@@ -1096,4 +1441,3 @@ namespace NavisworksCodexMcp.Plugin
         }
     }
 }
-

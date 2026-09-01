@@ -360,12 +360,11 @@ namespace NavisworksCodexMcp.Plugin
                 request = serializer.Deserialize<BridgeRequest>(requestJson);
                 ValidateRequest(request);
 
-                object result = await uiDispatcher.InvokeAsync(
-                    () => toolService.Execute(
-                        request.Method,
-                        request.Params
-                            ?? new Dictionary<string, object>()))
-                    .ConfigureAwait(false);
+                object result = await toolService.ExecuteAsync(
+                    request.Method,
+                    request.Params
+                        ?? new Dictionary<string, object>(),
+                    uiDispatcher).ConfigureAwait(false);
                 return BridgeResponse.Success(request.Id, result);
             }
             catch (BridgeException exception)

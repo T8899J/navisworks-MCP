@@ -16,6 +16,11 @@ namespace NavisworksCodexMcp.Plugin
 
         public Task<object> InvokeAsync(Func<object> action)
         {
+            return InvokeAsync<object>(action);
+        }
+
+        public Task<T> InvokeAsync<T>(Func<T> action)
+        {
             if (action == null)
             {
                 throw new ArgumentNullException("action");
@@ -29,14 +34,14 @@ namespace NavisworksCodexMcp.Plugin
                 }
                 catch (Exception exception)
                 {
-                    var failed = new TaskCompletionSource<object>(
+                    var failed = new TaskCompletionSource<T>(
                         TaskCreationOptions.RunContinuationsAsynchronously);
                     failed.SetException(exception);
                     return failed.Task;
                 }
             }
 
-            var completion = new TaskCompletionSource<object>(
+            var completion = new TaskCompletionSource<T>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             synchronizationContext.Post(
                 state =>

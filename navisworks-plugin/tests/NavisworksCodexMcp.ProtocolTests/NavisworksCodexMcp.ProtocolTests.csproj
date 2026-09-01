@@ -41,6 +41,9 @@
     <Compile Include="..\..\src\NavisworksCodexMcp.Plugin\BridgeFrameProtocol.cs">
       <Link>BridgeFrameProtocol.cs</Link>
     </Compile>
+    <Compile Include="..\..\src\NavisworksCodexMcp.Plugin\SearchContinuationPolicy.cs">
+      <Link>SearchContinuationPolicy.cs</Link>
+    </Compile>
   </ItemGroup>
 
   <ItemGroup>
@@ -51,4 +54,3 @@
 
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
-

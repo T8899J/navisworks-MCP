@@ -17,7 +17,9 @@ namespace NavisworksCodexMcp.Plugin
                 TestFrameRoundTrip();
                 TestOversizedFrameIsRejected();
                 TestWriteOversizedFrameIsRejected();
-                Console.WriteLine("PROTOCOL_TESTS: PASS (4/4)");
+                TestSearchPageAtLimitRemainsResumable();
+                TestScopeAllAdvancesFromNamesToProperties();
+                Console.WriteLine("PROTOCOL_TESTS: PASS (6/6)");
                 return 0;
             }
             catch (Exception exception)
@@ -128,6 +130,29 @@ namespace NavisworksCodexMcp.Plugin
                 "Oversized write was not rejected.");
         }
 
+        private static void TestSearchPageAtLimitRemainsResumable()
+        {
+            Assert(
+                SearchContinuationPolicy.ShouldRetainSession(false),
+                "A full page incorrectly discarded the search continuation.");
+            Assert(
+                SearchContinuationPolicy.ShouldResetPage(true, true),
+                "A resumed full page did not reset its result buffer.");
+            Assert(
+                SearchContinuationPolicy.IsPageFull(100, 100),
+                "The page did not stop exactly at its requested limit.");
+        }
+
+        private static void TestScopeAllAdvancesFromNamesToProperties()
+        {
+            Assert(
+                SearchContinuationPolicy.ShouldAdvancePhase(1, 2),
+                "scope=all stopped after the names phase.");
+            Assert(
+                !SearchContinuationPolicy.ShouldAdvancePhase(2, 2),
+                "The search advanced past its final phase.");
+        }
+
         private static void Assert(bool condition, string message)
         {
             if (!condition)
@@ -137,4 +162,3 @@ namespace NavisworksCodexMcp.Plugin
         }
     }
 }
-
