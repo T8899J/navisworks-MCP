@@ -10,6 +10,8 @@ import {
   type AppSettings,
 } from '../sessionRepository'
 import { ToolCatalog } from '../toolCatalog'
+import { NavisworksInstanceRegistry } from '../navisworks/instanceRegistry'
+import { NavisworksInstanceSelection } from '../navisworks/instanceSelection'
 import {
   ContextStateToken,
   ExecutionLedgerToken,
@@ -26,6 +28,8 @@ export const SettingsStoreToken = token<JsonSettingsRepository>('app.settings')
 export const AgentRuntimeToken = token<AgentRuntime>('app.agentRuntime')
 export const CompactionServiceToken = token<Pick<AgentRuntime, 'compactConversation'>>('app.compaction')
 export const ApprovalServiceToken = token<ToolApprovalRegistry>('app.approvals')
+export const NavisworksInstanceRegistryToken = token<NavisworksInstanceRegistry>('app.navisworksInstances')
+export const NavisworksInstanceSelectionToken = token<NavisworksInstanceSelection>('app.navisworksSelection')
 
 /** Composition root: instantiate once, register once, and resolve everywhere else. */
 export async function installApplicationServices(
@@ -36,17 +40,12 @@ export async function installApplicationServices(
   const settings = new JsonSettingsRepository(paths)
   const persistedSettings = await settings.load()
   const bridge = new NavisworksBridgeClient()
+  const instanceRegistry = new NavisworksInstanceRegistry({ bridge })
+  const instanceSelection = new NavisworksInstanceSelection()
   const tools = new ToolCatalog()
   const modelRouter = new ModelRouter()
   const approvals = new ToolApprovalRegistry()
   await installAgentServices(appScope, paths)
-  const removeApprovalInvalidation = appScope.require(ContextStateToken).registry.onInvalidate(
-    (previous) => {
-      if (previous.documentInstanceId !== undefined) {
-        approvals.cancelForDocument(previous.documentInstanceId)
-      }
-    },
-  )
   const runtime = new AgentRuntime({
     bridgeClient: bridge,
     model: persistedSettings?.selectedModel,
@@ -63,12 +62,13 @@ export async function installApplicationServices(
     .register(SessionStoreToken, sessions)
     .register(SettingsStoreToken, settings)
     .register(BridgeClientToken, bridge)
+    .register(NavisworksInstanceRegistryToken, instanceRegistry)
+    .register(NavisworksInstanceSelectionToken, instanceSelection)
     .register(ToolCatalogToken, tools)
     .register(ModelRouterToken, modelRouter)
     .register(AgentRuntimeToken, runtime)
     .register(CompactionServiceToken, runtime)
     .register(ApprovalServiceToken, approvals)
   appScope.onDispose(() => runtime.dispose())
-  appScope.onDispose(removeApprovalInvalidation)
   return persistedSettings
 }

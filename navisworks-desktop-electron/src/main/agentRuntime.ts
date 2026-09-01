@@ -1,4 +1,5 @@
 import { BridgeError, type BridgeCallOptions } from './bridgeClient'
+import type { NavisworksBridgeClient } from './bridgeClient'
 import { randomUUID } from 'node:crypto'
 import {
   AGENT_TOOL_DEFINITIONS,
@@ -22,6 +23,12 @@ import {
   throwIfAborted,
 } from './model/providerUtils'
 import type { SamplingOptions } from './model/types'
+import type { NavisworksRunBinding } from './navisworks/instanceTypes'
+import {
+  callWithNavisworksRunBinding,
+  NavisworksTargetError,
+  validateNavisworksRunBinding,
+} from './navisworks/runBinding'
 import type { BuiltAgentRequest } from './agent/contextTypes'
 import {
   COMPACT_MAX_TRANSCRIPT_CHARS,
@@ -120,6 +127,8 @@ export interface AgentRunInput {
   documentNotice?: DocumentChangeNotice
   /** Stable preflight snapshot for this Run Scope. */
   currentDocument?: CurrentDocumentContext
+  navisworksBinding?: NavisworksRunBinding
+  navisworksUnavailable?: { code: 'TARGET_INSTANCE_DISCONNECTED'; message: string }
 }
 
 export interface RunAgentOptions {
@@ -134,6 +143,8 @@ export interface ToolApprovalRequest {
   toolName: AgentToolName
   arguments: Record<string, unknown>
   argumentsHash: string
+  instanceId?: string
+  bridgeSessionId?: string
   documentInstanceId?: string
   ambiguousRetry?: boolean
 }
@@ -432,6 +443,8 @@ export class AgentRuntime {
             options.signal,
             options.requestToolApproval,
             hasExplicitAmbiguousRetryConfirmation(trimmedInput),
+            input.navisworksBinding,
+            input.navisworksUnavailable,
           )
           options.onEvent?.({
             phase: 'completed',
@@ -484,6 +497,14 @@ export class AgentRuntime {
           errorCode: error.code,
         }
       }
+      if (error instanceof NavisworksTargetError) {
+        return {
+          isSuccess: false,
+          message: error.message,
+          contextTokensUsed: latestContextTokens,
+          errorCode: error.code,
+        }
+      }
       return {
         isSuccess: false,
         message: `模型调用失败：${errorMessage(error)}`,
@@ -500,6 +521,8 @@ export class AgentRuntime {
     signal?: AbortSignal,
     requestToolApproval?: RunAgentOptions['requestToolApproval'],
     allowAmbiguousRetry = false,
+    navisworksBinding?: NavisworksRunBinding,
+    navisworksUnavailable?: AgentRunInput['navisworksUnavailable'],
   ): Promise<{ result?: unknown; error?: { code: string; message: string; ambiguousOutcome?: boolean }; wire: Record<string, unknown> }> {
     const ledger = this.#executionLedger
     const isModifying = toolCatalog.get(toolCall.name)?.impact === 'view-state-change'
@@ -508,14 +531,20 @@ export class AgentRuntime {
     let executing = false
     try {
       toolCatalog.assertAllowed(toolCall.name, toolCall.arguments)
+      if (navisworksUnavailable !== undefined) {
+        throw new NavisworksTargetError(navisworksUnavailable.code, navisworksUnavailable.message)
+      }
       if (disabledTools.has(toolCall.name)) {
         throw new ToolCatalogError(`工具已被用户禁用：${toolCall.name}`)
       }
       const normalizedArguments = toolCatalog.normalizeArguments(toolCall.name, toolCall.arguments)
       if (isModifying) {
-        documentAtRequest = this.#contextState?.documentInstanceId ?? undefined
+        documentAtRequest = navisworksBinding?.documentInstanceId
+          ?? this.#contextState?.documentInstanceId
+          ?? undefined
         const argumentsHash = hashArguments(normalizedArguments)
         const ambiguous = ledger?.findAmbiguous({
+          instanceId: navisworksBinding?.instanceId,
           documentInstanceId: documentAtRequest,
           toolName: toolCall.name,
           argumentsHash,
@@ -538,6 +567,12 @@ export class AgentRuntime {
           toolCallId: toolCall.id,
           toolName: toolCall.name,
           argumentsHash,
+          ...(navisworksBinding === undefined
+            ? {}
+            : {
+                instanceId: navisworksBinding.instanceId,
+                bridgeSessionId: navisworksBinding.bridgeSessionId,
+              }),
           documentInstanceId: documentAtRequest,
         })
         ledgerStarted = ledger !== undefined
@@ -549,6 +584,12 @@ export class AgentRuntime {
               toolName: toolCall.name as AgentToolName,
               arguments: normalizedArguments,
               argumentsHash,
+              ...(navisworksBinding === undefined
+                ? {}
+                : {
+                    instanceId: navisworksBinding.instanceId,
+                    bridgeSessionId: navisworksBinding.bridgeSessionId,
+                  }),
               ...(documentAtRequest === undefined ? {} : { documentInstanceId: documentAtRequest }),
               ...(ambiguous === undefined ? {} : { ambiguousRetry: true }),
             })
@@ -563,7 +604,23 @@ export class AgentRuntime {
         }
         throwIfAborted(signal)
         await ledger?.mark(runId, toolCall.id, 'approved')
-        if (this.#contextState !== undefined
+        if (navisworksBinding !== undefined) {
+          try {
+            await validateNavisworksRunBinding(
+              this.#bridgeClient as AgentBridgeClient & Pick<NavisworksBridgeClient, 'callToEndpoint'>,
+              navisworksBinding,
+              { signal },
+            )
+          } catch (error) {
+            if (!(error instanceof NavisworksTargetError)) throw error
+            await ledger?.mark(runId, toolCall.id, 'cancelled', 'TARGET_CHANGED')
+            const message = '当前 Navisworks 目标已变化，本次操作已取消。'
+            return {
+              error: { code: 'TARGET_CHANGED', message },
+              wire: { status: 'error', tool: toolCall.name, code: 'TARGET_CHANGED', summary: message },
+            }
+          }
+        } else if (this.#contextState !== undefined
           && !this.#contextState.canUseDocumentReference(documentAtRequest)) {
           await ledger?.mark(runId, toolCall.id, 'cancelled', 'DOCUMENT_CHANGED')
           const message = '文档已变化，已取消本次视图操作，请重新选择目标后重试。'
@@ -584,10 +641,19 @@ export class AgentRuntime {
           await ledger?.resolveAmbiguous(ambiguous, 'USER_CONFIRMED_RETRY')
         }
       }
-      const callBridge = () => this.#bridgeClient.call(toolCall.name, normalizedArguments, { signal })
+      const callBridge = () => navisworksBinding === undefined
+        ? this.#bridgeClient.call(toolCall.name, normalizedArguments, { signal })
+        : callWithNavisworksRunBinding(
+            this.#bridgeClient as AgentBridgeClient & Pick<NavisworksBridgeClient, 'callToEndpoint'>,
+            navisworksBinding,
+            toolCall.name,
+            normalizedArguments,
+            { signal },
+          )
       const execute = async (): Promise<unknown> => {
         if (isModifying) {
-          if (this.#contextState !== undefined
+          if (navisworksBinding === undefined
+            && this.#contextState !== undefined
             && !this.#contextState.canUseDocumentReference(documentAtRequest)) {
             await ledger?.mark(runId, toolCall.id, 'cancelled', 'DOCUMENT_CHANGED')
             throw new ToolExecutionGuardError(
@@ -601,7 +667,12 @@ export class AgentRuntime {
         return callBridge()
       }
       const result = isModifying && this.#operationCoordinator !== undefined
-        ? await this.#operationCoordinator.runExclusive(documentAtRequest, execute)
+        ? await this.#operationCoordinator.runExclusive(
+            navisworksBinding === undefined
+              ? documentAtRequest
+              : `${navisworksBinding.instanceId}\u0000${documentAtRequest ?? ''}`,
+            execute,
+          )
         : await execute()
       if (isModifying) await ledger?.mark(runId, toolCall.id, 'success')
       return {
@@ -609,6 +680,17 @@ export class AgentRuntime {
         wire: { status: 'success', tool: toolCall.name, result },
       }
     } catch (error) {
+      if (error instanceof NavisworksTargetError) {
+        if (isModifying && ledgerStarted) {
+          const current = ledger?.get(runId, toolCall.id)
+          if (current?.status === 'executing') {
+            await ledger?.mark(runId, toolCall.id, 'failed', error.code)
+          } else if (current?.status === 'awaiting-approval' || current?.status === 'approved') {
+            await ledger?.mark(runId, toolCall.id, 'cancelled', error.code)
+          }
+        }
+        throw error
+      }
       if (signal?.aborted) {
         if (isModifying && ledgerStarted) {
           const current = ledger?.get(runId, toolCall.id)

@@ -10,6 +10,7 @@
  */
 
 export interface DocumentIdentity {
+  instanceId?: string
   bridgeSessionId?: string
   documentInstanceId?: string
 }
@@ -19,9 +20,17 @@ export type IdentityChangeListener = (previous: DocumentIdentity) => void
 function sameIdentity(a: DocumentIdentity | null, b: DocumentIdentity | null): boolean {
   if (a === null || b === null) return a === b
   return (
-    (a.documentInstanceId ?? null) === (b.documentInstanceId ?? null)
+    (a.instanceId ?? null) === (b.instanceId ?? null)
+    && (a.documentInstanceId ?? null) === (b.documentInstanceId ?? null)
     && (a.bridgeSessionId ?? null) === (b.bridgeSessionId ?? null)
   )
+}
+
+export function documentScopeKey(identity: DocumentIdentity | null): string | undefined {
+  if (identity?.documentInstanceId === undefined) return undefined
+  return identity.instanceId === undefined
+    ? identity.documentInstanceId
+    : `${identity.instanceId}\u0000${identity.documentInstanceId}`
 }
 
 export class DocumentScopeRegistry {
@@ -51,7 +60,8 @@ export class DocumentScopeRegistry {
     if (sameIdentity(this.#current, next)) return
     const previous = this.#current
     this.#current = next
-    if (previous !== null && (previous.documentInstanceId ?? previous.bridgeSessionId)) {
+    if (previous !== null
+      && (previous.instanceId ?? previous.documentInstanceId ?? previous.bridgeSessionId)) {
       for (const listener of this.#listeners) {
         try {
           listener(previous)
@@ -66,12 +76,16 @@ export class DocumentScopeRegistry {
    * Invariant B: a document-bound reference may only drive a modifying tool call while it
    * still names the current document instance. A missing id (never observed) is rejected.
    */
-  canUseDocumentReference(referenceDocumentInstanceId: string | undefined | null): boolean {
+  canUseDocumentReference(
+    referenceDocumentInstanceId: string | undefined | null,
+    referenceInstanceId?: string,
+  ): boolean {
     const currentId = this.#current?.documentInstanceId
     if (currentId === undefined || referenceDocumentInstanceId === undefined
       || referenceDocumentInstanceId === null) {
       return false
     }
     return referenceDocumentInstanceId === currentId
+      && (referenceInstanceId === undefined || referenceInstanceId === this.#current?.instanceId)
   }
 }

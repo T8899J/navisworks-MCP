@@ -547,6 +547,22 @@ summary:focus-visible,
   flex-direction: column;
 }
 
+.navisworks-instance-select {
+  min-width: 0;
+  max-width: 210px;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  background: transparent;
+  border: 0;
+  outline: 0;
+}
+
+.navisworks-instance-select:disabled {
+  opacity: 0.72;
+}
+
 .status-copy strong,
 .status-copy small {
   overflow: hidden;

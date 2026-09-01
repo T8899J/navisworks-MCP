@@ -71,6 +71,29 @@ describe('Navisworks bridge framing and client', () => {
     )
     expect(calls).toBe(1)
   })
+
+  it('calls a specified endpoint without re-reading the discovery file', async () => {
+    const transport: BridgeTransport = {
+      async exchange(pipeName, requestFrame) {
+        expect(pipeName).toBe('fixed-pipe-b')
+        const request = JSON.parse(decodeBridgeFrame(requestFrame).toString('utf8')) as { Id: string }
+        return Buffer.from(JSON.stringify({ Id: request.Id, Ok: true, Result: { target: 'B' } }))
+      },
+    }
+    const client = new NavisworksBridgeClient({
+      endpointFile: path.join(tmpdir(), 'does-not-exist.json'),
+      transport,
+    })
+
+    await expect(client.callToEndpoint({
+      ProtocolVersion: 1,
+      PipeName: 'fixed-pipe-b',
+      ProcessId: 18120,
+      PluginVersion: '1.0.0',
+      HostVersion: '2023',
+      StartedAtUtc: '2026-09-01T00:00:00.000Z',
+    }, 'navisworks_status')).resolves.toEqual({ target: 'B' })
+  })
 })
 
 async function createEndpoint(): Promise<string> {

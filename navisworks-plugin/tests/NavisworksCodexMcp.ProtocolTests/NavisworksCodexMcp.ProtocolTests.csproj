@@ -41,6 +41,9 @@
     <Compile Include="..\..\src\NavisworksCodexMcp.Plugin\BridgeFrameProtocol.cs">
       <Link>BridgeFrameProtocol.cs</Link>
     </Compile>
+    <Compile Include="..\..\src\NavisworksCodexMcp.Plugin\BridgeEndpointRegistry.cs">
+      <Link>BridgeEndpointRegistry.cs</Link>
+    </Compile>
     <Compile Include="..\..\src\NavisworksCodexMcp.Plugin\SearchContinuationPolicy.cs">
       <Link>SearchContinuationPolicy.cs</Link>
     </Compile>

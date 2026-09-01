@@ -19,7 +19,8 @@ namespace NavisworksCodexMcp.Plugin
                 TestWriteOversizedFrameIsRejected();
                 TestSearchPageAtLimitRemainsResumable();
                 TestScopeAllAdvancesFromNamesToProperties();
-                Console.WriteLine("PROTOCOL_TESTS: PASS (6/6)");
+                TestEndpointRegistryKeepsInstancesIndependent();
+                Console.WriteLine("PROTOCOL_TESTS: PASS (7/7)");
                 return 0;
             }
             catch (Exception exception)
@@ -151,6 +152,37 @@ namespace NavisworksCodexMcp.Plugin
             Assert(
                 !SearchContinuationPolicy.ShouldAdvancePhase(2, 2),
                 "The search advanced past its final phase.");
+        }
+
+        private static void TestEndpointRegistryKeepsInstancesIndependent()
+        {
+            string dataDirectory = Path.Combine(
+                Path.GetTempPath(),
+                "navisworks-endpoints-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                var first = new BridgeEndpointRegistry(dataDirectory, 12340);
+                var second = new BridgeEndpointRegistry(dataDirectory, 18120);
+                first.Write("pipe-a", "1.0.0", "2023");
+                second.Write("pipe-b", "1.0.0", "2023");
+
+                string endpoints = Path.Combine(dataDirectory, "endpoints");
+                string firstFile = Path.Combine(endpoints, "12340.json");
+                string secondFile = Path.Combine(endpoints, "18120.json");
+                Assert(File.Exists(firstFile), "The first endpoint was overwritten.");
+                Assert(File.Exists(secondFile), "The second endpoint was not written.");
+
+                second.DeleteIfOwned("pipe-b");
+                Assert(File.Exists(firstFile), "Deleting B removed A's endpoint.");
+                Assert(!File.Exists(secondFile), "B did not remove its own endpoint.");
+            }
+            finally
+            {
+                if (Directory.Exists(dataDirectory))
+                {
+                    Directory.Delete(dataDirectory, true);
+                }
+            }
         }
 
         private static void Assert(bool condition, string message)

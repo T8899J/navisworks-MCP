@@ -9,7 +9,7 @@ import { resolveDesktopDataPaths } from './dataPaths'
 import {
   registerDesktopIpc,
   broadcastNativeThemeUpdated,
-  startNavisworksStatusPolling,
+  startNavisworksInstancesPolling,
   type OllamaAgentPort,
   type OllamaEndpointOptions,
   type OllamaRunInput,
@@ -25,6 +25,8 @@ import {
   ApprovalServiceToken,
   BridgeClientToken,
   ModelRouterToken,
+  NavisworksInstanceRegistryToken,
+  NavisworksInstanceSelectionToken,
   SessionStoreToken,
   SettingsStoreToken,
   ToolCatalogToken,
@@ -82,6 +84,8 @@ async function startApplication(): Promise<void> {
   const contextState = appScope.require(ContextStateToken)
   const scopeManager = appScope.require(AgentScopeManagerToken)
   const toolApprovals = appScope.require(ApprovalServiceToken)
+  const instanceRegistry = appScope.require(NavisworksInstanceRegistryToken)
+  const instanceSelection = appScope.require(NavisworksInstanceSelectionToken)
   await app.whenReady()
 
   const appearance = new NativeAppearanceService(
@@ -116,6 +120,8 @@ async function startApplication(): Promise<void> {
     contextState,
     scopeManager,
     toolApprovals,
+    instanceRegistry,
+    instanceSelection,
     toolResultsDirectory: dataPaths.toolResultsDirectory,
     secrets: {
       encrypt(value) {
@@ -130,8 +136,9 @@ async function startApplication(): Promise<void> {
   })
   // Detect Navisworks appearing/disappearing without a manual refresh, and keep the
   // Document Scope current so a switch/reopen invalidates stale facts + reference sets.
-  const disposeStatusPolling = startNavisworksStatusPolling(
-    bridge,
+  const disposeStatusPolling = startNavisworksInstancesPolling(
+    instanceRegistry,
+    instanceSelection,
     undefined,
     (status) => contextState.observe(status)
   )
@@ -314,7 +321,11 @@ async function runAgent(
       ...(input.compactSummary === undefined ? {} : { compactSummary: input.compactSummary }),
       ...(input.semanticMemory === undefined ? {} : { semanticMemory: input.semanticMemory }),
       ...(input.documentNotice === undefined ? {} : { documentNotice: input.documentNotice }),
-      ...(input.currentDocument === undefined ? {} : { currentDocument: input.currentDocument })
+      ...(input.currentDocument === undefined ? {} : { currentDocument: input.currentDocument }),
+      ...(input.navisworksBinding === undefined ? {} : { navisworksBinding: input.navisworksBinding }),
+      ...(input.navisworksUnavailable === undefined
+        ? {}
+        : { navisworksUnavailable: input.navisworksUnavailable })
     },
     {
       signal: options.signal,

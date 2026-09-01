@@ -1,4 +1,4 @@
-import type { DocumentIdentity } from './documentScope'
+import { documentScopeKey, type DocumentIdentity } from './documentScope'
 
 /**
  * Ordered reference sets — the machine-side answer to "第一个 / 第三个 / 刚才那些"
@@ -112,11 +112,11 @@ export class ReferenceSetStore {
   readonly #byDocument = new Map<string, ReferenceSet[]>()
   readonly #lastRelevant = new Map<string, string>()
 
-  add(set: ReferenceSet): void {
-    const bucket = this.#byDocument.get(set.documentInstanceId) ?? []
+  add(set: ReferenceSet, scopeKey = set.documentInstanceId): void {
+    const bucket = this.#byDocument.get(scopeKey) ?? []
     bucket.push(set)
-    this.#byDocument.set(set.documentInstanceId, bucket)
-    this.#lastRelevant.set(referencePointerKey(set.conversationId, set.documentInstanceId), set.id)
+    this.#byDocument.set(scopeKey, bucket)
+    this.#lastRelevant.set(referencePointerKey(set.conversationId, scopeKey), set.id)
   }
 
   get(documentInstanceId: string, setId: string): ReferenceSet | undefined {
@@ -146,10 +146,11 @@ export class ReferenceSetStore {
   }
 
   invalidate(identity: DocumentIdentity): void {
-    if (identity.documentInstanceId !== undefined) {
-      this.#byDocument.delete(identity.documentInstanceId)
-      for (const key of this.#lastRelevant.keys()) {
-        if (key.endsWith(`:${identity.documentInstanceId}`)) this.#lastRelevant.delete(key)
+    const scopeKey = documentScopeKey(identity)
+    if (scopeKey !== undefined) {
+      this.#byDocument.delete(scopeKey)
+      for (const pointerKey of this.#lastRelevant.keys()) {
+        if (pointerKey.endsWith(`:${scopeKey}`)) this.#lastRelevant.delete(pointerKey)
       }
     }
   }

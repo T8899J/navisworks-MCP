@@ -7,7 +7,12 @@ import {
   useRef,
   useState
 } from 'react'
-import type { AppearanceState, RuntimeInfo, ThemeMode } from '../shared/ipc'
+import type {
+  AppearanceState,
+  NavisworksConnectionState,
+  RuntimeInfo,
+  ThemeMode,
+} from '../shared/ipc'
 import {
   type ChatMessage,
   type ChatSession,
@@ -16,8 +21,7 @@ import {
   type NavisworksStatus,
   type SessionSummary,
   type ToolApprovalRequest,
-  createId,
-  normalizeStatus
+  createId
 } from './chatTypes'
 import { Composer } from './Composer'
 import { appearanceGateway, applyAppearance, applyFontScale } from './appearance'
@@ -54,6 +58,18 @@ const DEFAULT_SETTINGS: DesktopSettings = {
 const DEFAULT_NAVISWORKS_STATUS: NavisworksStatus = {
   connected: false,
   status: '未连接'
+}
+
+const DEFAULT_NAVISWORKS_CONNECTION: NavisworksConnectionState = { instances: [] }
+
+function statusFromConnection(state: NavisworksConnectionState): NavisworksStatus {
+  const selected = state.instances.find((instance) => instance.instanceId === state.selectedInstanceId)
+  if (selected === undefined) return DEFAULT_NAVISWORKS_STATUS
+  return {
+    connected: selected.connected,
+    status: selected.connected ? selected.documentName ?? '已连接' : '当前 Navisworks 已断开',
+    ...(selected.documentName === undefined ? {} : { documentName: selected.documentName }),
+  }
 }
 
 const MOBILE_SIDEBAR_QUERY = '(max-width: 900px)'
@@ -169,6 +185,7 @@ export default function App() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS)
   const [appearance, setAppearance] = useState<AppearanceState>(systemAppearance)
   const [navisworks, setNavisworks] = useState(DEFAULT_NAVISWORKS_STATUS)
+  const [navisworksConnection, setNavisworksConnection] = useState(DEFAULT_NAVISWORKS_CONNECTION)
   // Round-trip latency of the last cloud connectivity test; null until run.
   const [cloudLatency, setCloudLatency] = useState<{ ok: boolean; ms: number } | null>(null)
   // Context-ring usage of the active session: tokens of the last round plus
@@ -432,7 +449,7 @@ export default function App() {
         desktopGateway.listSessions(),
         desktopGateway.getSettings(),
         desktopGateway.listModels(),
-        desktopGateway.getNavisworksStatus()
+        desktopGateway.getNavisworksInstances()
       ])
       if (cancelled) return
 
@@ -443,7 +460,10 @@ export default function App() {
           models: Array.from(new Set([current.selectedModel, ...modelResult.value]))
         }))
       }
-      if (statusResult.status === 'fulfilled') setNavisworks(statusResult.value)
+      if (statusResult.status === 'fulfilled') {
+        setNavisworksConnection(statusResult.value)
+        setNavisworks(statusFromConnection(statusResult.value))
+      }
 
       if (sessionResult.status === 'fulfilled' && sessionResult.value.length > 0) {
         commitSessionSummaries(sessionResult.value)
@@ -547,7 +567,11 @@ export default function App() {
         const approval = event as ToolApprovalRequest
         if (approval.sessionId === activeSessionIdRef.current) setPendingToolApproval(approval)
       }),
-      desktopGateway.subscribe('navisworks.status.changed', (event) => setNavisworks(normalizeStatus(event)))
+      desktopGateway.subscribe('navisworks.instances.changed', (event) => {
+        const state = event as NavisworksConnectionState
+        setNavisworksConnection(state)
+        setNavisworks(statusFromConnection(state))
+      })
     ]
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
   }, [activeSessionId, persistSession, serviceAvailable])
@@ -873,9 +897,22 @@ export default function App() {
 
   const refreshNavisworks = async () => {
     try {
-      setNavisworks(await desktopGateway.getNavisworksStatus())
+      const state = await desktopGateway.getNavisworksInstances()
+      setNavisworksConnection(state)
+      setNavisworks(statusFromConnection(state))
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '刷新 Navisworks 状态失败')
+    }
+  }
+
+  const selectNavisworksInstance = async (instanceId: string) => {
+    if (busy || navisworksConnection.runningInstanceId) return
+    try {
+      const state = await desktopGateway.selectNavisworksInstance(instanceId)
+      setNavisworksConnection(state)
+      setNavisworks(statusFromConnection(state))
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '切换 Navisworks 实例失败')
     }
   }
 
@@ -925,7 +962,36 @@ export default function App() {
               <span className="status-dot" />
               <Box aria-hidden="true" size={14} />
               <span className="status-copy">
-                <strong>{navisworks.connected ? 'Navisworks 已连接' : 'Navisworks 未连接'}</strong>
+                {navisworksConnection.instances.length > 1 ? (
+                  <select
+                    className="navisworks-instance-select"
+                    aria-label="当前 Navisworks 实例"
+                    value={navisworksConnection.selectedInstanceId ?? ''}
+                    disabled={busy || navisworksConnection.runningInstanceId !== undefined}
+                    onChange={(event) => void selectNavisworksInstance(event.target.value)}>
+                    {navisworksConnection.instances.map((instance) => (
+                      <option key={instance.instanceId} value={instance.instanceId}>
+                        {instance.documentName ?? '未命名文档'} · PID {instance.processId}
+                        {instance.connected ? '' : '（已断开）'}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <strong>{navisworks.documentName ?? (navisworks.connected ? 'Navisworks 已连接' : 'Navisworks 未连接')}</strong>
+                )}
+                {(() => {
+                  const selected = navisworksConnection.instances.find(
+                    (instance) => instance.instanceId === navisworksConnection.selectedInstanceId
+                  )
+                  if (!selected) return null
+                  return (
+                    <small>
+                      {navisworksConnection.runningInstanceId === selected.instanceId
+                        ? '正在使用'
+                        : `Navisworks ${selected.hostVersion} · PID ${selected.processId}`}
+                    </small>
+                  )
+                })()}
               </span>
             </div>
           </div>

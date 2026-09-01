@@ -1,5 +1,5 @@
 import type { DesktopApi, DesktopEventName } from '../shared/ipc'
-import type { RuntimeInfo } from '../shared/ipc'
+import type { NavisworksConnectionState, RuntimeInfo } from '../shared/ipc'
 import {
   type ChatSession,
   type ChatStreamEvent,
@@ -112,6 +112,14 @@ export const desktopGateway = {
     return normalizeStatus(await requireApi().request('navisworks.status.get'))
   },
 
+  async getNavisworksInstances(): Promise<NavisworksConnectionState> {
+    return requireApi().request('navisworks.instances.list')
+  },
+
+  async selectNavisworksInstance(instanceId: string): Promise<NavisworksConnectionState> {
+    return requireApi().request('navisworks.instance.select', { instanceId })
+  },
+
   async startChat(payload: {
     sessionId: string
     messageId: string
@@ -137,7 +145,9 @@ export const desktopGateway = {
 
   subscribe(
     event: DesktopEventName,
-    listener: (event: ChatStreamEvent | NavisworksStatus | ToolApprovalRequest) => void
+    listener: (
+      event: ChatStreamEvent | NavisworksStatus | NavisworksConnectionState | ToolApprovalRequest
+    ) => void
   ): () => void {
     const desktop = api()
     if (!desktop) return () => undefined

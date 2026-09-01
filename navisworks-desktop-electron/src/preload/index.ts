@@ -40,6 +40,8 @@ const allowedRoutes = new Set<IpcRoute>([
   'tool.approval.resolve',
   'chat.compact',
   'navisworks.status.get',
+  'navisworks.instances.list',
+  'navisworks.instance.select',
   'navisworks.tool.execute'
 ])
 
@@ -49,6 +51,7 @@ const allowedEvents = new Set<DesktopEventName>([
   'chat.error',
   'tool.approval.requested',
   'navisworks.status.changed',
+  'navisworks.instances.changed',
   'nativeTheme.updated'
 ])
 

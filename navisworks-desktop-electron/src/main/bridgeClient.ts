@@ -111,6 +111,21 @@ export class NavisworksBridgeClient {
     const endpoint = await readBridgeEndpoint(this.#endpointFile)
     throwIfAborted(options.signal)
 
+    return await this.callToEndpoint<T>(endpoint, method, parameters, options)
+  }
+
+  /** Call one immutable endpoint directly; no discovery or selection is re-read. */
+  async callToEndpoint<T = unknown>(
+    endpoint: BridgeEndpoint,
+    method: string,
+    parameters: Record<string, unknown> = {},
+    options: BridgeCallOptions = {},
+  ): Promise<T> {
+    throwIfAborted(options.signal)
+    if (endpoint.ProtocolVersion !== BRIDGE_PROTOCOL_VERSION || !endpoint.PipeName.trim()) {
+      throw new BridgeError('INVALID_ENDPOINT', 'Navisworks bridge endpoint is invalid.')
+    }
+
     const request: BridgeRequest = {
       Id: randomUUID(),
       ProtocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -279,6 +294,12 @@ export function resolveBridgeEndpointFile(
       ? env.LOCALAPPDATA
       : path.join(homedir(), 'AppData', 'Local')
   return path.join(localAppData, 'NavisworksCodexMcp', 'endpoint.json')
+}
+
+export function resolveBridgeEndpointsDirectory(
+  options: Pick<BridgeClientOptions, 'env' | 'localAppData'> = {},
+): string {
+  return path.join(path.dirname(resolveBridgeEndpointFile(options)), 'endpoints')
 }
 
 export async function readBridgeEndpoint(endpointFile: string): Promise<BridgeEndpoint> {

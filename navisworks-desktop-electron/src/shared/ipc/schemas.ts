@@ -124,10 +124,26 @@ export const appSettingsSchema = z.strictObject({
 export const navisworksStatusSchema = z.strictObject({
   connected: z.boolean(),
   status: z.string(),
+  instanceId: z.string().optional(),
   documentName: z.string().optional(),
   selectionCount: z.number().int().nonnegative().optional(),
   bridgeSessionId: z.string().optional(),
   documentInstanceId: z.string().optional()
+})
+
+export const navisworksInstanceSummarySchema = z.strictObject({
+  instanceId: nonEmptyString,
+  processId: z.number().int().positive(),
+  connected: z.boolean(),
+  documentName: z.string().optional(),
+  hostVersion: z.string(),
+  pluginVersion: z.string()
+})
+
+export const navisworksConnectionStateSchema = z.strictObject({
+  instances: z.array(navisworksInstanceSummarySchema),
+  selectedInstanceId: z.string().optional(),
+  runningInstanceId: z.string().optional()
 })
 
 export const runtimeInfoSchema = z.strictObject({
@@ -255,6 +271,14 @@ export const requestSchemas = {
     input: emptyInput,
     output: navisworksStatusSchema
   },
+  'navisworks.instances.list': {
+    input: emptyInput,
+    output: navisworksConnectionStateSchema
+  },
+  'navisworks.instance.select': {
+    input: z.strictObject({ instanceId: nonEmptyString }),
+    output: navisworksConnectionStateSchema
+  },
   'navisworks.tool.execute': {
     input: z.strictObject({
       toolName: toolNameSchema,
@@ -357,10 +381,13 @@ export const eventSchemas = {
     toolName: toolNameSchema,
     arguments: z.record(z.string(), z.unknown()),
     argumentsHash: nonEmptyString,
+    instanceId: nonEmptyString.optional(),
+    bridgeSessionId: nonEmptyString.optional(),
     documentInstanceId: nonEmptyString.optional(),
     ambiguousRetry: z.boolean().optional()
   }),
   'navisworks.status.changed': navisworksStatusSchema,
+  'navisworks.instances.changed': navisworksConnectionStateSchema,
   'nativeTheme.updated': appearanceStateSchema
 } as const
 
@@ -380,6 +407,8 @@ export type AppearanceState = z.output<typeof appearanceStateSchema>
 export type ThemeMode = z.output<typeof themeModeSchema>
 export type EffectiveTheme = z.output<typeof effectiveThemeSchema>
 export type NavisworksStatus = z.output<typeof navisworksStatusSchema>
+export type NavisworksInstanceSummary = z.output<typeof navisworksInstanceSummarySchema>
+export type NavisworksConnectionState = z.output<typeof navisworksConnectionStateSchema>
 export type RuntimeInfo = z.output<typeof runtimeInfoSchema>
 export type ToolName = z.output<typeof toolNameSchema>
 export type ToolApprovalRequest = z.output<typeof eventSchemas['tool.approval.requested']>

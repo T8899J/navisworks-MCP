@@ -8,6 +8,14 @@ import {
 } from 'electron'
 
 import type { NavisworksBridgeClient } from './bridgeClient'
+import type { NavisworksInstanceRegistry } from './navisworks/instanceRegistry'
+import type { NavisworksInstanceSelection } from './navisworks/instanceSelection'
+import type { NavisworksInstance } from './navisworks/instanceTypes'
+import type { NavisworksRunBinding } from './navisworks/instanceTypes'
+import {
+  createNavisworksRunBinding,
+  NavisworksTargetError,
+} from './navisworks/runBinding'
 import type {
   AppSettings as PersistedSettings,
   ConversationSession,
@@ -42,6 +50,7 @@ import {
   type IpcEnvelope,
   type IpcRoute,
   type NavisworksStatus,
+  type NavisworksConnectionState,
   type OutputFor,
   type RuntimeInfo,
   type Session,
@@ -83,6 +92,8 @@ export interface OllamaRunInput {
   documentNotice?: DocumentChangeNotice
   /** The document snapshot captured by the same preflight that binds the Run Scope. */
   currentDocument?: CurrentDocumentContext
+  navisworksBinding?: NavisworksRunBinding
+  navisworksUnavailable?: { code: 'TARGET_INSTANCE_DISCONNECTED'; message: string }
 }
 
 export interface OllamaHistoryEntry {
@@ -143,6 +154,8 @@ export interface OllamaToolApprovalRequest {
   toolName: ToolName
   arguments: Record<string, unknown>
   argumentsHash: string
+  instanceId?: string
+  bridgeSessionId?: string
   documentInstanceId?: string
   ambiguousRetry?: boolean
 }
@@ -163,6 +176,8 @@ export interface DesktopIpcDependencies {
   toolApprovals: ToolApprovalRegistry
   /** P3 directory for externalized large tool results. When absent, results stay inline. */
   toolResultsDirectory?: string
+  instanceRegistry?: NavisworksInstanceRegistry
+  instanceSelection?: NavisworksInstanceSelection
 }
 
 export interface SecretProtector {
@@ -216,6 +231,9 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
     dependencies.scopeManager,
     dependencies.contextState,
     () => readNavisworksStatus(dependencies.bridge),
+    dependencies.instanceRegistry,
+    dependencies.instanceSelection,
+    dependencies.bridge,
   )
 
   const handlers = {
@@ -339,14 +357,64 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       return { summary }
     }),
     'navisworks.status.get': routeHandler<'navisworks.status.get'>(async () => {
+      if (dependencies.instanceRegistry !== undefined && dependencies.instanceSelection !== undefined) {
+        const state = await refreshNavisworksConnectionState(
+          dependencies.instanceRegistry,
+          dependencies.instanceSelection,
+        )
+        const status = statusForSelectedInstance(
+          dependencies.instanceRegistry,
+          dependencies.instanceSelection,
+        )
+        dependencies.contextState?.observe(status)
+        return status
+      }
       const status = await readNavisworksStatus(dependencies.bridge)
       dependencies.contextState?.observe(status)
       return status
+    }),
+    'navisworks.instances.list': routeHandler<'navisworks.instances.list'>(async () => {
+      if (dependencies.instanceRegistry === undefined || dependencies.instanceSelection === undefined) {
+        return { instances: [] }
+      }
+      return refreshNavisworksConnectionState(
+        dependencies.instanceRegistry,
+        dependencies.instanceSelection,
+      )
+    }),
+    'navisworks.instance.select': routeHandler<'navisworks.instance.select'>(async ({ instanceId }) => {
+      if (dependencies.instanceRegistry === undefined || dependencies.instanceSelection === undefined) {
+        throw new DesktopIpcError('SERVICE_UNAVAILABLE', 'Navisworks 实例发现服务不可用。')
+      }
+      const instances = await dependencies.instanceRegistry.refresh()
+      dependencies.instanceSelection.observe(instances)
+      try {
+        dependencies.instanceSelection.select(instanceId, instances)
+      } catch {
+        throw new DesktopIpcError('NOT_FOUND', '目标 Navisworks 实例不存在或已经关闭。')
+      }
+      const state = buildNavisworksConnectionState(dependencies.instanceSelection, instances)
+      broadcastNavisworksConnectionState(state)
+      broadcastNavisworksStatus(statusForSelectedInstance(
+        dependencies.instanceRegistry,
+        dependencies.instanceSelection,
+      ))
+      return state
     }),
     'navisworks.tool.execute': routeHandler<'navisworks.tool.execute'>(async ({ toolName, arguments: args }) => {
       dependencies.tools.assertAllowed(toolName, args)
       if (dependencies.tools.get(toolName)?.impact === 'view-state-change') {
         throw new DesktopIpcError('VALIDATION_FAILED', '视图操作必须经过聊天操作确认。')
+      }
+      if (dependencies.instanceRegistry !== undefined && dependencies.instanceSelection !== undefined) {
+        const selectedId = dependencies.instanceSelection.selectedInstanceId
+        const selected = selectedId === undefined
+          ? undefined
+          : dependencies.instanceRegistry.get(selectedId)
+        if (selected === undefined || !selected.connected) {
+          throw new DesktopIpcError('SERVICE_UNAVAILABLE', '当前 Navisworks 目标已断开。')
+        }
+        return dependencies.bridge.callToEndpoint(selected.endpoint, toolName, args)
       }
       return dependencies.bridge.call(toolName, args)
     })
@@ -392,6 +460,7 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
 
 export class ChatRunRegistry {
   readonly #runs = new Map<string, ActiveChatRun>()
+  readonly #runningInstances = new Map<string, string>()
 
   constructor(
     private readonly agent: OllamaAgentPort,
@@ -403,6 +472,9 @@ export class ChatRunRegistry {
       connected: false,
       status: 'Navisworks 未连接',
     }),
+    private readonly instanceRegistry?: NavisworksInstanceRegistry,
+    private readonly instanceSelection?: NavisworksInstanceSelection,
+    private readonly bridge?: NavisworksBridgeClient,
   ) {}
 
   start(
@@ -481,8 +553,49 @@ export class ChatRunRegistry {
   ): Promise<void> {
     const base = { runId, sessionId: input.sessionId, turnId, messageId }
     let runScope: Scope | undefined
+    let navisworksBinding: NavisworksRunBinding | undefined
+    let navisworksUnavailable: OllamaRunInput['navisworksUnavailable']
     try {
-      if (this.contextState !== undefined) {
+      if (this.instanceRegistry !== undefined
+        && this.instanceSelection !== undefined
+        && this.bridge !== undefined) {
+        const instances = await this.instanceRegistry.refresh()
+        this.instanceSelection.observe(instances)
+        const selectedInstanceId = this.instanceSelection.selectedInstanceId
+        const selected = selectedInstanceId === undefined
+          ? undefined
+          : this.instanceRegistry.get(selectedInstanceId)
+        if (selected === undefined || !selected.connected) {
+          navisworksUnavailable = {
+            code: 'TARGET_INSTANCE_DISCONNECTED',
+            message: selectedInstanceId === undefined
+              ? '请选择要使用的 Navisworks 实例。'
+              : '当前选择的 Navisworks 已断开，请明确选择其他实例。',
+          }
+          this.contextState?.observe({ connected: false })
+        } else {
+          navisworksBinding = await createNavisworksRunBinding(selected, this.bridge, {
+            signal: controller.signal,
+          })
+          this.contextState?.observe({
+            connected: true,
+            instanceId: navisworksBinding.instanceId,
+            bridgeSessionId: navisworksBinding.bridgeSessionId,
+            ...(navisworksBinding.documentInstanceId === undefined
+              ? {}
+              : { documentInstanceId: navisworksBinding.documentInstanceId }),
+            ...(navisworksBinding.documentName === undefined
+              ? {}
+              : { documentName: navisworksBinding.documentName }),
+          })
+          this.#runningInstances.set(runId, navisworksBinding.instanceId)
+          broadcastNavisworksConnectionState(buildNavisworksConnectionState(
+            this.instanceSelection,
+            this.instanceRegistry.instances,
+            navisworksBinding.instanceId,
+          ))
+        }
+      } else if (this.contextState !== undefined) {
         let status: NavisworksStatus
         try {
           status = await this.readCurrentNavisworksStatus()
@@ -527,7 +640,9 @@ export class ChatRunRegistry {
           ...(compactSummary === undefined ? {} : { compactSummary }),
           ...(semanticMemory === undefined ? {} : { semanticMemory }),
           ...(documentNotice === undefined ? {} : { documentNotice }),
-          ...(currentDocument === undefined ? {} : { currentDocument })
+          ...(currentDocument === undefined ? {} : { currentDocument }),
+          ...(navisworksBinding === undefined ? {} : { navisworksBinding }),
+          ...(navisworksUnavailable === undefined ? {} : { navisworksUnavailable })
         },
         {
           signal: controller.signal,
@@ -537,6 +652,10 @@ export class ChatRunRegistry {
             toolName: request.toolName,
             arguments: request.arguments,
             argumentsHash: request.argumentsHash,
+            ...(request.instanceId === undefined ? {} : { instanceId: request.instanceId }),
+            ...(request.bridgeSessionId === undefined
+              ? {}
+              : { bridgeSessionId: request.bridgeSessionId }),
             ...(request.documentInstanceId === undefined
               ? {}
               : { documentInstanceId: request.documentInstanceId }),
@@ -587,6 +706,15 @@ export class ChatRunRegistry {
       })
     } finally {
       await runScope?.dispose()
+      if (this.#runningInstances.delete(runId)
+        && this.instanceRegistry !== undefined
+        && this.instanceSelection !== undefined) {
+        broadcastNavisworksConnectionState(buildNavisworksConnectionState(
+          this.instanceSelection,
+          this.instanceRegistry.instances,
+          [...this.#runningInstances.values()].at(-1),
+        ))
+      }
       this.#runs.delete(runId)
       settle()
     }
@@ -595,6 +723,8 @@ export class ChatRunRegistry {
 
 interface PendingToolApproval {
   readonly senderId: number
+  readonly instanceId?: string
+  readonly bridgeSessionId?: string
   readonly documentInstanceId?: string
   readonly finish: (approved: boolean) => void
 }
@@ -624,6 +754,10 @@ export class ToolApprovalRegistry {
       const cancel = (): void => finish(false)
       this.#pending.set(approvalId, {
         senderId: sender.id,
+        ...(payload.instanceId === undefined ? {} : { instanceId: payload.instanceId }),
+        ...(payload.bridgeSessionId === undefined
+          ? {}
+          : { bridgeSessionId: payload.bridgeSessionId }),
         ...(payload.documentInstanceId === undefined
           ? {}
           : { documentInstanceId: payload.documentInstanceId }),
@@ -649,6 +783,21 @@ export class ToolApprovalRegistry {
   cancelForDocument(documentInstanceId: string): void {
     for (const pending of [...this.#pending.values()]) {
       if (pending.documentInstanceId === documentInstanceId) pending.finish(false)
+    }
+  }
+
+  cancelForEnvironment(
+    instanceId: string,
+    bridgeSessionId: string,
+    documentInstanceId?: string,
+  ): void {
+    for (const pending of [...this.#pending.values()]) {
+      if (pending.instanceId === instanceId
+        && pending.bridgeSessionId === bridgeSessionId
+        && (documentInstanceId === undefined
+          || pending.documentInstanceId === documentInstanceId)) {
+        pending.finish(false)
+      }
     }
   }
 }
@@ -1246,6 +1395,9 @@ function toSafeIpcError(error: unknown): DesktopIpcError {
   if (error instanceof Error && error.name === 'AbortError') {
     return new DesktopIpcError('CANCELLED', '操作已取消。')
   }
+  if (error instanceof NavisworksTargetError) {
+    return new DesktopIpcError(error.code, error.message)
+  }
   console.error('[IPC] Desktop service failed', error)
   return new DesktopIpcError('INTERNAL', '桌面服务执行失败。')
 }
@@ -1257,6 +1409,69 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function broadcastNavisworksStatus(status: NavisworksStatus): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) emitTo(window.webContents, 'navisworks.status.changed', status)
+  }
+}
+
+export function broadcastNavisworksConnectionState(state: NavisworksConnectionState): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) emitTo(window.webContents, 'navisworks.instances.changed', state)
+  }
+}
+
+export async function refreshNavisworksConnectionState(
+  registry: NavisworksInstanceRegistry,
+  selection: NavisworksInstanceSelection,
+  runningInstanceId?: string,
+): Promise<NavisworksConnectionState> {
+  const instances = await registry.refresh()
+  selection.observe(instances)
+  return buildNavisworksConnectionState(selection, instances, runningInstanceId)
+}
+
+export function buildNavisworksConnectionState(
+  selection: NavisworksInstanceSelection,
+  instances: readonly NavisworksInstance[],
+  runningInstanceId?: string,
+): NavisworksConnectionState {
+  return {
+    instances: selection.instancesForUi(instances).map((instance) => ({
+      instanceId: instance.instanceId,
+      processId: instance.processId,
+      connected: instance.connected,
+      ...(instance.documentName === undefined ? {} : { documentName: instance.documentName }),
+      hostVersion: instance.hostVersion,
+      pluginVersion: instance.pluginVersion,
+    })),
+    ...(selection.selectedInstanceId === undefined
+      ? {}
+      : { selectedInstanceId: selection.selectedInstanceId }),
+    ...(runningInstanceId === undefined ? {} : { runningInstanceId }),
+  }
+}
+
+function statusForSelectedInstance(
+  registry: NavisworksInstanceRegistry,
+  selection: NavisworksInstanceSelection,
+): NavisworksStatus {
+  const selected = selection.selected(registry.instances)
+  if (selected === undefined) return { connected: false, status: 'Navisworks 未连接' }
+  if (!selected.connected) {
+    return {
+      connected: false,
+      status: '当前 Navisworks 已断开',
+      instanceId: selected.instanceId,
+      ...(selected.documentName === undefined ? {} : { documentName: selected.documentName }),
+    }
+  }
+  return {
+    connected: true,
+    status: selected.documentName ?? '已连接 Navisworks',
+    instanceId: selected.instanceId,
+    ...(selected.documentName === undefined ? {} : { documentName: selected.documentName }),
+    ...(selected.bridgeSessionId === undefined ? {} : { bridgeSessionId: selected.bridgeSessionId }),
+    ...(selected.documentInstanceId === undefined
+      ? {}
+      : { documentInstanceId: selected.documentInstanceId }),
   }
 }
 
@@ -1287,6 +1502,31 @@ export function startNavisworksStatusPolling(
       })
       .catch(() => {
         // Defensive: polling must survive even an unexpected rejection.
+      })
+  }, intervalMs)
+  return () => clearInterval(timer)
+}
+
+export function startNavisworksInstancesPolling(
+  registry: NavisworksInstanceRegistry,
+  selection: NavisworksInstanceSelection,
+  intervalMs: number = NAVISWORKS_STATUS_POLL_MS,
+  onStatus?: (status: NavisworksStatus) => void,
+): () => void {
+  let lastSignature = ''
+  const timer = setInterval(() => {
+    void refreshNavisworksConnectionState(registry, selection)
+      .then((state) => {
+        const status = statusForSelectedInstance(registry, selection)
+        onStatus?.(status)
+        const signature = JSON.stringify(state)
+        if (signature === lastSignature) return
+        lastSignature = signature
+        broadcastNavisworksConnectionState(state)
+        broadcastNavisworksStatus(status)
+      })
+      .catch(() => {
+        // Discovery polling is best-effort and must survive one bad refresh.
       })
   }, intervalMs)
   return () => clearInterval(timer)

@@ -49,8 +49,31 @@ describe('ToolExecutionLedger — lifecycle + crash recovery', () => {
     await ledger.mark('r1', 'c2', 'ambiguous')
     expect(ledger.ambiguous().length).toBe(1)
     expect(ledger.findAmbiguous({
+      instanceId: undefined,
       documentInstanceId: 'doc-A', toolName: 'navisworks_set_visibility', argumentsHash: 'h',
     })?.toolCallId).toBe('c2')
+  })
+
+  it('isolates ambiguous records by Navisworks instance', async () => {
+    const ledger = new ToolExecutionLedger()
+    await ledger.begin({
+      runId: 'run-A', toolCallId: 'call-A', toolName: 'navisworks_set_visibility',
+      argumentsHash: 'same-hash', instanceId: 'instance-A', bridgeSessionId: 'bridge-A',
+      documentInstanceId: 'same-document-id',
+    })
+    await ledger.mark('run-A', 'call-A', 'awaiting-approval')
+    await ledger.mark('run-A', 'call-A', 'approved')
+    await ledger.mark('run-A', 'call-A', 'executing')
+    await ledger.mark('run-A', 'call-A', 'ambiguous')
+
+    expect(ledger.findAmbiguous({
+      instanceId: 'instance-B', documentInstanceId: 'same-document-id',
+      toolName: 'navisworks_set_visibility', argumentsHash: 'same-hash',
+    })).toBeUndefined()
+    expect(ledger.findAmbiguous({
+      instanceId: 'instance-A', documentInstanceId: 'same-document-id',
+      toolName: 'navisworks_set_visibility', argumentsHash: 'same-hash',
+    })?.bridgeSessionId).toBe('bridge-A')
   })
 
   it('persists transitions and restores an interrupted execution as ambiguous', async () => {

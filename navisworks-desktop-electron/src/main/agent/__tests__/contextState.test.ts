@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ContextState, renderReferenceSetBlock } from '../contextState'
+import { ContextState, renderDocumentTransition, renderReferenceSetBlock } from '../contextState'
 
 describe('ContextState — observe + ingest + invalidate (P2 integration)', () => {
   it('does not create a notice while the document identity stays the same', () => {
@@ -89,6 +89,34 @@ describe('ContextState — observe + ingest + invalidate (P2 integration)', () =
     expect(state.lastRelevantReferenceSet()).toBeUndefined()
     expect(state.factsForCurrentDocument()).toEqual([])
     expect(state.canUseDocumentReference('doc-A')).toBe(false)
+  })
+
+  it('distinguishes switching Navisworks windows and isolates same document/item ids', () => {
+    const state = new ContextState()
+    state.observe({
+      connected: true, instanceId: 'instance-A', bridgeSessionId: 'bridge-A',
+      documentInstanceId: 'same-doc', documentName: 'Model-A.nwf',
+    })
+    state.markDocumentSeen('session-a', 0)
+    state.ingestToolResult('navisworks_find_items', { items: [{ id: 'item-2-12' }] }, 'call-A')
+    expect(state.factsForCurrentDocument().some((fact) => fact.key === 'item:item-2-12')).toBe(true)
+
+    state.observe({
+      connected: true, instanceId: 'instance-B', bridgeSessionId: 'bridge-B',
+      documentInstanceId: 'same-doc', documentName: 'Model-B.nwf',
+    })
+
+    const notice = state.documentNoticeForSession('session-a')
+    expect(notice).toMatchObject({
+      reason: 'instance-changed',
+      previous: { instanceId: 'instance-A', documentName: 'Model-A.nwf' },
+      current: { instanceId: 'instance-B', documentName: 'Model-B.nwf' },
+    })
+    expect(renderDocumentTransition(notice)).toContain('切换到了另一个 Navisworks 窗口')
+    expect(state.factsForCurrentDocument()).toEqual([])
+    expect(state.lastRelevantReferenceSet()).toBeUndefined()
+    expect(state.canUseDocumentReference('same-doc', 'instance-A')).toBe(false)
+    expect(state.canUseDocumentReference('same-doc', 'instance-B')).toBe(true)
   })
 
   it('self-observes the document instance from a navisworks_status tool result', () => {

@@ -1,4 +1,4 @@
-import type { DocumentIdentity } from './documentScope'
+import { documentScopeKey, type DocumentIdentity } from './documentScope'
 
 /**
  * A tool-verified engineering fact (docs/context-runtime.md §一 Document Scope, Invariants
@@ -223,9 +223,8 @@ export class VerifiedFactStore {
 
   /** Called by the registry on identity change (Invariant B / cleanup). */
   invalidate(identity: DocumentIdentity): void {
-    if (identity.documentInstanceId !== undefined) {
-      this.#byDocument.delete(identity.documentInstanceId)
-    }
+    const key = documentScopeKey(identity)
+    if (key !== undefined) this.#byDocument.delete(key)
   }
 
   get size(): number {

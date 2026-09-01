@@ -35,6 +35,9 @@ import type { NavisworksBridgeClient } from '../bridgeClient'
 import type { ToolCatalog } from '../toolCatalog'
 import { ContextState } from '../agent/contextState'
 import type { AgentScopeManager } from '../kernel/agentScopes'
+import type { NavisworksInstanceRegistry } from '../navisworks/instanceRegistry'
+import { NavisworksInstanceSelection } from '../navisworks/instanceSelection'
+import type { DiscoveredNavisworksInstance } from '../navisworks/instanceTypes'
 
 const DEV_ORIGIN = 'http://localhost:5173'
 
@@ -194,6 +197,8 @@ function createHarness(options: {
   secrets?: { encrypt(value: string): string; decrypt(value: string): string }
   bridge?: NavisworksBridgeClient
   tools?: ToolCatalog
+  instanceRegistry?: NavisworksInstanceRegistry
+  instanceSelection?: NavisworksInstanceSelection
 }): IpcHarness {
   const store = options.store ?? createSessionStore()
   const dependencies: DesktopIpcDependencies = {
@@ -216,6 +221,8 @@ function createHarness(options: {
     senderTrust: { isPackaged: false, rendererRoot: 'D:\\app\\renderer', devServerUrl: DEV_ORIGIN },
     toolApprovals: new ToolApprovalRegistry(),
     secrets: options.secrets,
+    instanceRegistry: options.instanceRegistry,
+    instanceSelection: options.instanceSelection,
   }
 
   const dispose = registerDesktopIpc(dependencies)
@@ -234,7 +241,145 @@ function createHarness(options: {
   }
 }
 
+describe('Navisworks instance IPC selection', () => {
+  it('keeps A selected when B appears and changes to B only on explicit selection', async () => {
+    const instanceA = discoveredInstance('instance-a', 12340, 'Model-A.nwf')
+    const instanceB = discoveredInstance('instance-b', 18120, 'Model-B.nwf')
+    let refreshCount = 0
+    let current = [instanceA]
+    const summaries = () => current.map((instance) => ({ ...instance }))
+    const registry = {
+      get instances() { return summaries() },
+      async refresh() {
+        refreshCount += 1
+        current = refreshCount === 1 ? [instanceA] : [instanceA, instanceB]
+        return summaries()
+      },
+      get(instanceId: string) {
+        return current.find((instance) => instance.instanceId === instanceId)
+      },
+    } as unknown as NavisworksInstanceRegistry
+    const harness = createHarness({
+      ollama: stubAgent(),
+      instanceRegistry: registry,
+      instanceSelection: new NavisworksInstanceSelection(),
+    })
+    try {
+      const first = await harness.invoke('navisworks.instances.list', undefined)
+      expect(first).toMatchObject({ ok: true, data: { selectedInstanceId: 'instance-a' } })
+
+      const second = await harness.invoke('navisworks.instances.list', undefined)
+      expect(second).toMatchObject({
+        ok: true,
+        data: { selectedInstanceId: 'instance-a', instances: expect.arrayContaining([
+          expect.objectContaining({ instanceId: 'instance-a' }),
+          expect.objectContaining({ instanceId: 'instance-b' }),
+        ]) },
+      })
+      expect(JSON.stringify(second)).not.toContain('pipeName')
+
+      const selected = await harness.invoke('navisworks.instance.select', { instanceId: 'instance-b' })
+      expect(selected).toMatchObject({ ok: true, data: { selectedInstanceId: 'instance-b' } })
+    } finally {
+      await harness.dispose()
+    }
+  })
+})
+
+function discoveredInstance(
+  instanceId: string,
+  processId: number,
+  documentName: string,
+): DiscoveredNavisworksInstance {
+  const pipeName = `pipe-${processId}`
+  return {
+    instanceId,
+    processId,
+    pipeName,
+    bridgeSessionId: instanceId,
+    documentInstanceId: `doc-${processId}`,
+    documentName,
+    pluginVersion: '1.0.0',
+    hostVersion: '2023',
+    startedAtUtc: '2026-09-01T00:00:00Z',
+    connected: true,
+    lastSeenAt: 1,
+    endpoint: {
+      ProtocolVersion: 1,
+      PipeName: pipeName,
+      ProcessId: processId,
+      PluginVersion: '1.0.0',
+      HostVersion: '2023',
+      StartedAtUtc: '2026-09-01T00:00:00Z',
+    },
+  }
+}
+
 describe('ChatRunRegistry.abortAndWait', () => {
+  it('refreshes immediately, binds the selected instance, and ignores a later selection change', async () => {
+    const instanceA = discoveredInstance('instance-a', 12340, 'Model-A.nwf')
+    const instanceB = discoveredInstance('instance-b', 18120, 'Model-B.nwf')
+    const instances = [instanceA, instanceB]
+    const registry = {
+      get instances() { return instances.map((instance) => ({ ...instance })) },
+      refresh: vi.fn(async () => instances.map((instance) => ({ ...instance }))),
+      get(instanceId: string) { return instances.find((instance) => instance.instanceId === instanceId) },
+    } as unknown as NavisworksInstanceRegistry
+    const selection = new NavisworksInstanceSelection()
+    selection.observe([instanceA])
+    const bridge = {
+      async callToEndpoint<T>(_endpoint: unknown, method: string): Promise<T> {
+        if (method !== 'navisworks_status') throw new Error('unexpected method')
+        return {
+          connected: true,
+          bridgeSessionId: 'instance-a',
+          documentInstanceId: 'doc-12340',
+          documentTitle: 'Model-A.nwf',
+        } as T
+      },
+    } as unknown as NavisworksBridgeClient
+    const inputs: Array<Record<string, unknown>> = []
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run(input) {
+        inputs.push(input as unknown as Record<string, unknown>)
+        selection.select('instance-b', instances)
+        return { content: '完成。' }
+      },
+    }
+    const createRun = vi.fn(async (
+      _runId: string,
+      _sessionId: string,
+      _documentInstanceId?: string | null,
+    ) => ({ dispose: vi.fn(async () => undefined) }))
+    const registryUnderTest = new ChatRunRegistry(
+      agent,
+      createFacade(createSessionStore()),
+      new ToolApprovalRegistry(),
+      { createRun } as unknown as AgentScopeManager,
+      new ContextState(),
+      async () => ({ connected: false, status: 'legacy must not be used' }),
+      registry,
+      selection,
+      bridge,
+    )
+    const sender = fakeSender()
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+
+    registryUnderTest.start(chatStartInput(), sender)
+    await vi.waitFor(() => expect(send.mock.calls.some((call) => call[1] === 'chat.done')).toBe(true))
+
+    expect(registry.refresh).toHaveBeenCalledTimes(1)
+    expect(createRun.mock.calls[0]?.[2]).toBe('doc-12340')
+    expect(inputs[0]?.navisworksBinding).toMatchObject({
+      instanceId: 'instance-a',
+      pipeName: 'pipe-12340',
+      documentInstanceId: 'doc-12340',
+    })
+    expect(selection.selectedInstanceId).toBe('instance-b')
+    expect((inputs[0]?.navisworksBinding as { instanceId: string }).instanceId).toBe('instance-a')
+  })
+
   it('escapes within the timeout when the agent ignores the abort signal', async () => {
     const signals: AbortSignal[] = []
     const agent: OllamaAgentPort = {
@@ -479,6 +624,32 @@ describe('ToolApprovalRegistry', () => {
     const approvalId = (send.mock.calls[1]?.[2] as { approvalId: string }).approvalId
     expect(registry.resolve(approvalId, true, sender)).toBe(true)
     await expect(current).resolves.toBe(true)
+  })
+
+  it('cancels approvals only for the matching instance environment', async () => {
+    const registry = new ToolApprovalRegistry()
+    const sender = fakeSender()
+    const controller = new AbortController()
+    const base = {
+      runId: 'run-1', sessionId: 'session-1', turnId: 'turn-1', messageId: 'message-1',
+      toolName: 'navisworks_set_visibility' as const,
+      arguments: { action: 'hide', itemIds: ['1'] }, argumentsHash: 'hash-1',
+      documentInstanceId: 'same-doc',
+    }
+    const approvalA = registry.request({
+      ...base, toolCallId: 'call-A', instanceId: 'instance-A', bridgeSessionId: 'bridge-A',
+    }, sender, controller.signal)
+    const approvalB = registry.request({
+      ...base, toolCallId: 'call-B', instanceId: 'instance-B', bridgeSessionId: 'bridge-B',
+    }, sender, controller.signal)
+
+    registry.cancelForEnvironment('instance-A', 'bridge-A', 'same-doc')
+    await expect(approvalA).resolves.toBe(false)
+
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+    const approvalIdB = (send.mock.calls[1]?.[2] as { approvalId: string }).approvalId
+    expect(registry.resolve(approvalIdB, true, sender)).toBe(true)
+    await expect(approvalB).resolves.toBe(true)
   })
 })
 

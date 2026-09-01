@@ -18,6 +18,8 @@ export interface ToolExecutionRecord {
   toolCallId: string
   toolName: string
   argumentsHash: string
+  instanceId?: string
+  bridgeSessionId?: string
   documentInstanceId: string | undefined
   status: ToolExecutionStatus
   startedAt?: number
@@ -128,12 +130,14 @@ export class ToolExecutionLedger {
   }
 
   findAmbiguous(input: {
+    instanceId: string | undefined
     documentInstanceId: string | undefined
     toolName: string
     argumentsHash: string
   }): ToolExecutionRecord | undefined {
     return [...this.#records.values()].find((record) =>
       record.status === 'ambiguous'
+      && record.instanceId === input.instanceId
       && record.documentInstanceId === input.documentInstanceId
       && record.toolName === input.toolName
       && record.argumentsHash === input.argumentsHash
@@ -234,6 +238,8 @@ function isToolExecutionRecord(value: unknown): value is ToolExecutionRecord {
     && typeof record.argumentsHash === 'string'
     && typeof record.status === 'string'
     && Object.hasOwn(TRANSITIONS, record.status)
+    && (record.instanceId === undefined || typeof record.instanceId === 'string')
+    && (record.bridgeSessionId === undefined || typeof record.bridgeSessionId === 'string')
     && (record.documentInstanceId === undefined || typeof record.documentInstanceId === 'string')
 }
 

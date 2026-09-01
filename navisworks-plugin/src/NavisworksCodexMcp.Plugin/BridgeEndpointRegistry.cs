@@ -9,15 +9,24 @@ namespace NavisworksCodexMcp.Plugin
     internal sealed class BridgeEndpointRegistry
     {
         private readonly JavaScriptSerializer serializer;
+        private readonly int processId;
         private readonly string endpointFile;
 
         public BridgeEndpointRegistry()
+            : this(GetDataDirectory(), Process.GetCurrentProcess().Id)
+        {
+        }
+
+        internal BridgeEndpointRegistry(string dataDirectory, int processId)
         {
             serializer = new JavaScriptSerializer
             {
                 MaxJsonLength = BridgeConstants.MaxFrameBytes
             };
-            endpointFile = Path.Combine(GetDataDirectory(), "endpoint.json");
+            this.processId = processId;
+            endpointFile = Path.Combine(
+                GetEndpointsDirectory(dataDirectory),
+                processId + ".json");
         }
 
         public static string GetDataDirectory()
@@ -28,22 +37,32 @@ namespace NavisworksCodexMcp.Plugin
                 "NavisworksCodexMcp");
         }
 
+        public static string GetEndpointsDirectory()
+        {
+            return GetEndpointsDirectory(GetDataDirectory());
+        }
+
+        private static string GetEndpointsDirectory(string dataDirectory)
+        {
+            return Path.Combine(dataDirectory, "endpoints");
+        }
+
         public void Write(string pipeName, string pluginVersion, string hostVersion)
         {
-            Directory.CreateDirectory(GetDataDirectory());
+            Directory.CreateDirectory(Path.GetDirectoryName(endpointFile));
 
             var endpoint = new BridgeEndpoint
             {
                 ProtocolVersion = BridgeConstants.ProtocolVersion,
                 PipeName = pipeName,
-                ProcessId = Process.GetCurrentProcess().Id,
+                ProcessId = processId,
                 PluginVersion = pluginVersion,
                 HostVersion = hostVersion,
                 StartedAtUtc = DateTime.UtcNow.ToString("O")
             };
 
             string temporaryFile = endpointFile + ".tmp-"
-                + Process.GetCurrentProcess().Id;
+                + processId;
             File.WriteAllText(
                 temporaryFile,
                 serializer.Serialize(endpoint),
@@ -87,4 +106,3 @@ namespace NavisworksCodexMcp.Plugin
         }
     }
 }
-

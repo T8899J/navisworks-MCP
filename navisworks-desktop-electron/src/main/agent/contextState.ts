@@ -1,5 +1,5 @@
 import type { DocumentIdentity } from './documentScope'
-import { DocumentScopeRegistry } from './documentScope'
+import { DocumentScopeRegistry, documentScopeKey } from './documentScope'
 import { VerifiedFactStore, extractVerifiedFacts, type VerifiedFact } from './facts'
 import {
   ReferenceSetStore,
@@ -9,6 +9,7 @@ import {
 import { ToolResultIndex } from './toolResultIndex'
 
 export interface DocumentDescriptor {
+  instanceId?: string
   bridgeSessionId?: string
   documentInstanceId?: string
   documentName?: string
@@ -19,6 +20,7 @@ export interface CurrentDocumentContext extends DocumentDescriptor {
 }
 
 export type DocumentTransitionReason =
+  | 'instance-changed'
   | 'document-changed'
   | 'bridge-restarted'
   | 'document-closed'
@@ -71,6 +73,10 @@ export class ContextState {
 
   get documentInstanceId(): string | null {
     return this.registry.documentInstanceId
+  }
+
+  get instanceId(): string | null {
+    return this.registry.current?.instanceId ?? null
   }
 
   get documentRevision(): number {
@@ -157,33 +163,46 @@ export class ContextState {
   ): void {
     if (toolName === 'navisworks_status' || toolName === 'navisworks_get_document') {
       const observation = readObservation(result)
-      if (observation !== null) this.observe(observation)
+      if (observation !== null) {
+        const current = this.registry.current
+        const instanceId = observation.instanceId
+          ?? (observation.bridgeSessionId === current?.bridgeSessionId ? current?.instanceId : undefined)
+        this.observe({
+          ...observation,
+          ...(instanceId === undefined ? {} : { instanceId }),
+        })
+      }
     }
     const documentInstanceId = this.registry.documentInstanceId
     if (documentInstanceId === null) return
+    const scopeKey = documentScopeKey(this.registry.current)
+    if (scopeKey === undefined) return
     const now = () => Date.now()
     const facts = extractVerifiedFacts(toolName, result, { documentInstanceId, sourceToolCallId, now })
-    this.facts.addAll(documentInstanceId, facts)
+    this.facts.addAll(scopeKey, facts)
     const set = extractReferenceSet(toolName, result, {
       documentInstanceId,
       sourceToolCallId,
       ...(conversationId === undefined ? {} : { conversationId }),
       now,
     })
-    if (set !== null) this.referenceSets.add(set)
+    if (set !== null) this.referenceSets.add(set, scopeKey)
   }
 
   factsForCurrentDocument(): VerifiedFact[] {
-    return this.facts.list(this.registry.documentInstanceId ?? undefined)
+    return this.facts.list(documentScopeKey(this.registry.current))
   }
 
   lastRelevantReferenceSet(conversationId?: string): ReferenceSet | undefined {
-    const id = this.registry.documentInstanceId
-    return id === null ? undefined : this.referenceSets.lastRelevantSet(id, conversationId)
+    const key = documentScopeKey(this.registry.current)
+    return key === undefined ? undefined : this.referenceSets.lastRelevantSet(key, conversationId)
   }
 
-  canUseDocumentReference(referenceDocumentInstanceId: string | undefined | null): boolean {
-    return this.registry.canUseDocumentReference(referenceDocumentInstanceId)
+  canUseDocumentReference(
+    referenceDocumentInstanceId: string | undefined | null,
+    referenceInstanceId?: string,
+  ): boolean {
+    return this.registry.canUseDocumentReference(referenceDocumentInstanceId, referenceInstanceId)
   }
 
   /** Refresh the P3 index from a session's persisted messages (no separate store copy). */
@@ -228,16 +247,18 @@ export class ContextState {
 function readObservation(result: unknown): DocumentObservation | null {
   if (typeof result !== 'object' || result === null || Array.isArray(result)) return null
   const record = result as Record<string, unknown>
+  const instanceId = typeof record.instanceId === 'string' ? record.instanceId : undefined
   const documentInstanceId = typeof record.documentInstanceId === 'string' ? record.documentInstanceId : undefined
   const bridgeSessionId = typeof record.bridgeSessionId === 'string' ? record.bridgeSessionId : undefined
   const documentName = typeof record.documentName === 'string'
     ? record.documentName
     : (typeof record.documentTitle === 'string' ? record.documentTitle : undefined)
   const connected = typeof record.connected === 'boolean' ? record.connected : undefined
-  if (documentInstanceId === undefined && bridgeSessionId === undefined
+  if (instanceId === undefined && documentInstanceId === undefined && bridgeSessionId === undefined
     && connected === undefined) return null
   return {
     ...(connected === undefined ? {} : { connected }),
+    ...(instanceId === undefined ? {} : { instanceId }),
     ...(documentInstanceId === undefined ? {} : { documentInstanceId }),
     ...(bridgeSessionId === undefined ? {} : { bridgeSessionId }),
     ...(documentName === undefined ? {} : { documentName }),
@@ -249,8 +270,9 @@ function normalizeObservation(observation: DocumentObservation | null): CurrentD
   const documentName = observation.documentName?.trim() || observation.documentTitle?.trim() || undefined
   return {
     connected: observation.connected ?? Boolean(
-      observation.bridgeSessionId || observation.documentInstanceId || documentName,
+      observation.instanceId || observation.bridgeSessionId || observation.documentInstanceId || documentName,
     ),
+    ...(observation.instanceId?.trim() ? { instanceId: observation.instanceId.trim() } : {}),
     ...(observation.bridgeSessionId?.trim()
       ? { bridgeSessionId: observation.bridgeSessionId.trim() }
       : {}),
@@ -264,6 +286,7 @@ function normalizeObservation(observation: DocumentObservation | null): CurrentD
 function toDocumentIdentity(document: CurrentDocumentContext): DocumentIdentity | null {
   if (!hasIdentity(document)) return null
   return {
+    ...(document.instanceId === undefined ? {} : { instanceId: document.instanceId }),
     ...(document.bridgeSessionId === undefined ? {} : { bridgeSessionId: document.bridgeSessionId }),
     ...(document.documentInstanceId === undefined
       ? {}
@@ -276,6 +299,7 @@ function toDescriptor(
 ): DocumentDescriptor | undefined {
   if (document === undefined || !hasIdentity(document)) return undefined
   return {
+    ...(document.instanceId === undefined ? {} : { instanceId: document.instanceId }),
     ...(document.bridgeSessionId === undefined ? {} : { bridgeSessionId: document.bridgeSessionId }),
     ...(document.documentInstanceId === undefined
       ? {}
@@ -285,7 +309,8 @@ function toDescriptor(
 }
 
 function hasIdentity(document: CurrentDocumentContext | undefined): boolean {
-  return document !== undefined && Boolean(document.bridgeSessionId || document.documentInstanceId)
+  return document !== undefined
+    && Boolean(document.instanceId || document.bridgeSessionId || document.documentInstanceId)
 }
 
 function hasDocument(document: CurrentDocumentContext | undefined): boolean {
@@ -297,7 +322,8 @@ function sameDocumentIdentity(
   current: CurrentDocumentContext,
 ): boolean {
   if (previous === undefined) return false
-  return (previous.bridgeSessionId ?? null) === (current.bridgeSessionId ?? null)
+  return (previous.instanceId ?? null) === (current.instanceId ?? null)
+    && (previous.bridgeSessionId ?? null) === (current.bridgeSessionId ?? null)
     && (previous.documentInstanceId ?? null) === (current.documentInstanceId ?? null)
 }
 
@@ -305,6 +331,8 @@ function transitionReason(
   previous: CurrentDocumentContext | undefined,
   current: CurrentDocumentContext,
 ): DocumentTransitionReason {
+  if (previous?.instanceId !== undefined && current.instanceId !== undefined
+    && previous.instanceId !== current.instanceId) return 'instance-changed'
   if (hasDocument(previous) && !hasDocument(current)) return 'document-closed'
   if (!hasDocument(previous) && hasDocument(current)) return 'document-opened'
   if ((previous?.bridgeSessionId ?? null) !== (current.bridgeSessionId ?? null)) {
@@ -356,7 +384,9 @@ export function renderDocumentTransition(notice: DocumentChangeNotice | undefine
     ? '用户已经关闭了之前的 Navisworks 文档。'
     : notice.reason === 'document-opened'
       ? '用户已经打开或重新打开了一个 Navisworks 文档。'
-      : notice.reason === 'bridge-restarted'
+      : notice.reason === 'instance-changed'
+        ? '当前操作目标已经切换到了另一个 Navisworks 窗口。'
+        : notice.reason === 'bridge-restarted'
         ? 'Navisworks Bridge 已重新启动，当前文档环境必须视为新的实例。'
         : '用户已经切换了当前 Navisworks 文档。'
   const finalAnswerGuidance = notice.current === undefined
