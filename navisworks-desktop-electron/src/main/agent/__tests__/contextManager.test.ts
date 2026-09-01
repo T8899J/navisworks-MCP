@@ -53,6 +53,23 @@ describe('ContextManager.buildRequest — provider-neutral window policy', () =>
     expect(built.report.toolSchemaTokens).toBeGreaterThan(0)
     expect(built.report.systemTokens).toBeGreaterThan(0)
   })
+
+  it('keeps document transition context and counts it as working state', () => {
+    const manager = new ContextManager({
+      systemPrompt: 'S',
+      history,
+      contextBlocks: [{
+        kind: 'document-transition',
+        message: { role: 'system', content: '当前模型已经从 A 切换到 B' },
+      }],
+    })
+    const built = manager.assembleBudgetedFrames({
+      tools: [], temperature: 0.1, maxTokens: 900, effectiveWindow: 1024,
+      sendContextWindow: true,
+    })
+    expect(built.messages.some((message) => message.content.includes('从 A 切换到 B'))).toBe(true)
+    expect(built.report.workingStateTokens).toBeGreaterThan(0)
+  })
 })
 
 describe('buildAgentRequest — assembles system + history + input + in-flight', () => {

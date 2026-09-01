@@ -10,6 +10,69 @@ function ndjsonResponse(chunks: Array<Record<string, unknown>>): Response {
 const findItemsResult = { items: [{ id: 'idA', name: 'Pump-A' }, { id: 'idB' }, { id: 'idC' }] }
 
 describe('AgentRuntime × ContextState — cross-turn reference resolution (§P2-1)', () => {
+  it('injects current document and a hidden A to B transition into the model request', async () => {
+    const contextState = new ContextState()
+    contextState.observe({
+      connected: true,
+      documentName: 'Model-A.nwf',
+      documentInstanceId: 'doc-A',
+      bridgeSessionId: 'bridge-1',
+    })
+    contextState.markDocumentSeen('session-a', 0)
+    contextState.observe({
+      connected: true,
+      documentName: 'Model-B.nwf',
+      documentInstanceId: 'doc-B',
+      bridgeSessionId: 'bridge-1',
+    })
+    const notice = contextState.documentNoticeForSession('session-a')
+    const bodies: Array<Record<string, unknown>> = []
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return ndjsonResponse([{ message: { role: 'assistant', content: '已重新检查当前模型。' } }])
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({
+      bridgeClient: { async call<T>() { return { connected: true } as T } },
+      fetchImpl,
+      contextState,
+    })
+
+    await runtime.run({ sessionId: 'session-a', text: '再查一次', documentNotice: notice })
+
+    const sentMessages = JSON.stringify(bodies[0]?.messages)
+    expect(sentMessages).toContain('【当前 Navisworks 文档】')
+    expect(sentMessages).toContain('Model-B.nwf')
+    expect(sentMessages).toContain('【Navisworks 当前环境发生变化】')
+    expect(sentMessages).toContain('不要因为 Model-B.nwf 得到了不同结果，就说')
+  })
+
+  it('injects only current document context when a conversation first sees a model', async () => {
+    const contextState = new ContextState()
+    contextState.observe({
+      connected: true,
+      documentName: 'Model-B.nwf',
+      documentInstanceId: 'doc-B',
+      bridgeSessionId: 'bridge-1',
+    })
+    const bodies: Array<Record<string, unknown>> = []
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return ndjsonResponse([{ message: { role: 'assistant', content: '当前模型已就绪。' } }])
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({
+      bridgeClient: { async call<T>() { return { connected: true } as T } },
+      fetchImpl,
+      contextState,
+    })
+
+    await runtime.run({ sessionId: 'new-session', text: '当前是什么模型' })
+
+    const sentMessages = JSON.stringify(bodies[0]?.messages)
+    expect(sentMessages).toContain('【当前 Navisworks 文档】')
+    expect(sentMessages).toContain('Model-B.nwf')
+    expect(sentMessages).not.toContain('【Navisworks 当前环境发生变化】')
+  })
+
   it('ingests a find_items set on turn 1 and injects it into turn 2\'s request', async () => {
     const contextState = new ContextState()
     contextState.observe({ documentInstanceId: 'doc-A', bridgeSessionId: 'b1' })

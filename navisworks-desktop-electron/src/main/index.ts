@@ -312,7 +312,9 @@ async function runAgent(
       ...(input.disabledTools === undefined ? {} : { disabledTools: input.disabledTools }),
       ...(input.api === undefined ? {} : { api: input.api }),
       ...(input.compactSummary === undefined ? {} : { compactSummary: input.compactSummary }),
-      ...(input.semanticMemory === undefined ? {} : { semanticMemory: input.semanticMemory })
+      ...(input.semanticMemory === undefined ? {} : { semanticMemory: input.semanticMemory }),
+      ...(input.documentNotice === undefined ? {} : { documentNotice: input.documentNotice }),
+      ...(input.currentDocument === undefined ? {} : { currentDocument: input.currentDocument })
     },
     {
       signal: options.signal,

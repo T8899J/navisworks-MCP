@@ -33,6 +33,8 @@ import type {
 } from '../sessionRepository'
 import type { NavisworksBridgeClient } from '../bridgeClient'
 import type { ToolCatalog } from '../toolCatalog'
+import { ContextState } from '../agent/contextState'
+import type { AgentScopeManager } from '../kernel/agentScopes'
 
 const DEV_ORIGIN = 'http://localhost:5173'
 
@@ -308,6 +310,125 @@ describe('ChatRunRegistry.abortAndWait', () => {
     await expect(registry.abortAndWait('session-a')).resolves.toBe(true)
     expect(signals).toHaveLength(2)
     for (const signal of signals) expect(signal.aborted).toBe(true)
+  })
+
+  it('preflights Navisworks before createRun and binds an immediate A to B switch to B', async () => {
+    const contextState = new ContextState()
+    const statuses = [
+      { connected: true, status: 'A', documentName: 'Model-A.nwf', documentInstanceId: 'doc-A', bridgeSessionId: 'bridge-1' },
+      { connected: true, status: 'B', documentName: 'Model-B.nwf', documentInstanceId: 'doc-B', bridgeSessionId: 'bridge-1' },
+    ]
+    const readStatus = vi.fn(async () => statuses.shift()!)
+    const createRun = vi.fn(async (
+      _runId: string,
+      _sessionId: string,
+      _documentInstanceId?: string | null,
+    ) => ({ dispose: vi.fn(async () => undefined) }))
+    const scopeManager = { createRun } as unknown as AgentScopeManager
+    const inputs: Array<Record<string, unknown>> = []
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run(input) {
+        inputs.push(input as unknown as Record<string, unknown>)
+        return { content: '完成。' }
+      },
+    }
+    const registry = new ChatRunRegistry(
+      agent,
+      createFacade(createSessionStore()),
+      new ToolApprovalRegistry(),
+      scopeManager,
+      contextState,
+      readStatus,
+    )
+    const sender = fakeSender()
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(1))
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(2))
+
+    expect(createRun.mock.calls[1]?.[2]).toBe('doc-B')
+    expect(inputs[1]?.currentDocument).toMatchObject({
+      documentName: 'Model-B.nwf',
+      documentInstanceId: 'doc-B',
+    })
+    expect(inputs[1]?.documentNotice).toMatchObject({
+      previous: { documentName: 'Model-A.nwf', documentInstanceId: 'doc-A' },
+      current: { documentName: 'Model-B.nwf', documentInstanceId: 'doc-B' },
+    })
+    expect(readStatus.mock.invocationCallOrder[1]).toBeLessThan(createRun.mock.invocationCallOrder[1]!)
+  })
+
+  it('keeps a transition pending after failure and marks it seen only after success', async () => {
+    const contextState = new ContextState()
+    const statuses = [
+      { connected: true, status: 'A', documentName: 'A.nwf', documentInstanceId: 'doc-A' },
+      { connected: true, status: 'B', documentName: 'B.nwf', documentInstanceId: 'doc-B' },
+      { connected: true, status: 'B', documentName: 'B.nwf', documentInstanceId: 'doc-B' },
+      { connected: true, status: 'B', documentName: 'B.nwf', documentInstanceId: 'doc-B' },
+    ]
+    const seenNotices: unknown[] = []
+    let runCount = 0
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run(input) {
+        runCount += 1
+        seenNotices.push(input.documentNotice)
+        if (runCount === 2) throw new Error('timeout')
+        return { content: '完成。' }
+      },
+    }
+    const registry = new ChatRunRegistry(
+      agent,
+      createFacade(createSessionStore()),
+      new ToolApprovalRegistry(),
+      undefined,
+      contextState,
+      async () => statuses.shift()!,
+    )
+    const sender = fakeSender()
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(1))
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.error')).toHaveLength(1))
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(2))
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(3))
+
+    expect(seenNotices[0]).toBeUndefined()
+    expect(seenNotices[1]).toMatchObject({ revision: 1 })
+    expect(seenNotices[2]).toMatchObject({ revision: 1 })
+    expect(seenNotices[3]).toBeUndefined()
+  })
+
+  it('continues ordinary chat when the preflight status read fails', async () => {
+    const contextState = new ContextState()
+    const run = vi.fn(async () => ({ content: '普通聊天正常。' }))
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      run: run as unknown as OllamaAgentPort['run'],
+    }
+    const registry = new ChatRunRegistry(
+      agent,
+      createFacade(createSessionStore()),
+      new ToolApprovalRegistry(),
+      undefined,
+      contextState,
+      async () => { throw new Error('bridge unavailable') },
+    )
+    const sender = fakeSender()
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => expect(send.mock.calls.some((call) => call[1] === 'chat.done')).toBe(true))
+
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(contextState.currentDocument).toEqual({ connected: false })
   })
 })
 

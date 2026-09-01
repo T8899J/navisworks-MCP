@@ -15,7 +15,11 @@ import type {
   JsonSettingsRepository
 } from './sessionRepository'
 import type { ToolCatalog } from './toolCatalog'
-import type { ContextState } from './agent/contextState'
+import type {
+  ContextState,
+  CurrentDocumentContext,
+  DocumentChangeNotice,
+} from './agent/contextState'
 import type { AgentScopeManager } from './kernel/agentScopes'
 import type { Scope } from './kernel/kernel'
 import { externalizeResult, isExternalizedResult, resolveResult } from './agent/toolResultStore'
@@ -75,6 +79,10 @@ export interface OllamaRunInput {
   /** P4: durable compact summary of earlier turns, injected into this run's context. */
   compactSummary?: string
   semanticMemory?: SemanticMemory
+  /** Runtime-only Navisworks environment notice; not part of persisted chat history. */
+  documentNotice?: DocumentChangeNotice
+  /** The document snapshot captured by the same preflight that binds the Run Scope. */
+  currentDocument?: CurrentDocumentContext
 }
 
 export interface OllamaHistoryEntry {
@@ -207,6 +215,7 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
     toolApprovals,
     dependencies.scopeManager,
     dependencies.contextState,
+    () => readNavisworksStatus(dependencies.bridge),
   )
 
   const handlers = {
@@ -390,6 +399,10 @@ export class ChatRunRegistry {
     private readonly toolApprovals: ToolApprovalRegistry = new ToolApprovalRegistry(),
     private readonly scopeManager?: AgentScopeManager,
     private readonly contextState?: ContextState,
+    private readonly readCurrentNavisworksStatus: () => Promise<NavisworksStatus> = async () => ({
+      connected: false,
+      status: 'Navisworks 未连接',
+    }),
   ) {}
 
   start(
@@ -469,6 +482,18 @@ export class ChatRunRegistry {
     const base = { runId, sessionId: input.sessionId, turnId, messageId }
     let runScope: Scope | undefined
     try {
+      if (this.contextState !== undefined) {
+        let status: NavisworksStatus
+        try {
+          status = await this.readCurrentNavisworksStatus()
+        } catch {
+          status = { connected: false, status: 'Navisworks 未连接' }
+        }
+        this.contextState.observe(status)
+      }
+      const observedDocumentRevision = this.contextState?.documentRevision
+      const documentNotice = this.contextState?.documentNoticeForSession(input.sessionId)
+      const currentDocument = this.contextState?.currentDocument
       runScope = await this.scopeManager?.createRun(
         runId,
         input.sessionId,
@@ -500,7 +525,9 @@ export class ChatRunRegistry {
           ...(disabledTools.length === 0 ? {} : { disabledTools }),
           ...(activeEndpoint ? { api: activeEndpoint } : {}),
           ...(compactSummary === undefined ? {} : { compactSummary }),
-          ...(semanticMemory === undefined ? {} : { semanticMemory })
+          ...(semanticMemory === undefined ? {} : { semanticMemory }),
+          ...(documentNotice === undefined ? {} : { documentNotice }),
+          ...(currentDocument === undefined ? {} : { currentDocument })
         },
         {
           signal: controller.signal,
@@ -521,6 +548,11 @@ export class ChatRunRegistry {
           }
         }
       )
+
+      if (controller.signal.aborted) throw controller.signal.reason
+      if (observedDocumentRevision !== undefined) {
+        this.contextState?.markDocumentSeen(input.sessionId, observedDocumentRevision)
+      }
 
       // P4: durably persist any summary this run's auto-compaction produced (the renderer's
       // own save preserves it; see saveSession). Best-effort — a persistence failure must not

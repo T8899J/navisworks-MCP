@@ -2,6 +2,65 @@ import { describe, expect, it } from 'vitest'
 import { ContextState, renderReferenceSetBlock } from '../contextState'
 
 describe('ContextState — observe + ingest + invalidate (P2 integration)', () => {
+  it('does not create a notice while the document identity stays the same', () => {
+    const state = new ContextState()
+    state.observe({ connected: true, documentName: 'Model-A.nwf', documentInstanceId: 'doc-A' })
+    state.markDocumentSeen('session-a', state.documentRevision)
+
+    state.observe({ connected: true, documentName: 'Model-A.nwf', documentInstanceId: 'doc-A' })
+
+    expect(state.documentRevision).toBe(0)
+    expect(state.documentNoticeForSession('session-a')).toBeUndefined()
+  })
+
+  it('records A to B and detects a same-name reopen by document instance id', () => {
+    const state = new ContextState()
+    state.observe({ connected: true, documentName: 'Model-A.nwf', documentInstanceId: 'doc-A' })
+    state.markDocumentSeen('session-a', state.documentRevision)
+
+    state.observe({ connected: true, documentName: 'Model-B.nwf', documentInstanceId: 'doc-B' })
+    expect(state.documentNoticeForSession('session-a')).toMatchObject({
+      revision: 1,
+      previous: { documentName: 'Model-A.nwf', documentInstanceId: 'doc-A' },
+      current: { documentName: 'Model-B.nwf', documentInstanceId: 'doc-B' },
+      reason: 'document-changed',
+    })
+
+    state.markDocumentSeen('session-a', 1)
+    state.observe({ connected: true, documentName: 'Model-B.nwf', documentInstanceId: 'doc-B-reopened' })
+    expect(state.documentNoticeForSession('session-a')).toMatchObject({
+      revision: 2,
+      previous: { documentName: 'Model-B.nwf', documentInstanceId: 'doc-B' },
+      current: { documentName: 'Model-B.nwf', documentInstanceId: 'doc-B-reopened' },
+    })
+  })
+
+  it('treats the first document seen by a conversation as a baseline, not a switch', () => {
+    const state = new ContextState()
+    state.observe({ connected: true, documentName: 'Model-B.nwf', documentInstanceId: 'doc-B' })
+
+    expect(state.currentDocument).toMatchObject({
+      connected: true,
+      documentName: 'Model-B.nwf',
+      documentInstanceId: 'doc-B',
+    })
+    expect(state.documentNoticeForSession('new-session')).toBeUndefined()
+  })
+
+  it('tracks the same transition independently for multiple conversations', () => {
+    const state = new ContextState()
+    state.observe({ connected: true, documentName: 'A.nwf', documentInstanceId: 'doc-A' })
+    state.markDocumentSeen('session-a', 0)
+    state.markDocumentSeen('session-b', 0)
+    state.observe({ connected: true, documentName: 'B.nwf', documentInstanceId: 'doc-B' })
+
+    expect(state.documentNoticeForSession('session-a')?.revision).toBe(1)
+    expect(state.documentNoticeForSession('session-b')?.revision).toBe(1)
+    state.markDocumentSeen('session-a', 1)
+    expect(state.documentNoticeForSession('session-a')).toBeUndefined()
+    expect(state.documentNoticeForSession('session-b')?.revision).toBe(1)
+  })
+
   it('mines facts and an ordered reference set from a find_items result', () => {
     const state = new ContextState()
     state.observe({ documentInstanceId: 'doc-A', bridgeSessionId: 'b1' })
@@ -29,6 +88,7 @@ describe('ContextState — observe + ingest + invalidate (P2 integration)', () =
     // Same-path-close-and-reopen or a switch both produce a new id; old state is gone.
     expect(state.lastRelevantReferenceSet()).toBeUndefined()
     expect(state.factsForCurrentDocument()).toEqual([])
+    expect(state.canUseDocumentReference('doc-A')).toBe(false)
   })
 
   it('self-observes the document instance from a navisworks_status tool result', () => {

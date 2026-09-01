@@ -33,7 +33,14 @@ import {
   type ContextBlock,
   type CompactConfig,
 } from './agent/contextManager'
-import { ContextState, renderReferenceSetBlock } from './agent/contextState'
+import {
+  ContextState,
+  renderCurrentDocumentContext,
+  renderDocumentTransition,
+  renderReferenceSetBlock,
+  type CurrentDocumentContext,
+  type DocumentChangeNotice,
+} from './agent/contextState'
 import { renderVerifiedFacts } from './agent/facts'
 import {
   DocumentOperationCoordinator,
@@ -109,6 +116,10 @@ export interface AgentRunInput {
   /** P4: durable digest of earlier (compacted) turns, injected as a leading system block. */
   compactSummary?: string
   semanticMemory?: SemanticMemory
+  /** Runtime-only environment notice; never persisted into conversation history. */
+  documentNotice?: DocumentChangeNotice
+  /** Stable preflight snapshot for this Run Scope. */
+  currentDocument?: CurrentDocumentContext
 }
 
 export interface RunAgentOptions {
@@ -259,6 +270,18 @@ export class AgentRuntime {
         ?? capabilities.defaultContextWindow
         ?? this.#contextWindow)
     const contextBlocks: ContextBlock[] = []
+    const currentDocumentBlock = renderCurrentDocumentContext(
+      input.currentDocument ?? this.#contextState?.currentDocument,
+    )
+    if (currentDocumentBlock) contextBlocks.push({
+      kind: 'document-transition',
+      message: { role: 'system', content: currentDocumentBlock },
+    })
+    const documentTransitionBlock = renderDocumentTransition(input.documentNotice)
+    if (documentTransitionBlock) contextBlocks.push({
+      kind: 'document-transition',
+      message: { role: 'system', content: documentTransitionBlock },
+    })
     const semanticMemory = input.sessionId === undefined
       ? input.semanticMemory
       : updateSemanticMemory(input.semanticMemory, trimmedInput)

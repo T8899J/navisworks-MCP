@@ -16,7 +16,7 @@ export const COMPACT_MAX_TRANSCRIPT_CHARS = 30_000
 export const LOCAL_MAX_CONTEXT_TOKENS = 32_768
 
 export type ContextPressure = 'idle' | 'soft' | 'compact'
-export type ContextBlockKind = 'semantic-memory' | 'compact-summary' | 'verified-facts' | 'reference-set' | 'recall' | 'other'
+export type ContextBlockKind = 'document-transition' | 'semantic-memory' | 'compact-summary' | 'verified-facts' | 'reference-set' | 'recall' | 'other'
 
 export interface ContextBlock {
   message: ChatMessage
@@ -199,7 +199,7 @@ export class ContextManager {
         systemTokens,
         toolSchemaTokens,
         semanticMemoryTokens: tokensFor('semantic-memory', 'compact-summary'),
-        workingStateTokens: 0,
+        workingStateTokens: tokensFor('document-transition'),
         verifiedFactTokens: tokensFor('verified-facts', 'reference-set', 'recall'),
         recentFrameTokens,
         framesIncluded: kept.length,
