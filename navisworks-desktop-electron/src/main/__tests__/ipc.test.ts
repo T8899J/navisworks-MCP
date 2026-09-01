@@ -212,6 +212,7 @@ function createHarness(options: {
       setThemeMode: (themeMode) => ({ themeMode, effectiveTheme: 'light' }),
     },
     senderTrust: { isPackaged: false, rendererRoot: 'D:\\app\\renderer', devServerUrl: DEV_ORIGIN },
+    toolApprovals: new ToolApprovalRegistry(),
     secrets: options.secrets,
   }
 
@@ -320,8 +321,10 @@ describe('ToolApprovalRegistry', () => {
       sessionId: 'session-1',
       turnId: 'turn-1',
       messageId: 'message-1',
+      toolCallId: 'tool-call-1',
       toolName: 'navisworks_set_visibility',
       arguments: { action: 'hide', itemIds: ['1'] },
+      argumentsHash: 'hash-1',
     }, sender, controller.signal)
 
     const send = sender.send as unknown as ReturnType<typeof vi.fn>
@@ -331,6 +334,30 @@ describe('ToolApprovalRegistry', () => {
     expect(registry.resolve(payload.approvalId, true, sender)).toBe(true)
     await expect(pending).resolves.toBe(true)
     expect(registry.resolve(payload.approvalId, true, sender)).toBe(false)
+  })
+
+  it('cancels only approvals bound to an invalidated document', async () => {
+    const registry = new ToolApprovalRegistry()
+    const sender = fakeSender()
+    const controller = new AbortController()
+    const base = {
+      runId: 'run-1', sessionId: 'session-1', turnId: 'turn-1', messageId: 'message-1',
+      toolName: 'navisworks_set_visibility' as const,
+      arguments: { action: 'hide', itemIds: ['1'] }, argumentsHash: 'hash-1',
+    }
+    const stale = registry.request({
+      ...base, toolCallId: 'call-A', documentInstanceId: 'doc-A',
+    }, sender, controller.signal)
+    const current = registry.request({
+      ...base, toolCallId: 'call-B', documentInstanceId: 'doc-B',
+    }, sender, controller.signal)
+    registry.cancelForDocument('doc-A')
+    await expect(stale).resolves.toBe(false)
+
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+    const approvalId = (send.mock.calls[1]?.[2] as { approvalId: string }).approvalId
+    expect(registry.resolve(approvalId, true, sender)).toBe(true)
+    await expect(current).resolves.toBe(true)
   })
 })
 

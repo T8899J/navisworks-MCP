@@ -4,6 +4,7 @@ import {
   type CompletionDelta,
   type CompletionRequest,
   type CompletionResult,
+  type ModelCapabilities,
   type ModelProvider,
   type ParsedToolCall,
   type ProviderCheckResult,
@@ -43,6 +44,12 @@ export interface OpenAICompatibleProviderOptions {
   baseUrl: string
   apiKey?: string
   requestTimeoutMs?: number
+  /**
+   * Optional window for gateways that advertise one. When absent the provider reports
+   * NO context window: ContextManager then sends no num_ctx and applies no clamping, so
+   * a cloud run is never assumed to be a fixed size (never "1M by default").
+   */
+  contextWindow?: number
   fetchImpl?: typeof fetch
 }
 
@@ -60,6 +67,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
   readonly #baseUrl: string
   readonly #apiKey: string
   readonly #requestTimeoutMs: number
+  readonly #contextWindow: number | undefined
   readonly #fetch: typeof fetch
 
   constructor(options: OpenAICompatibleProviderOptions) {
@@ -72,7 +80,23 @@ export class OpenAICompatibleProvider implements ModelProvider {
       options.requestTimeoutMs ?? 5 * 60 * 1000,
       'requestTimeoutMs',
     )
+    this.#contextWindow = options.contextWindow === undefined
+      ? undefined
+      : positiveInteger(options.contextWindow, 'contextWindow')
     this.#fetch = options.fetchImpl ?? fetch
+  }
+
+  capabilities(_model: string): ModelCapabilities {
+    // Function tools and reasoning deltas are both surfaced by the wire format here.
+    // No window is advertised unless one was configured — a cloud run is never assumed
+    // to be a fixed size.
+    return {
+      supportsTools: true,
+      supportsThinking: true,
+      ...(this.#contextWindow === undefined
+        ? {}
+        : { maxContextWindow: this.#contextWindow, defaultContextWindow: this.#contextWindow }),
+    }
   }
 
   #authHeaders(): Record<string, string> {
@@ -399,8 +423,8 @@ async function readOpenAIStream(
 
   const toolCalls: ParsedToolCall[] = [...mergedCalls.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([index, call]) => ({
-      id: call.id || `call-${index}`,
+    .map(([, call]) => ({
+      id: call.id || `generated-${randomUUID()}`,
       name: call.name,
       arguments: parseToolArguments(call.argumentsText),
     }))
@@ -414,3 +438,4 @@ async function readOpenAIStream(
     ...(cacheHitRate === undefined ? {} : { cacheHitRate })
   }
 }
+import { randomUUID } from 'node:crypto'

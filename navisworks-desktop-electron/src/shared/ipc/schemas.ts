@@ -67,7 +67,17 @@ export const sessionSummarySchema = z.strictObject({
 
 export const sessionSchema = sessionSummarySchema.extend({
   createdAt: dateTimeString.optional(),
-  messages: z.array(chatMessageSchema)
+  messages: z.array(chatMessageSchema),
+  // P4: the durable result of context compaction — a short digest of early turns. Optional
+  // so older sessions.json files load unchanged (missing field ⇒ no summary yet).
+  compactSummary: z.string().optional(),
+  semanticMemory: z.strictObject({
+    goals: z.array(z.string()),
+    constraints: z.array(z.string()),
+    decisions: z.array(z.string()),
+    notes: z.array(z.string()),
+    updatedAt: z.number().int().nonnegative()
+  }).optional()
 })
 
 export const themeModeSchema = z.enum(['system', 'light', 'dark'])
@@ -115,7 +125,9 @@ export const navisworksStatusSchema = z.strictObject({
   connected: z.boolean(),
   status: z.string(),
   documentName: z.string().optional(),
-  selectionCount: z.number().int().nonnegative().optional()
+  selectionCount: z.number().int().nonnegative().optional(),
+  bridgeSessionId: z.string().optional(),
+  documentInstanceId: z.string().optional()
 })
 
 export const runtimeInfoSchema = z.strictObject({
@@ -341,8 +353,12 @@ export const eventSchemas = {
     sessionId: nonEmptyString,
     turnId: nonEmptyString,
     messageId: nonEmptyString,
+    toolCallId: nonEmptyString,
     toolName: toolNameSchema,
-    arguments: z.record(z.string(), z.unknown())
+    arguments: z.record(z.string(), z.unknown()),
+    argumentsHash: nonEmptyString,
+    documentInstanceId: nonEmptyString.optional(),
+    ambiguousRetry: z.boolean().optional()
   }),
   'navisworks.status.changed': navisworksStatusSchema,
   'nativeTheme.updated': appearanceStateSchema

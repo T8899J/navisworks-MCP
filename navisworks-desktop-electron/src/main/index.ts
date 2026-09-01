@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -6,7 +5,6 @@ import { fileURLToPath } from 'node:url'
 import { app, BrowserWindow, Menu, nativeTheme, safeStorage } from 'electron'
 
 import { NativeAppearanceService } from './appearance'
-import { NavisworksBridgeClient } from './bridgeClient'
 import { resolveDesktopDataPaths } from './dataPaths'
 import {
   registerDesktopIpc,
@@ -16,15 +14,26 @@ import {
   type OllamaEndpointOptions,
   type OllamaRunInput,
   type OllamaRunResult,
-  type OllamaStreamEvent
+  type OllamaStreamEvent,
+  type OllamaToolApprovalRequest
 } from './ipc'
-import { AgentRuntime, type AgentRunEvent } from './agentRuntime'
-import { ModelRouter } from './model/modelRouter'
-import { JsonSessionRepository, JsonSettingsRepository } from './sessionRepository'
+import type { AgentRuntime, AgentRunEvent } from './agentRuntime'
+import { makeRootScope } from './kernel/services'
+import { AgentScopeManagerToken, ContextStateToken } from './kernel/agentServices'
+import {
+  AgentRuntimeToken,
+  ApprovalServiceToken,
+  BridgeClientToken,
+  ModelRouterToken,
+  SessionStoreToken,
+  SettingsStoreToken,
+  ToolCatalogToken,
+  installApplicationServices,
+} from './kernel/applicationServices'
+import type { ModelRouter } from './model/modelRouter'
 import { denyAllPermissions, installProductionContentSecurityPolicy, secureWindowNavigation } from './security/windowSecurity'
 import type { SenderTrustOptions } from './security/validateSender'
-import { ToolCatalog } from './toolCatalog'
-import { DesktopIpcError, type RuntimeInfo, type ToolName } from '../shared/ipc'
+import { DesktopIpcError, type RuntimeInfo } from '../shared/ipc'
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url))
 const rendererRoot = join(moduleDirectory, '../renderer')
@@ -62,9 +71,17 @@ if (!app.requestSingleInstanceLock()) {
 async function startApplication(): Promise<void> {
   await writeStartupDiagnostic('starting')
 
-  const sessions = new JsonSessionRepository(dataPaths)
-  const settings = new JsonSettingsRepository(dataPaths)
-  const persistedSettings = await settings.load()
+  const appScope = await makeRootScope()
+  const persistedSettings = await installApplicationServices(appScope, dataPaths)
+  const sessions = appScope.require(SessionStoreToken)
+  const settings = appScope.require(SettingsStoreToken)
+  const bridge = appScope.require(BridgeClientToken)
+  const tools = appScope.require(ToolCatalogToken)
+  const runtime = appScope.require(AgentRuntimeToken)
+  const modelRouter = appScope.require(ModelRouterToken)
+  const contextState = appScope.require(ContextStateToken)
+  const scopeManager = appScope.require(AgentScopeManagerToken)
+  const toolApprovals = appScope.require(ApprovalServiceToken)
   await app.whenReady()
 
   const appearance = new NativeAppearanceService(
@@ -73,18 +90,7 @@ async function startApplication(): Promise<void> {
     applyWindowAppearance
   )
   appearance.start()
-  const bridge = new NavisworksBridgeClient()
-  const tools = new ToolCatalog()
-  // One runtime serves every run: model/reasoning/disabled-tools and the
-  // active API endpoint all arrive per request instead of per instance.
-  const runtime = new AgentRuntime({
-    bridgeClient: bridge,
-    model: persistedSettings?.selectedModel,
-    think: persistedSettings?.reasoningMode === 'deep',
-    contextWindow: persistedSettings?.contextWindowTokens,
-    numPredict: persistedSettings?.numPredict
-  })
-  const ollama = adaptModelAgent(runtime, new ModelRouter())
+  const ollama = adaptModelAgent(runtime, modelRouter)
   const senderTrust: SenderTrustOptions = {
     isPackaged: app.isPackaged,
     rendererRoot,
@@ -107,6 +113,10 @@ async function startApplication(): Promise<void> {
     ollama,
     appearance,
     senderTrust,
+    contextState,
+    scopeManager,
+    toolApprovals,
+    toolResultsDirectory: dataPaths.toolResultsDirectory,
     secrets: {
       encrypt(value) {
         if (!safeStorage.isEncryptionAvailable()) throw new Error('Secure storage unavailable')
@@ -118,8 +128,13 @@ async function startApplication(): Promise<void> {
       }
     }
   })
-  // Detect Navisworks appearing/disappearing without a manual refresh.
-  const disposeStatusPolling = startNavisworksStatusPolling(bridge)
+  // Detect Navisworks appearing/disappearing without a manual refresh, and keep the
+  // Document Scope current so a switch/reopen invalidates stale facts + reference sets.
+  const disposeStatusPolling = startNavisworksStatusPolling(
+    bridge,
+    undefined,
+    (status) => contextState.observe(status)
+  )
 
   Menu.setApplicationMenu(null)
 
@@ -137,6 +152,8 @@ async function startApplication(): Promise<void> {
     disposeStatusPolling()
     appearance.dispose()
     await disposeIpc()
+    // P6: tear down the App scope, cascading disposal to any live Document child scopes.
+    await appScope.dispose()
   }
 
   mainWindow.on('closed', () => {
@@ -249,12 +266,10 @@ async function runAgent(
     signal: AbortSignal
     onEvent: (event: OllamaStreamEvent) => void
     requestToolApproval: (
-      toolName: ToolName,
-      argumentsValue: Record<string, unknown>
+      request: OllamaToolApprovalRequest
     ) => Promise<boolean>
   }
 ): Promise<OllamaRunResult> {
-  const activeToolCalls = new Map<string, string[]>()
   const onAgentEvent = (event: AgentRunEvent): void => {
     if (event.phase === 'text') {
       options.onEvent({ kind: 'text', delta: event.delta })
@@ -265,25 +280,18 @@ async function runAgent(
       return
     }
     if (event.phase === 'started') {
-      const toolCallId = randomUUID()
-      const ids = activeToolCalls.get(event.tool) ?? []
-      ids.push(toolCallId)
-      activeToolCalls.set(event.tool, ids)
       options.onEvent({
         kind: 'tool-start',
-        toolCallId,
+        toolCallId: event.toolCallId,
         toolName: event.tool,
         arguments: event.arguments
       })
       return
     }
 
-    const ids = activeToolCalls.get(event.tool) ?? []
-    const toolCallId = ids.shift() ?? randomUUID()
-    if (ids.length === 0) activeToolCalls.delete(event.tool)
     options.onEvent({
       kind: 'tool-result',
-      toolCallId,
+      toolCallId: event.toolCallId,
       toolName: event.tool,
       arguments: event.arguments,
       result: event.result,
@@ -295,12 +303,16 @@ async function runAgent(
 
   const result = await runtime.run(
     {
+      runId: input.runId,
+      sessionId: input.sessionId,
       text: input.text,
       history: input.history,
       ...(input.model === undefined ? {} : { model: input.model }),
       ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
       ...(input.disabledTools === undefined ? {} : { disabledTools: input.disabledTools }),
-      ...(input.api === undefined ? {} : { api: input.api })
+      ...(input.api === undefined ? {} : { api: input.api }),
+      ...(input.compactSummary === undefined ? {} : { compactSummary: input.compactSummary }),
+      ...(input.semanticMemory === undefined ? {} : { semanticMemory: input.semanticMemory })
     },
     {
       signal: options.signal,
@@ -319,6 +331,8 @@ async function runAgent(
     ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText }),
     ...(result.cacheHitRate === undefined ? {} : { cacheHitRate: result.cacheHitRate }),
     ...(result.compacted ? { compacted: true } : {}),
+    ...(result.compactSummary === undefined ? {} : { compactSummary: result.compactSummary }),
+    ...(result.semanticMemory === undefined ? {} : { semanticMemory: result.semanticMemory }),
     contextTokensUsed: result.contextTokensUsed
   }
 }

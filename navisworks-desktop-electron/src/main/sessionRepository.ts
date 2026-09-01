@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { DesktopDataPaths } from './dataPaths'
 import type { ThemeMode } from '../shared/ipc'
 import { toolNameSchema } from '../shared/ipc'
+import type { SemanticMemory } from './agent/semanticMemory'
 
 const EMPTY_GUID = '00000000-0000-0000-0000-000000000000'
 const DEFAULT_DATE_TIME_OFFSET = '0001-01-01T00:00:00+00:00'
@@ -33,6 +34,9 @@ export interface ConversationSession {
   messages: ConversationMessage[] | null
   contextTokensUsed: number
   pinnedAt: string | null
+  /** P4: durable digest of compacted early turns; absent ⇒ nothing compacted yet. */
+  compactSummary?: string
+  semanticMemory?: SemanticMemory
 }
 
 export interface ManagedExtension {
@@ -99,6 +103,8 @@ export interface WpfChatSessionSnapshot {
   Messages: WpfChatMessageSnapshot[] | null
   ContextTokensUsed: number
   PinnedAt: string | null
+  CompactSummary?: string
+  SemanticMemory?: SemanticMemory
 }
 
 export interface WpfManagedExtensionSnapshot {
@@ -377,6 +383,8 @@ export function fromWpfSessionSnapshot(snapshot: WpfChatSessionSnapshot): Conver
     })) ?? null,
     contextTokensUsed: snapshot.ContextTokensUsed,
     pinnedAt: snapshot.PinnedAt,
+    ...(snapshot.CompactSummary === undefined ? {} : { compactSummary: snapshot.CompactSummary }),
+    ...(snapshot.SemanticMemory === undefined ? {} : { semanticMemory: snapshot.SemanticMemory }),
   }
 }
 
@@ -395,6 +403,8 @@ export function toWpfSessionSnapshot(session: ConversationSession): WpfChatSessi
     })) ?? null,
     ContextTokensUsed: session.contextTokensUsed,
     PinnedAt: session.pinnedAt,
+    ...(session.compactSummary === undefined ? {} : { CompactSummary: session.compactSummary }),
+    ...(session.semanticMemory === undefined ? {} : { SemanticMemory: session.semanticMemory }),
   }
 }
 
@@ -574,6 +584,7 @@ function parseWpfSessionSnapshot(value: unknown): WpfChatSessionSnapshot {
 
   const updatedAt = optionalString(entry.UpdatedAt, DEFAULT_DATE_TIME_OFFSET)
   assertDateTimeOffset(updatedAt, 'UpdatedAt')
+  const semanticMemory = parseSemanticMemory(entry.SemanticMemory)
 
   return {
     Id: id,
@@ -583,6 +594,8 @@ function parseWpfSessionSnapshot(value: unknown): WpfChatSessionSnapshot {
     Messages: messages,
     ContextTokensUsed: optionalFiniteInteger(entry.ContextTokensUsed, 0),
     PinnedAt: pinnedAt,
+    ...(typeof entry.CompactSummary === 'string' ? { CompactSummary: entry.CompactSummary } : {}),
+    ...(semanticMemory === undefined ? {} : { SemanticMemory: semanticMemory }),
   }
 }
 
@@ -763,6 +776,22 @@ function optionalObjectArray(value: unknown): unknown[] {
     throw new SnapshotError('Expected an array.')
   }
   return value
+}
+
+function parseSemanticMemory(value: unknown): SemanticMemory | undefined {
+  if (value === undefined || value === null) return undefined
+  const entry = requireObject(value, 'semantic memory')
+  const legacyGoal = optionalString(entry.goal, '')
+  const goals = optionalStringArray(entry.goals)
+  return {
+    goals: (goals.length > 0 ? goals : legacyGoal ? [legacyGoal] : []).slice(-8),
+    constraints: optionalStringArray(entry.constraints).slice(-8),
+    decisions: optionalStringArray(entry.decisions).slice(-8),
+    notes: optionalStringArray(entry.notes).slice(-8),
+    updatedAt: typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
+      ? Math.max(0, Math.trunc(entry.updatedAt))
+      : 0,
+  }
 }
 
 function assertGuid(value: string, label: string): void {

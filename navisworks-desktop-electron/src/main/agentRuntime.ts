@@ -1,4 +1,5 @@
 import { BridgeError, type BridgeCallOptions } from './bridgeClient'
+import { randomUUID } from 'node:crypto'
 import {
   AGENT_TOOL_DEFINITIONS,
   toolCatalog,
@@ -10,6 +11,8 @@ import {
   AgentRuntimeError,
   type AgentBridgeClient,
   type ChatMessage,
+  type CompletionRequest,
+  type ModelProvider,
   type ToolCallWire,
 } from './model/types'
 import {
@@ -18,24 +21,49 @@ import {
   positiveInteger,
   throwIfAborted,
 } from './model/providerUtils'
+import type { SamplingOptions } from './model/types'
+import type { BuiltAgentRequest } from './agent/contextTypes'
+import {
+  COMPACT_MAX_TRANSCRIPT_CHARS,
+  ContextManager,
+  LOCAL_MAX_CONTEXT_TOKENS,
+  buildAgentRequest,
+  clampLocalContextWindow,
+  providerSendsContextWindow,
+  type ContextBlock,
+  type CompactConfig,
+} from './agent/contextManager'
+import { ContextState, renderReferenceSetBlock } from './agent/contextState'
+import { renderVerifiedFacts } from './agent/facts'
+import {
+  DocumentOperationCoordinator,
+  ToolExecutionLedger,
+  hashArguments,
+} from './agent/executionLedger'
+import {
+  renderSemanticMemory,
+  updateSemanticMemory,
+  type SemanticMemory,
+} from './agent/semanticMemory'
+
+type AgentRequest = Omit<CompletionRequest, 'sampling'> & { sampling?: SamplingOptions }
+type CompleteResult = Awaited<ReturnType<ModelProvider['complete']>>
 
 const DEFAULT_MODEL = 'qwen3.5:9b-q4_K_M'
 const MAX_TOOL_ROUNDS = 8
 const MAX_HISTORY_MESSAGES = 24
 const MAX_TOOL_RESULT_CHARS = 4_000
-// Local Ollama models top out at 32K context regardless of the configured
-// window; API models advertise 1M (enforced server-side, nothing to send).
-const LOCAL_MAX_CONTEXT_TOKENS = 32768
 
-// ---- Automatic context compaction ----------------------------------------
-// When a local run's usage crosses 90% of the window, older rounds are
-// summarized into one system message (keeping the most recent rounds
-// verbatim so live tool-result IDs stay valid). Cloud-active runs skip this:
-// their window is 1M and summarization would just spend tokens.
-const COMPACT_TRIGGER_RATIO = 0.9
-const COMPACT_KEEP_RECENT_MESSAGES = 4
-const COMPACT_MIN_COMPRESSIBLE = 2
-const COMPACT_MAX_TRANSCRIPT_CHARS = 30_000
+// Automatic context compaction is decided by ContextManager.contextPressure(usage,
+// effectiveWindow) — provider-neutral (Invariant G). Both local and API providers use a
+// finite internal budget; only Ollama receives that budget as num_ctx.
+
+class ToolExecutionGuardError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message)
+    this.name = 'ToolExecutionGuardError'
+  }
+}
 
 export interface AgentHistoryEntry {
   role: 'user' | 'assistant' | 'ai'
@@ -45,9 +73,17 @@ export interface AgentHistoryEntry {
 export type AgentRunEvent =
   | { phase: 'text'; delta: string }
   | { phase: 'thinking'; delta: string }
-  | { phase: 'started'; tool: string; arguments: Record<string, unknown> }
+  | {
+      phase: 'started'
+      runId: string
+      toolCallId: string
+      tool: string
+      arguments: Record<string, unknown>
+    }
   | {
       phase: 'completed'
+      runId: string
+      toolCallId: string
       tool: string
       arguments: Record<string, unknown>
       result?: unknown
@@ -61,21 +97,34 @@ export interface ApiEndpointConfig {
 }
 
 export interface AgentRunInput {
+  /** IPC run/session identity. Direct unit tests may omit both. */
+  runId?: string
+  sessionId?: string
   text: string
   history?: readonly AgentHistoryEntry[]
   model?: string
   reasoningMode?: 'fast' | 'deep'
   disabledTools?: readonly string[]
   api?: ApiEndpointConfig
+  /** P4: durable digest of earlier (compacted) turns, injected as a leading system block. */
+  compactSummary?: string
+  semanticMemory?: SemanticMemory
 }
 
 export interface RunAgentOptions {
   signal?: AbortSignal
   onEvent?: (event: AgentRunEvent) => void
-  requestToolApproval?: (
-    tool: AgentToolName,
-    argumentsValue: Record<string, unknown>,
-  ) => Promise<boolean>
+  requestToolApproval?: (request: ToolApprovalRequest) => Promise<boolean>
+}
+
+export interface ToolApprovalRequest {
+  runId: string
+  toolCallId: string
+  toolName: AgentToolName
+  arguments: Record<string, unknown>
+  argumentsHash: string
+  documentInstanceId?: string
+  ambiguousRetry?: boolean
 }
 
 export interface AgentRunResult {
@@ -87,6 +136,9 @@ export interface AgentRunResult {
   cacheHitRate?: number
   /** True when automatic context compaction ran during this run. */
   compacted?: boolean
+  /** P4: the compact summary produced this run (if any), for durable persistence. */
+  compactSummary?: string
+  semanticMemory?: SemanticMemory
   errorCode?: string
 }
 
@@ -101,6 +153,19 @@ export interface AgentRuntimeOptions {
   requestTimeoutMs?: number
   maxToolRounds?: number
   fetchImpl?: typeof fetch
+  /**
+   * Live Document Scope. When supplied, each tool result is deterministically mined for
+   * Verified Facts + an ordered Reference Set, and (local runs) the last result set is
+   * injected into context so "第一个 / 第三个" resolve across turns (docs/context-runtime.md
+   * §P2). Omitted in unit tests → the runtime behaves exactly as before.
+   */
+  contextState?: ContextState
+  /** P5: modifying-call lifecycle + crash-recovery record. Optional (tests omit it). */
+  executionLedger?: ToolExecutionLedger
+  /** P5: serializes view-state-change per document; read-only stays concurrent. */
+  operationCoordinator?: DocumentOperationCoordinator
+  /** Resolve an externalized persisted tool result for runtime-internal recall. */
+  resolveToolResult?: (value: unknown) => Promise<unknown>
 }
 
 export { AgentRuntimeError } from './model/types'
@@ -115,6 +180,10 @@ export class AgentRuntime {
   readonly #numPredict: number
   readonly #maxToolRounds: number
   readonly #disabledTools: Set<string>
+  readonly #contextState: ContextState | undefined
+  readonly #executionLedger: ToolExecutionLedger | undefined
+  readonly #operationCoordinator: DocumentOperationCoordinator | undefined
+  readonly #resolveToolResult: ((value: unknown) => Promise<unknown>) | undefined
 
   constructor(options: AgentRuntimeOptions) {
     this.#bridgeClient = options.bridgeClient
@@ -124,13 +193,16 @@ export class AgentRuntime {
     })
     this.#model = (options.model ?? DEFAULT_MODEL).trim()
     this.#think = options.think ?? false
-    this.#contextWindow = Math.min(
-      Math.max(1024, Math.trunc(options.contextWindow ?? 32768)),
-      LOCAL_MAX_CONTEXT_TOKENS,
-    )
+    // Store the configured window raw; the local clamp lives in ContextManager now and is
+    // applied per request only when the provider actually consumes a window (Invariant G).
+    this.#contextWindow = options.contextWindow ?? LOCAL_MAX_CONTEXT_TOKENS
     this.#numPredict = Math.max(1, Math.trunc(options.numPredict ?? 2048))
     this.#maxToolRounds = positiveInteger(options.maxToolRounds ?? MAX_TOOL_ROUNDS, 'maxToolRounds')
     this.#disabledTools = new Set<string>()
+    this.#contextState = options.contextState
+    this.#executionLedger = options.executionLedger
+    this.#operationCoordinator = options.operationCoordinator
+    this.#resolveToolResult = options.resolveToolResult
   }
 
   async summarizeTitle(text: string, signal?: AbortSignal): Promise<string> {
@@ -171,40 +243,113 @@ export class AgentRuntime {
       ? false
       : (input.reasoningMode === undefined ? this.#think : input.reasoningMode === 'deep')
     const tools = AGENT_TOOL_DEFINITIONS.filter((definition) => !disabledTools.has(definition.function.name))
-
-    const messages: ChatMessage[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...normalizeHistory(input.history ?? []),
-      { role: 'user', content: trimmedInput },
-    ]
+    // A single execution scope id for this run; the P5 ledger attributes modifying calls
+    // to it so crash recovery / approval re-checks can correlate a call with its run.
+    const runId = input.runId?.trim() || randomUUID()
+    // Effective context window for compaction/pressure (Section 二: finite, never Infinity).
+    // - Local Ollama: the CONFIGURED window, clamped by the provider's hard ceiling (32768).
+    //   The clamp — not capabilities.defaultContextWindow — is what Ollama actually receives.
+    // - API: no num_ctx is sent, but we budget against the provider/model capability window,
+    //   falling back to the configured window when it reports none. Never Infinity, so facts
+    //   / reference sets / compaction apply to cloud too (Invariant G).
+    const capabilities = provider.capabilities(model)
+    const effectiveWindow = provider.kind === 'ollama'
+      ? clampLocalContextWindow(this.#contextWindow)
+      : Math.max(1024, capabilities.maxContextWindow
+        ?? capabilities.defaultContextWindow
+        ?? this.#contextWindow)
+    const contextBlocks: ContextBlock[] = []
+    const semanticMemory = input.sessionId === undefined
+      ? input.semanticMemory
+      : updateSemanticMemory(input.semanticMemory, trimmedInput)
+    const semanticMemoryBlock = renderSemanticMemory(semanticMemory)
+    if (semanticMemoryBlock) contextBlocks.push({
+      kind: 'semantic-memory',
+      message: { role: 'system', content: semanticMemoryBlock },
+    })
+    if (input.compactSummary?.trim()) {
+      contextBlocks.push({
+        kind: 'compact-summary',
+        message: {
+          role: 'system',
+          content: `早期对话摘要（供参考，非实时事实）：\n${input.compactSummary.trim()}`,
+        },
+      })
+    }
+    if (this.#contextState !== undefined) {
+      const factsBlock = renderVerifiedFacts(this.#contextState.factsForCurrentDocument())
+      if (factsBlock) contextBlocks.push({
+        kind: 'verified-facts',
+        message: { role: 'system', content: factsBlock },
+      })
+      const referenceSet = this.#contextState.lastRelevantReferenceSet(input.sessionId)
+      const referenceBlock = renderReferenceSetBlock(referenceSet)
+      if (referenceBlock) contextBlocks.push({
+        kind: 'reference-set',
+        message: { role: 'system', content: referenceBlock },
+      })
+      if (referenceSet !== undefined && input.sessionId !== undefined) {
+        const recalled = await this.#contextState.recallToolResult(
+          input.sessionId,
+          referenceSet.sourceToolCallId,
+          this.#resolveToolResult,
+        )
+        if (recalled !== undefined) {
+          contextBlocks.push({
+            kind: 'recall',
+            message: {
+              role: 'system',
+              content: `【最近引用集的持久化来源（内部召回）】\n${clip(JSON.stringify(recalled), 4_000)}`,
+            },
+          })
+        }
+      }
+    }
+    const contextManager = new ContextManager({
+      systemPrompt: SYSTEM_PROMPT,
+      history: normalizeHistory(input.history ?? []),
+      contextBlocks,
+    })
+    contextManager.addUserTurn({ role: 'user', content: trimmedInput })
     let latestContextTokens = 0
     let latestCacheHitRate: number | undefined
     let lastAssistantText = ''
     let didCompactRun = false
+    let capturedSummary: string | undefined
     try {
+      // Section 一/1.3: budget-check BEFORE the first model call, not just on later rounds.
+      const initialTokens = contextManager.estimateRequestTokens(tools, this.#numPredict)
+      if (ContextManager.contextPressure(initialTokens, effectiveWindow) === 'compact') {
+        const compacted = await this.#compactMessages(contextManager, input, options)
+        if (compacted) {
+          didCompactRun = true
+          capturedSummary = compacted
+        }
+      }
       for (let round = 0; round < this.#maxToolRounds; round += 1) {
         throwIfAborted(options.signal)
-        // Auto-compaction: when the last round's usage crossed 90% of the
-        // window, summarize older rounds to free space before continuing.
-        if (
-          !apiActive
-          && this.#contextWindow > 0
-          && latestContextTokens >= this.#contextWindow * COMPACT_TRIGGER_RATIO
-        ) {
-          if (await this.#compactMessages(input, options, messages)) {
+        // Auto-compaction (P4): usage/effectiveWindow decides pressure — the SAME rule for
+        // local and cloud (Invariant G).
+        if (ContextManager.contextPressure(latestContextTokens, effectiveWindow) === 'compact') {
+          const compacted = await this.#compactMessages(contextManager, input, options)
+          if (compacted) {
             didCompactRun = true
+            capturedSummary = compacted
           }
         }
+        const built = contextManager.assembleBudgetedFrames({
+          tools,
+          temperature: 0.1,
+          maxTokens: this.#numPredict,
+          effectiveWindow,
+          sendContextWindow: provider.kind === 'ollama',
+        })
         const response = await provider.complete({
           model,
-          messages,
-          tools,
+          messages: built.messages,
+          tools: built.tools,
           think,
-          sampling: {
-            temperature: 0.1,
-            maxTokens: this.#numPredict,
-            contextWindow: this.#contextWindow,
-          },
+          sampling: built.sampling,
           signal: options.signal,
           onDelta: (delta) => {
             if (delta.text !== undefined) options.onEvent?.({ phase: 'text', delta: delta.text })
@@ -231,10 +376,12 @@ export class AgentRuntime {
             ...(response.thinking.trim() ? { thinkingText: response.thinking } : {}),
             ...(latestCacheHitRate === undefined ? {} : { cacheHitRate: latestCacheHitRate }),
             ...(didCompactRun ? { compacted: true } : {}),
+            ...(capturedSummary === undefined || capturedSummary === '' ? {} : { compactSummary: capturedSummary }),
+            ...(semanticMemory === undefined ? {} : { semanticMemory }),
           }
         }
 
-        messages.push({
+        const assistantToolMessage: ChatMessage = {
           role: 'assistant',
           content: response.content,
           toolCalls: response.toolCalls.map((call): ToolCallWire => ({
@@ -242,24 +389,31 @@ export class AgentRuntime {
             name: call.name,
             arguments: call.arguments,
           })),
-        })
+        }
+        const toolResultMessages: ChatMessage[] = []
 
         for (const toolCall of response.toolCalls) {
           throwIfAborted(options.signal)
           options.onEvent?.({
             phase: 'started',
+            runId,
+            toolCallId: toolCall.id,
             tool: toolCall.name,
             arguments: toolCall.arguments,
           })
 
           const toolResult = await this.#executeTool(
             toolCall,
+            runId,
             disabledTools,
             options.signal,
             options.requestToolApproval,
+            hasExplicitAmbiguousRetryConfirmation(trimmedInput),
           )
           options.onEvent?.({
             phase: 'completed',
+            runId,
+            toolCallId: toolCall.id,
             tool: toolCall.name,
             arguments: toolCall.arguments,
             result: toolResult.result,
@@ -267,12 +421,24 @@ export class AgentRuntime {
           })
 
           const wireResult = JSON.stringify(toolResult.wire)
-          messages.push({
+          toolResultMessages.push({
             role: 'tool',
             toolCallId: toolCall.id,
             content: truncateToolResult(toolCall.name, wireResult),
           })
+
+          // P2: mine this successful result for Verified Facts + an ordered Reference Set,
+          // attributed to the current document instance. No-op without a ContextState.
+          if (toolResult.error === undefined) {
+            this.#contextState?.ingestToolResult(
+              toolCall.name,
+              toolResult.result,
+              toolCall.id,
+              input.sessionId,
+            )
+          }
         }
+        contextManager.addToolExchange(assistantToolMessage, toolResultMessages)
       }
 
       return {
@@ -280,6 +446,7 @@ export class AgentRuntime {
         message: `工具调用超过 ${this.#maxToolRounds} 轮，已停止以避免循环。请缩小指令范围后重试。`,
         contextTokensUsed: latestContextTokens,
         ...(didCompactRun ? { compacted: true } : {}),
+        ...(capturedSummary === undefined || capturedSummary === '' ? {} : { compactSummary: capturedSummary }),
         errorCode: 'TOOL_ROUND_LIMIT',
       }
     } catch (error) {
@@ -305,54 +472,153 @@ export class AgentRuntime {
 
   async #executeTool(
     toolCall: { id: string; name: string; arguments: Record<string, unknown> },
+    runId: string,
     disabledTools: ReadonlySet<string>,
     signal?: AbortSignal,
     requestToolApproval?: RunAgentOptions['requestToolApproval'],
+    allowAmbiguousRetry = false,
   ): Promise<{ result?: unknown; error?: { code: string; message: string; ambiguousOutcome?: boolean }; wire: Record<string, unknown> }> {
+    const ledger = this.#executionLedger
+    const isModifying = toolCatalog.get(toolCall.name)?.impact === 'view-state-change'
+    let documentAtRequest: string | undefined
+    let ledgerStarted = false
+    let executing = false
     try {
       toolCatalog.assertAllowed(toolCall.name, toolCall.arguments)
       if (disabledTools.has(toolCall.name)) {
         throw new ToolCatalogError(`工具已被用户禁用：${toolCall.name}`)
       }
       const normalizedArguments = toolCatalog.normalizeArguments(toolCall.name, toolCall.arguments)
-      if (toolCatalog.get(toolCall.name)?.impact === 'view-state-change') {
-        const approved = requestToolApproval
-          ? await requestToolApproval(toolCall.name, normalizedArguments)
-          : false
-        throwIfAborted(signal)
-        if (!approved) {
-          const message = '用户取消了本次视图操作。'
+      if (isModifying) {
+        documentAtRequest = this.#contextState?.documentInstanceId ?? undefined
+        const argumentsHash = hashArguments(normalizedArguments)
+        const ambiguous = ledger?.findAmbiguous({
+          documentInstanceId: documentAtRequest,
+          toolName: toolCall.name,
+          argumentsHash,
+        })
+        if (ambiguous !== undefined && !allowAmbiguousRetry) {
+          const message = '上一次相同修改的结果不确定，已阻止自动重试。请先确认当前状态，或明确要求仍然执行。'
           return {
-            error: { code: 'TOOL_CANCELLED', message },
+            error: { code: 'AMBIGUOUS_RETRY_BLOCKED', message, ambiguousOutcome: true },
             wire: {
               status: 'error',
               tool: toolCall.name,
-              code: 'TOOL_CANCELLED',
+              code: 'AMBIGUOUS_RETRY_BLOCKED',
               summary: message,
+              ambiguousOutcome: true,
             },
           }
         }
+        await ledger?.begin({
+          runId,
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          argumentsHash,
+          documentInstanceId: documentAtRequest,
+        })
+        ledgerStarted = ledger !== undefined
+        await ledger?.mark(runId, toolCall.id, 'awaiting-approval')
+        const approved = requestToolApproval
+          ? await requestToolApproval({
+              runId,
+              toolCallId: toolCall.id,
+              toolName: toolCall.name as AgentToolName,
+              arguments: normalizedArguments,
+              argumentsHash,
+              ...(documentAtRequest === undefined ? {} : { documentInstanceId: documentAtRequest }),
+              ...(ambiguous === undefined ? {} : { ambiguousRetry: true }),
+            })
+          : false
+        if (!approved) {
+          await ledger?.mark(runId, toolCall.id, 'cancelled')
+          const message = '用户取消了本次视图操作。'
+          return {
+            error: { code: 'TOOL_CANCELLED', message },
+            wire: { status: 'error', tool: toolCall.name, code: 'TOOL_CANCELLED', summary: message },
+          }
+        }
+        throwIfAborted(signal)
+        await ledger?.mark(runId, toolCall.id, 'approved')
+        if (this.#contextState !== undefined
+          && !this.#contextState.canUseDocumentReference(documentAtRequest)) {
+          await ledger?.mark(runId, toolCall.id, 'cancelled', 'DOCUMENT_CHANGED')
+          const message = '文档已变化，已取消本次视图操作，请重新选择目标后重试。'
+          return {
+            error: { code: 'DOCUMENT_CHANGED', message },
+            wire: { status: 'error', tool: toolCall.name, code: 'DOCUMENT_CHANGED', summary: message },
+          }
+        }
+        if (hashArguments(normalizedArguments) !== argumentsHash) {
+          await ledger?.mark(runId, toolCall.id, 'cancelled', 'ARGUMENTS_CHANGED')
+          const message = '工具参数在审批后发生变化，已取消执行。'
+          return {
+            error: { code: 'ARGUMENTS_CHANGED', message },
+            wire: { status: 'error', tool: toolCall.name, code: 'ARGUMENTS_CHANGED', summary: message },
+          }
+        }
+        if (ambiguous !== undefined) {
+          await ledger?.resolveAmbiguous(ambiguous, 'USER_CONFIRMED_RETRY')
+        }
       }
-      const result = await this.#bridgeClient.call(
-        toolCall.name,
-        normalizedArguments,
-        { signal },
-      )
+      const callBridge = () => this.#bridgeClient.call(toolCall.name, normalizedArguments, { signal })
+      const execute = async (): Promise<unknown> => {
+        if (isModifying) {
+          if (this.#contextState !== undefined
+            && !this.#contextState.canUseDocumentReference(documentAtRequest)) {
+            await ledger?.mark(runId, toolCall.id, 'cancelled', 'DOCUMENT_CHANGED')
+            throw new ToolExecutionGuardError(
+              'DOCUMENT_CHANGED',
+              '文档已变化，已取消本次视图操作，请重新选择目标后重试。',
+            )
+          }
+          await ledger?.mark(runId, toolCall.id, 'executing')
+          executing = true
+        }
+        return callBridge()
+      }
+      const result = isModifying && this.#operationCoordinator !== undefined
+        ? await this.#operationCoordinator.runExclusive(documentAtRequest, execute)
+        : await execute()
+      if (isModifying) await ledger?.mark(runId, toolCall.id, 'success')
       return {
         result,
         wire: { status: 'success', tool: toolCall.name, result },
       }
     } catch (error) {
       if (signal?.aborted) {
+        if (isModifying && ledgerStarted) {
+          const current = ledger?.get(runId, toolCall.id)
+          if (executing && current?.status === 'executing') {
+            await ledger?.mark(runId, toolCall.id, 'ambiguous', 'ABORTED_DURING_EXECUTION')
+          } else if (current?.status === 'awaiting-approval' || current?.status === 'approved') {
+            await ledger?.mark(runId, toolCall.id, 'cancelled', 'ABORTED_BEFORE_EXECUTION')
+          }
+        }
         throw error
       }
       const code = error instanceof BridgeError
         ? error.code
+        : error instanceof ToolExecutionGuardError
+          ? error.code
         : error instanceof ToolCatalogError
           ? error.code
           : 'TOOL_EXECUTION_FAILED'
       const message = errorMessage(error)
       const ambiguousOutcome = error instanceof BridgeError && error.ambiguousOutcome
+      // Invariant F: a modifying call whose outcome the bridge could not confirm is
+      // recorded ambiguous (never auto-retried); a clean failure records failed.
+      if (isModifying && ledgerStarted) {
+        const current = ledger?.get(runId, toolCall.id)
+        if (current?.status === 'executing') {
+          await ledger?.mark(
+            runId,
+            toolCall.id,
+            ambiguousOutcome ? 'ambiguous' : 'failed',
+            code,
+          )
+        }
+      }
       const errorShape = { code, message, ambiguousOutcome }
       return {
         error: errorShape,
@@ -378,51 +644,62 @@ export class AgentRuntime {
    * the local model. Best-effort: any failure is swallowed.
    */
   async #compactMessages(
+    contextManager: ContextManager,
     input: AgentRunInput,
     options: RunAgentOptions,
-    messages: ChatMessage[],
-  ): Promise<boolean> {
-    const keep = COMPACT_KEEP_RECENT_MESSAGES
-    if (messages.length <= keep + COMPACT_MIN_COMPRESSIBLE) return false
-    const compressible = messages.slice(1, messages.length - keep)
-    if (compressible.length < COMPACT_MIN_COMPRESSIBLE) return false
-
+  ): Promise<string | null> {
     const summarizer = this.#router.local()
     const summarizerModel = input.model?.trim() || this.#model
-
-    const transcript = compressible
-      .map((message) => {
-        const calls = message.toolCalls?.map((call) => call.name).join(', ')
-        const label = calls ? `${message.role}（工具: ${calls}）` : message.role
-        return `[${label}] ${message.content || '（无文本）'}`
-      })
-      .join('\n\n')
-
-    try {
-      const response = await summarizer.complete({
-        model: summarizerModel,
-        messages: [
-          { role: 'system', content: COMPACT_SYSTEM_PROMPT },
-          { role: 'user', content: clip(transcript, COMPACT_MAX_TRANSCRIPT_CHARS) },
-        ],
-        sampling: { temperature: 0.2, maxTokens: 1024 },
-        signal: options.signal,
-      })
-      const summary = response.content.trim()
-      if (!summary) return false
-      messages.splice(
-        1,
-        compressible.length,
-        {
-          role: 'system',
-          content: `以下是本任务早期过程的压缩摘要（对应原始消息已移除以释放上下文空间）：\n${summary}\n以上为摘要；后续工具结果为最新事实。`,
-        },
-      )
-      return true
-    } catch {
-      // Compaction is best-effort: failure never breaks the running task.
-      return false
+    let producedSummary = ''
+    const config: CompactConfig = {
+      summarizerModel,
+      signal: options.signal,
+      // tryCompact hands back the [system, transcript] pair to summarize; send it
+      // verbatim (no window) exactly as the pre-refactor auto-compaction did.
+      summarize: async (summaryMessages) =>
+        (await this.#completeWith(
+          summarizer,
+          this.#summarizerRequest(summarizerModel, summaryMessages, options.signal),
+        )).content,
+      onSummary: (summary) => { producedSummary = summary },
     }
+    const changed = await contextManager.tryCompact(config)
+    return changed ? producedSummary : null
+  }
+
+  /** A windowless summarizer request carrying the model and the built [system, transcript]. */
+  #summarizerRequest(model: string, messages: ChatMessage[], signal?: AbortSignal): AgentRequest {
+    return {
+      model,
+      messages,
+      sampling: { temperature: 0.2, maxTokens: 1024 },
+      ...(signal ? { signal } : {}),
+    }
+  }
+
+  /**
+   * Route a request to the provider, applying the ContextManager window policy once
+   * (Invariants G and §五): a context window is only ever sent to the local Ollama
+   * provider — whose wire maps `num_ctx` from it — and never to OpenAI-compatible
+   * endpoints, whose server sizes its own context. This keeps the emitted request body
+   * byte-identical to the pre-refactor inline calls for both providers.
+   */
+  async #completeWith(provider: ModelProvider, request: AgentRequest): Promise<CompleteResult> {
+    // ContextManager already decided the window (omitting `contextWindow` for cloud
+    // requests and for windowless summarizer calls). A context window is only ever
+    // consumed by the local Ollama provider (whose wire maps it to `num_ctx`); for any
+    // other provider we strip it, so the emitted body is byte-identical to the
+    // pre-refactor inline calls for both providers.
+    const carriedWindow = request.sampling?.contextWindow
+    if (providerSendsContextWindow(provider.kind, carriedWindow !== undefined, carriedWindow ?? 0)) {
+      return provider.complete(request)
+    }
+    return provider.complete({
+      ...request,
+      sampling: request.sampling
+        ? { temperature: request.sampling.temperature, maxTokens: request.sampling.maxTokens }
+        : undefined,
+    })
   }
 
   dispose(): void {
@@ -449,18 +726,29 @@ export class AgentRuntime {
     const summarizerModel = apiActive
       ? api!.model!.trim()
       : (input.model?.trim() || this.#model)
+    const summarizerCapabilities = summarizer.capabilities(summarizerModel)
+    const summarizerWindow = summarizer.kind === 'ollama'
+      ? clampLocalContextWindow(this.#contextWindow)
+      : Math.max(1024, summarizerCapabilities.maxContextWindow
+        ?? summarizerCapabilities.defaultContextWindow
+        ?? this.#contextWindow)
     const transcript = messages
       .map((message) => `[${message.role}] ${message.content}`)
       .join('\n\n')
-    const response = await summarizer.complete({
-      model: summarizerModel,
-      messages: [
-        { role: 'system', content: COMPACT_SYSTEM_PROMPT },
-        { role: 'user', content: clip(transcript, COMPACT_MAX_TRANSCRIPT_CHARS) },
-      ],
-      sampling: { temperature: 0.2, maxTokens: 1024 },
-      signal,
+    const built = buildAgentRequest({
+      systemPrompt: COMPACT_SYSTEM_PROMPT,
+      history: [],
+      currentInput: clip(transcript, COMPACT_MAX_TRANSCRIPT_CHARS),
+      tools: [],
+      temperature: 0.2,
+      maxTokens: 1024,
+      effectiveWindow: summarizerWindow,
+      sendContextWindow: summarizer.kind === 'ollama',
     })
+    const response = await this.#completeWith(
+      summarizer,
+      { ...built, model: summarizerModel, ...(signal ? { signal } : {}) },
+    )
     const summary = response.content.trim()
     if (!summary) {
       throw new AgentRuntimeError('MODEL_EMPTY_RESPONSE', '压缩未产生摘要，请重试。')
@@ -484,6 +772,10 @@ function normalizeHistory(history: readonly AgentHistoryEntry[]): ChatMessage[] 
     }))
 }
 
+function hasExplicitAmbiguousRetryConfirmation(input: string): boolean {
+  return /(?:仍然|继续|再次|重新)执行|确认重试/.test(input)
+}
+
 function truncateToolResult(toolName: string, result: string): string {
   if (result.length <= MAX_TOOL_RESULT_CHARS) {
     return result
@@ -493,9 +785,51 @@ function truncateToolResult(toolName: string, result: string): string {
   if (finalCodeUnit >= 0xD800 && finalCodeUnit <= 0xDBFF) {
     clipped = clipped.slice(0, -1)
   }
-  return `${clipped}\n\n[工具 ${toolName} 的结果过大（原始 ${result.length} 字符），` +
-    `已截断至 ${MAX_TOOL_RESULT_CHARS} 字符。请缩小查询范围后重试：降低 limit、` +
-    '改用 category/property 过滤参数，或减少 itemIds 数量。]'
+  // P3: prepend a compact structural summary of what was cut, so the truncation is not a
+  // blind slice — the model still sees the shape (counts / keys) of the elided payload.
+  const summary = summarizeTruncatedPayload(result)
+  return `${clipped}\n\n[工具 ${toolName} 的结果过大（原始 ${result.length} 字符）` +
+    `${summary ? `；${summary}` : ''}，已截断至 ${MAX_TOOL_RESULT_CHARS} 字符。完整结果仍保留在本地，` +
+    '需要更多时请缩小查询范围重试：降低 limit、改用 category/property 过滤参数，或减少 itemIds 数量。]'
+}
+
+/** Best-effort "N items, keys: …" digest of a JSON tool payload; empty on non-JSON.
+ * The wire wraps data as `{status, tool, result}` so we descend into `result` first. */
+function summarizeTruncatedPayload(result: string): string {
+  try {
+    const parsed: unknown = JSON.parse(result)
+    const payload = unwrapWire(payloadIsRecord(parsed) ? parsed.result : parsed)
+    if (Array.isArray(payload)) return `结构：数组长度=${payload.length}`
+    if (payloadIsRecord(payload)) {
+      const parts: string[] = []
+      for (const key of ['items', 'viewpoints', 'models', 'properties', 'results']) {
+        const value = payload[key]
+        if (Array.isArray(value)) parts.push(`${key}=${value.length}`)
+      }
+      const listed = new Set(parts.map((part) => part.split('=')[0] as string))
+      const otherKeys = Object.keys(payload).filter((key) => !listed.has(key))
+      if (parts.length > 0) {
+        return `结构：${parts.join(', ')}${otherKeys.length ? `；字段：${otherKeys.join('/')}` : ''}`
+      }
+      return `字段：${otherKeys.join('/') || '无'}`
+    }
+  } catch {
+    // Not JSON (already-a-string wire shape) → no digest.
+  }
+  return ''
+}
+
+function payloadIsRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function unwrapWire(value: unknown): unknown {
+  // `navisworks_*` results come back wrapped as `{status, tool, result}`; if the payload
+  // still carries that wrapper, unwrap it one layer so counts/keys reflect the inner data.
+  if (payloadIsRecord(value) && 'status' in value && 'result' in value) {
+    return (value as { result: unknown }).result
+  }
+  return value
 }
 
 const SYSTEM_PROMPT = `你是 Curi，一个友好、可靠、简洁的 Navisworks 助手。

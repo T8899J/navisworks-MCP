@@ -36,6 +36,8 @@ export interface SessionSummary {
 export interface ChatSession extends SessionSummary {
   messages: ChatMessage[]
   contextTokensUsed?: number
+  /** P4: durable digest of compacted early turns; undefined ⇒ nothing compacted yet. */
+  compactSummary?: string
 }
 
 export interface DesktopSettings {
@@ -172,10 +174,12 @@ export function normalizeSession(value: unknown): ChatSession {
       ? source.Messages
       : []
 
+  const compactSummary = typeof source.compactSummary === 'string' ? source.compactSummary : undefined
   return {
     ...summary,
     messages: rawMessages.map(normalizeMessage),
-    contextTokensUsed: Number(source.contextTokensUsed ?? source.ContextTokensUsed ?? 0)
+    contextTokensUsed: Number(source.contextTokensUsed ?? source.ContextTokensUsed ?? 0),
+    ...(compactSummary === undefined ? {} : { compactSummary })
   }
 }
 
@@ -233,6 +237,14 @@ export function normalizeSettings(value: unknown): DesktopSettings {
 export function normalizeStatus(value: unknown): NavisworksStatus {
   const source = asRecord(value)
   const connected = Boolean(source.connected ?? source.isConnected ?? source.Connected)
+  const documentInstanceId =
+    typeof source.documentInstanceId === 'string' && source.documentInstanceId.trim()
+      ? source.documentInstanceId
+      : undefined
+  const bridgeSessionId =
+    typeof source.bridgeSessionId === 'string' && source.bridgeSessionId.trim()
+      ? source.bridgeSessionId
+      : undefined
   return {
     connected,
     status: String(source.status ?? source.label ?? (connected ? '已连接' : '未连接')),
@@ -241,7 +253,9 @@ export function normalizeStatus(value: unknown): NavisworksStatus {
         ? String(source.documentName ?? source.activeDocument)
         : undefined,
     selectionCount:
-      typeof source.selectionCount === 'number' ? source.selectionCount : undefined
+      typeof source.selectionCount === 'number' ? source.selectionCount : undefined,
+    ...(documentInstanceId === undefined ? {} : { documentInstanceId }),
+    ...(bridgeSessionId === undefined ? {} : { bridgeSessionId })
   }
 }
 

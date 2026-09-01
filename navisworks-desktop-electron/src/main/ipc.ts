@@ -15,6 +15,11 @@ import type {
   JsonSettingsRepository
 } from './sessionRepository'
 import type { ToolCatalog } from './toolCatalog'
+import type { ContextState } from './agent/contextState'
+import type { AgentScopeManager } from './kernel/agentScopes'
+import type { Scope } from './kernel/kernel'
+import { externalizeResult, isExternalizedResult, resolveResult } from './agent/toolResultStore'
+import type { SemanticMemory } from './agent/semanticMemory'
 import { validateSender, type SenderTrustOptions } from './security/validateSender'
 import {
   DesktopIpcError,
@@ -55,6 +60,7 @@ export type OllamaStreamEvent =
     }
 
 export interface OllamaRunInput {
+  runId: string
   sessionId: string
   turnId: string
   userMessageId: string
@@ -66,6 +72,9 @@ export interface OllamaRunInput {
   disabledTools?: readonly string[]
   /** API endpoint, read fresh from settings on every run. */
   api?: OllamaEndpointOptions & { model?: string }
+  /** P4: durable compact summary of earlier turns, injected into this run's context. */
+  compactSummary?: string
+  semanticMemory?: SemanticMemory
 }
 
 export interface OllamaHistoryEntry {
@@ -82,6 +91,9 @@ export interface OllamaRunResult {
   cacheHitRate?: number
   /** True when automatic context compaction ran during this run. */
   compacted?: boolean
+  /** P4: the summary produced by this run's compaction, for durable persistence. */
+  compactSummary?: string
+  semanticMemory?: SemanticMemory
 }
 
 export interface OllamaEndpointOptions {
@@ -100,10 +112,7 @@ export interface OllamaAgentPort {
     options: {
       signal: AbortSignal
       onEvent: (event: OllamaStreamEvent) => void
-      requestToolApproval: (
-        toolName: ToolName,
-        argumentsValue: Record<string, unknown>
-      ) => Promise<boolean>
+      requestToolApproval: (request: OllamaToolApprovalRequest) => Promise<boolean>
     }
   ): Promise<OllamaRunResult>
   /** Optional: model-generated conversation title; routes fall back to truncation. */
@@ -120,6 +129,16 @@ export interface OllamaAgentPort {
   dispose?(): void | Promise<void>
 }
 
+export interface OllamaToolApprovalRequest {
+  runId: string
+  toolCallId: string
+  toolName: ToolName
+  arguments: Record<string, unknown>
+  argumentsHash: string
+  documentInstanceId?: string
+  ambiguousRetry?: boolean
+}
+
 export interface DesktopIpcDependencies {
   runtimeInfo: RuntimeInfo
   sessions: JsonSessionRepository
@@ -130,6 +149,12 @@ export interface DesktopIpcDependencies {
   appearance: AppearancePort
   senderTrust: SenderTrustOptions
   secrets?: SecretProtector
+  /** Live Document Scope; observes bridge status so identity changes invalidate facts/sets. */
+  contextState?: ContextState
+  scopeManager?: AgentScopeManager
+  toolApprovals: ToolApprovalRegistry
+  /** P3 directory for externalized large tool results. When absent, results stay inline. */
+  toolResultsDirectory?: string
 }
 
 export interface SecretProtector {
@@ -171,10 +196,18 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
   const persistence = new PersistenceFacade(
     dependencies.sessions,
     dependencies.settings,
-    dependencies.secrets
+    dependencies.secrets,
+    dependencies.contextState,
+    dependencies.toolResultsDirectory
   )
-  const toolApprovals = new ToolApprovalRegistry()
-  const chatRuns = new ChatRunRegistry(dependencies.ollama, persistence, toolApprovals)
+  const toolApprovals = dependencies.toolApprovals
+  const chatRuns = new ChatRunRegistry(
+    dependencies.ollama,
+    persistence,
+    toolApprovals,
+    dependencies.scopeManager,
+    dependencies.contextState,
+  )
 
   const handlers = {
     'app.runtime.get': routeHandler<'app.runtime.get'>(() => dependencies.runtimeInfo),
@@ -199,6 +232,7 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       // through sessions.save after the durable delete has landed.
       await chatRuns.abortAndWait(sessionId)
       await persistence.deleteSession(sessionId)
+      await dependencies.scopeManager?.forgetConversation(sessionId)
     }),
     'settings.get': routeHandler<'settings.get'>(() => persistence.getSettings()),
     'settings.update': routeHandler<'settings.update'>(async ({ settings }) => {
@@ -281,6 +315,9 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
         await persistence.saveSession({
           ...session,
           updatedAt: now,
+          // P4: keep the summary durable on its own field, and reset the transcript so the
+          // next turn starts light — the summary is re-injected via compactSummary, not chat.
+          compactSummary: summary,
           messages: [{
             id: randomUUID(),
             role: 'assistant',
@@ -292,9 +329,11 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       }
       return { summary }
     }),
-    'navisworks.status.get': routeHandler<'navisworks.status.get'>(() =>
-      readNavisworksStatus(dependencies.bridge)
-    ),
+    'navisworks.status.get': routeHandler<'navisworks.status.get'>(async () => {
+      const status = await readNavisworksStatus(dependencies.bridge)
+      dependencies.contextState?.observe(status)
+      return status
+    }),
     'navisworks.tool.execute': routeHandler<'navisworks.tool.execute'>(async ({ toolName, arguments: args }) => {
       dependencies.tools.assertAllowed(toolName, args)
       if (dependencies.tools.get(toolName)?.impact === 'view-state-change') {
@@ -348,7 +387,9 @@ export class ChatRunRegistry {
   constructor(
     private readonly agent: OllamaAgentPort,
     private readonly persistence: PersistenceFacade,
-    private readonly toolApprovals: ToolApprovalRegistry = new ToolApprovalRegistry()
+    private readonly toolApprovals: ToolApprovalRegistry = new ToolApprovalRegistry(),
+    private readonly scopeManager?: AgentScopeManager,
+    private readonly contextState?: ContextState,
   ) {}
 
   start(
@@ -426,11 +467,19 @@ export class ChatRunRegistry {
     settle: () => void
   ): Promise<void> {
     const base = { runId, sessionId: input.sessionId, turnId, messageId }
+    let runScope: Scope | undefined
     try {
+      runScope = await this.scopeManager?.createRun(
+        runId,
+        input.sessionId,
+        this.contextState?.documentInstanceId,
+      )
       const [history, settings] = await Promise.all([
         this.persistence.getAgentHistory(input.sessionId, input.text),
         this.persistence.getSettings()
       ])
+      const compactSummary = await this.persistence.getCompactSummary(input.sessionId)
+      const semanticMemory = await this.persistence.getSemanticMemory(input.sessionId)
       if (controller.signal.aborted) {
         throw controller.signal.reason
       }
@@ -441,6 +490,7 @@ export class ChatRunRegistry {
       const result = await this.agent.run(
         {
           sessionId: input.sessionId,
+          runId,
           turnId,
           userMessageId: input.messageId,
           text: input.text,
@@ -448,14 +498,22 @@ export class ChatRunRegistry {
           ...(input.model === undefined ? {} : { model: input.model }),
           ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
           ...(disabledTools.length === 0 ? {} : { disabledTools }),
-          ...(activeEndpoint ? { api: activeEndpoint } : {})
+          ...(activeEndpoint ? { api: activeEndpoint } : {}),
+          ...(compactSummary === undefined ? {} : { compactSummary }),
+          ...(semanticMemory === undefined ? {} : { semanticMemory })
         },
         {
           signal: controller.signal,
-          requestToolApproval: (toolName, argumentsValue) => this.toolApprovals.request({
+          requestToolApproval: (request) => this.toolApprovals.request({
             ...base,
-            toolName,
-            arguments: argumentsValue
+            toolCallId: request.toolCallId,
+            toolName: request.toolName,
+            arguments: request.arguments,
+            argumentsHash: request.argumentsHash,
+            ...(request.documentInstanceId === undefined
+              ? {}
+              : { documentInstanceId: request.documentInstanceId }),
+            ...(request.ambiguousRetry ? { ambiguousRetry: true } : {})
           }, sender, controller.signal),
           onEvent: (event) => {
             if (controller.signal.aborted) return
@@ -463,6 +521,18 @@ export class ChatRunRegistry {
           }
         }
       )
+
+      // P4: durably persist any summary this run's auto-compaction produced (the renderer's
+      // own save preserves it; see saveSession). Best-effort — a persistence failure must not
+      // block delivering the answer to the user.
+      if (result.compactSummary !== undefined) {
+        await this.persistence.persistCompactSummary(input.sessionId, result.compactSummary)
+          .catch(() => undefined)
+      }
+      if (result.semanticMemory !== undefined) {
+        await this.persistence.persistSemanticMemory(input.sessionId, result.semanticMemory)
+          .catch(() => undefined)
+      }
 
       emitTo(sender, 'chat.done', {
         ...base,
@@ -484,6 +554,7 @@ export class ChatRunRegistry {
         error: { code: ipcError.code, message: ipcError.message }
       })
     } finally {
+      await runScope?.dispose()
       this.#runs.delete(runId)
       settle()
     }
@@ -492,6 +563,7 @@ export class ChatRunRegistry {
 
 interface PendingToolApproval {
   readonly senderId: number
+  readonly documentInstanceId?: string
   readonly finish: (approved: boolean) => void
 }
 
@@ -518,7 +590,13 @@ export class ToolApprovalRegistry {
         resolve(approved)
       }
       const cancel = (): void => finish(false)
-      this.#pending.set(approvalId, { senderId: sender.id, finish })
+      this.#pending.set(approvalId, {
+        senderId: sender.id,
+        ...(payload.documentInstanceId === undefined
+          ? {}
+          : { documentInstanceId: payload.documentInstanceId }),
+        finish,
+      })
       signal.addEventListener('abort', cancel, { once: true })
       sender.once('destroyed', cancel)
       emitTo(sender, 'tool.approval.requested', { approvalId, ...payload })
@@ -534,6 +612,12 @@ export class ToolApprovalRegistry {
 
   cancelAll(): void {
     for (const pending of [...this.#pending.values()]) pending.finish(false)
+  }
+
+  cancelForDocument(documentInstanceId: string): void {
+    for (const pending of [...this.#pending.values()]) {
+      if (pending.documentInstanceId === documentInstanceId) pending.finish(false)
+    }
   }
 }
 
@@ -573,8 +657,46 @@ export class PersistenceFacade {
   constructor(
     private readonly sessions: JsonSessionRepository,
     private readonly settings: JsonSettingsRepository,
-    private readonly secrets: SecretProtector = unavailableSecretProtector
+    private readonly secrets: SecretProtector = unavailableSecretProtector,
+    private readonly contextState: ContextState | undefined = undefined,
+    private readonly toolResultsDirectory: string | undefined = undefined
   ) {}
+
+  /**
+   * P3: persist oversized tool results to `toolResultsDirectory` and keep only a small ref
+   * inline. A no-op when no directory is configured (e.g. unit tests), so the payload — and
+   * therefore the on-disk format — is byte-for-byte what it was before P3.
+   */
+  async #externalizeForSave(session: Session): Promise<Session> {
+    if (this.toolResultsDirectory === undefined) return session
+    const messages = await Promise.all(session.messages.map(async (message) => ({
+      ...message,
+      tools: await Promise.all(message.tools.map(async (tool) => {
+        if (isExternalizedResult(tool.result)) return tool
+        const ref = await externalizeResult(
+          this.toolResultsDirectory as string,
+          `${session.id}:${message.id}:${tool.id}`,
+          tool.result,
+        )
+        return ref === null ? tool : { ...tool, result: ref }
+      })),
+    })))
+    return { ...session, messages }
+  }
+
+  /** P3: expand externalized refs back to full results before returning to the renderer. */
+  async #resolveForRead(session: Session): Promise<Session> {
+    if (this.toolResultsDirectory === undefined) return session
+    const messages = await Promise.all(session.messages.map(async (message) => ({
+      ...message,
+      tools: await Promise.all(message.tools.map(async (tool) => (
+        isExternalizedResult(tool.result)
+          ? { ...tool, result: await resolveResult(this.toolResultsDirectory as string, tool.result) }
+          : tool
+      ))),
+    })))
+    return { ...session, messages }
+  }
 
   async listSessions(): Promise<SessionSummary[]> {
     await this.#writeTail
@@ -586,7 +708,55 @@ export class PersistenceFacade {
     await this.#writeTail
     const loaded = await this.sessions.load()
     const session = loaded.sessions.find((candidate) => candidate.id === sessionId)
-    return session ? toDesktopSession(session) : null
+    if (!session) return null
+    const resolved = await this.#resolveForRead(toDesktopSession(session))
+    this.contextState?.ingestConversationMessages(sessionId, resolved.messages)
+    return resolved
+  }
+
+  /** P4: read the durable compact summary for a session (no externalization involved). */
+  async getCompactSummary(sessionId: string): Promise<string | undefined> {
+    await this.#writeTail
+    const loaded = await this.sessions.load()
+    return loaded.sessions.find((candidate) => candidate.id === sessionId)?.compactSummary
+  }
+
+  async getSemanticMemory(sessionId: string): Promise<SemanticMemory | undefined> {
+    await this.#writeTail
+    const loaded = await this.sessions.load()
+    return loaded.sessions.find((candidate) => candidate.id === sessionId)?.semanticMemory
+  }
+
+  /**
+   * P4: persist the summary produced by a run's auto-compaction onto the durable session.
+   * The renderer's own save is merged to preserve this value (see saveSession), so this can
+   * run before or after the renderer writes the turn.
+   */
+  persistCompactSummary(sessionId: string, summary: string): Promise<void> {
+    if (!summary.trim()) return Promise.resolve()
+    return this.#serializeWrite(async () => {
+      const loaded = await this.requireWritableSessions()
+      const index = loaded.findIndex((candidate) => candidate.id === sessionId)
+      const existing = index >= 0 ? loaded[index] : undefined
+      if (existing === undefined) return
+      loaded[index] = { ...existing, compactSummary: summary }
+      if (!(await this.sessions.save(loaded))) {
+        throw new DesktopIpcError('SERVICE_UNAVAILABLE', '无法保存压缩摘要。')
+      }
+    })
+  }
+
+  persistSemanticMemory(sessionId: string, memory: SemanticMemory): Promise<void> {
+    return this.#serializeWrite(async () => {
+      const loaded = await this.requireWritableSessions()
+      const index = loaded.findIndex((candidate) => candidate.id === sessionId)
+      const existing = index >= 0 ? loaded[index] : undefined
+      if (existing === undefined) return
+      loaded[index] = { ...existing, semanticMemory: memory }
+      if (!(await this.sessions.save(loaded))) {
+        throw new DesktopIpcError('SERVICE_UNAVAILABLE', '无法保存会话语义记忆。')
+      }
+    })
   }
 
   async getAgentHistory(sessionId: string, currentInput: string): Promise<OllamaHistoryEntry[]> {
@@ -620,13 +790,28 @@ export class PersistenceFacade {
     return this.#serializeWrite(async () => {
       this.#assertNotDeleted(session.id)
       const loaded = await this.requireWritableSessions()
-      const persisted = toPersistedSession(session)
+      // Persist a copy with large results externalized; return the caller's full session.
+      const externalized = await this.#externalizeForSave(session)
+      const persisted = toPersistedSession(externalized)
       const index = loaded.findIndex((candidate) => candidate.id === session.id)
-      if (index >= 0) loaded[index] = persisted
-      else loaded.push(persisted)
+      // The renderer does not carry the durable compact summary; preserve the stored one so
+      // a routine save never wipes an auto-compaction summary (P4).
+      const existing = index >= 0 ? loaded[index] : undefined
+      if (existing !== undefined) {
+        if (persisted.compactSummary === undefined && existing.compactSummary !== undefined) {
+          persisted.compactSummary = existing.compactSummary
+        }
+        if (persisted.semanticMemory === undefined && existing.semanticMemory !== undefined) {
+          persisted.semanticMemory = existing.semanticMemory
+        }
+        loaded[index] = persisted
+      } else {
+        loaded.push(persisted)
+      }
       if (!(await this.sessions.save(loaded))) {
         throw new DesktopIpcError('SERVICE_UNAVAILABLE', '无法保存会话数据。')
       }
+      this.contextState?.ingestConversationMessages(session.id, externalized.messages)
       return session
     })
   }
@@ -640,6 +825,7 @@ export class PersistenceFacade {
         throw new DesktopIpcError('SERVICE_UNAVAILABLE', '无法删除会话数据。')
       }
       this.#deletedSessionIds.add(sessionId)
+      this.contextState?.forgetSession(sessionId)
     })
   }
 
@@ -850,10 +1036,18 @@ async function readNavisworksStatus(bridge: NavisworksBridgeClient): Promise<Nav
     const documentName = typeof record.documentTitle === 'string' && record.documentTitle.trim()
       ? record.documentTitle
       : undefined
+    const bridgeSessionId = typeof record.bridgeSessionId === 'string' && record.bridgeSessionId.trim()
+      ? record.bridgeSessionId
+      : undefined
+    const documentInstanceId = typeof record.documentInstanceId === 'string' && record.documentInstanceId.trim()
+      ? record.documentInstanceId
+      : undefined
     return {
       connected,
       status: connected ? documentName ?? '已连接 Navisworks' : 'Navisworks 未连接',
-      ...(documentName === undefined ? {} : { documentName })
+      ...(documentName === undefined ? {} : { documentName }),
+      ...(bridgeSessionId === undefined ? {} : { bridgeSessionId }),
+      ...(documentInstanceId === undefined ? {} : { documentInstanceId })
     }
   } catch {
     return { connected: false, status: 'Navisworks 未连接' }
@@ -891,7 +1085,9 @@ function toDesktopSession(session: ConversationSession): Session {
         result: tool.result ?? undefined,
         ...(tool.error ? { error: tool.error } : {})
       }))
-    }))
+    })),
+    ...(session.compactSummary === undefined ? {} : { compactSummary: session.compactSummary }),
+    ...(session.semanticMemory === undefined ? {} : { semanticMemory: session.semanticMemory })
   }
 }
 
@@ -909,6 +1105,8 @@ function toPersistedSession(session: Session): ConversationSession {
     updatedAt: session.updatedAt,
     pinnedAt: session.pinnedAt ?? null,
     contextTokensUsed: session.contextTokensUsed ?? 0,
+    ...(session.compactSummary === undefined ? {} : { compactSummary: session.compactSummary }),
+    ...(session.semanticMemory === undefined ? {} : { semanticMemory: session.semanticMemory }),
     messages: session.messages.map((message) => ({
       role: message.role === 'assistant' ? 'ai' : message.role,
       content: message.content,
@@ -1040,12 +1238,16 @@ const NAVISWORKS_STATUS_POLL_MS = 5_000
  */
 export function startNavisworksStatusPolling(
   bridge: NavisworksBridgeClient,
-  intervalMs: number = NAVISWORKS_STATUS_POLL_MS
+  intervalMs: number = NAVISWORKS_STATUS_POLL_MS,
+  onStatus?: (status: NavisworksStatus) => void
 ): () => void {
   let lastSignature = ''
   const timer = setInterval(() => {
     void readNavisworksStatus(bridge)
       .then((status) => {
+        // Feed the Document Scope on EVERY poll (even unchanged) so identity invalidation
+        // is independent of the broadcast dedupe below.
+        onStatus?.(status)
         const signature = JSON.stringify(status)
         if (signature === lastSignature) return
         lastSignature = signature

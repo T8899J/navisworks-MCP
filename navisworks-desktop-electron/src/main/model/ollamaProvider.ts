@@ -4,6 +4,7 @@ import {
   type CompletionDelta,
   type CompletionRequest,
   type CompletionResult,
+  type ModelCapabilities,
   type ModelProvider,
   type ParsedToolCall,
   type ProviderCheckResult,
@@ -77,6 +78,17 @@ export class OllamaProvider implements ModelProvider {
       'requestTimeoutMs',
     )
     this.#fetch = options.fetchImpl ?? fetch
+  }
+
+  capabilities(_model: string): ModelCapabilities {
+    // Local Ollama tops out at 32K regardless of any larger configured window; it both
+    // supports function tools and the `think` reasoning toggle.
+    return {
+      supportsTools: true,
+      supportsThinking: true,
+      maxContextWindow: 32_768,
+      defaultContextWindow: 32_768,
+    }
   }
 
   #authHeaders(): Record<string, string> {
@@ -417,7 +429,7 @@ function parseOllamaToolCalls(value: unknown[]): ParsedToolCall[] {
       continue
     }
     result.push({
-      id: typeof entry.id === 'string' && entry.id ? entry.id : `call-${index}`,
+      id: typeof entry.id === 'string' && entry.id ? entry.id : `generated-${randomUUID()}`,
       name,
       arguments: parseToolArguments(functionValue.arguments),
     })
@@ -437,3 +449,4 @@ function cleanTitleCandidate(raw: string): string {
     .replace(/[。.!!??]+$/, '')
     .trim()
 }
+import { randomUUID } from 'node:crypto'

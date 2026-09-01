@@ -13,6 +13,9 @@ export interface DesktopDataPaths {
   sessionsBackupFile: string
   settingsFile: string
   startupLogFile: string
+  toolResultsDirectory: string
+  executionLedgerFile: string
+  executionLedgerBackupFile: string
   buildConfiguration: DesktopBuildConfiguration
   sourceDescription: string
 }
@@ -165,6 +168,9 @@ function buildPaths(
     sessionsBackupFile: path.join(rootDirectory, 'sessions.backup.json'),
     settingsFile: path.join(rootDirectory, 'settings.json'),
     startupLogFile: path.join(rootDirectory, 'startup.log'),
+    toolResultsDirectory: path.join(rootDirectory, 'tool-results'),
+    executionLedgerFile: path.join(rootDirectory, 'execution-ledger.json'),
+    executionLedgerBackupFile: path.join(rootDirectory, 'execution-ledger.backup.json'),
     buildConfiguration,
     sourceDescription,
   }

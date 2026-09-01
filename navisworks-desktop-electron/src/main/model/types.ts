@@ -27,6 +27,20 @@ export interface SamplingOptions {
   contextWindow?: number
 }
 
+/**
+ * Read-only model/provider capability surface consumed by ContextManager so it never
+ * branches on "local vs cloud" itself (docs/context-runtime.md §五, Invariant G).
+ * `maxContextWindow` / `defaultContextWindow` are absent when the provider does not know
+ * its window — the caller then uses a configured value or a safe default, NOT an assumed 1M.
+ */
+export interface ModelCapabilities {
+  supportsTools: boolean
+  supportsThinking: boolean
+  maxContextWindow?: number
+  defaultContextWindow?: number
+  maxOutputTokens?: number
+}
+
 export interface CompletionDelta {
   text?: string
   thinking?: string
@@ -83,6 +97,8 @@ export interface ModelProvider {
   complete(request: CompletionRequest): Promise<CompletionResult>
   listModels(signal?: AbortSignal): Promise<string[]>
   testConnection(model: string, signal?: AbortSignal): Promise<ProviderCheckResult>
+  /** Static capability view consumed by ContextManager; never branches on local/cloud. */
+  capabilities(model: string): ModelCapabilities
   /** One-shot title generation when the backend supports it cheaply. */
   summarizeTitle?(model: string, text: string, signal?: AbortSignal): Promise<string>
 }

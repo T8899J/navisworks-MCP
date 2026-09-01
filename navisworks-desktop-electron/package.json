@@ -15,6 +15,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "cordis": "4.0.0-rc.9",
     "lucide-react": "^0.525.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

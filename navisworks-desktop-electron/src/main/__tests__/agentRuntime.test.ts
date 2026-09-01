@@ -327,9 +327,10 @@ describe('AgentRuntime streaming tool loop', () => {
     const answerMessages = JSON.stringify(requestBodies[4]?.messages)
     expect(answerMessages).toContain('压缩摘要')
     expect(answerMessages).toContain('已完成第一、二轮')
-    expect(answerMessages).not.toContain('第一步')
-    // The recent rounds stay verbatim for live tool-result references.
-    expect(answerMessages).toContain('结果2')
+    // The active user instruction is never summarized away.
+    expect(answerMessages).toContain('第一步')
+    // The latest complete tool exchange stays verbatim for live references.
+    expect(answerMessages).toContain('结果3')
   })
 
   it('keeps automatic and manual compaction local without an API endpoint', async () => {
@@ -368,5 +369,71 @@ describe('AgentRuntime streaming tool loop', () => {
 
     expect(automatic.compacted).toBe(true)
     expect(manual).toBe('本地最终回答')
+  })
+
+  it('compacts local runs against the clamped 32K num_ctx, not the raw configured window', async () => {
+    // Drive `rounds` tool-call responses (each pushing usage to 30000) and then a plain
+    // text answer. The bridge call itself also returns a valid tool result.
+    const scripted = (rounds: number, usage: number, reply: string) => {
+      const bridge: AgentBridgeClient = { async call<T>() { return { connected: true } as T } }
+      let calls = 0
+      const fetchImpl = vi.fn(async () => {
+        calls += 1
+        if (calls <= rounds) {
+          return ndjsonResponse([{
+            message: {
+              role: 'assistant', content: '',
+              tool_calls: [{ function: { name: 'navisworks_status', arguments: {} } }],
+            },
+            prompt_eval_count: usage, eval_count: 0,
+          }])
+        }
+        return ndjsonResponse([
+          { message: { role: 'assistant', content: reply }, prompt_eval_count: usage, eval_count: 1 },
+        ])
+      }) as unknown as typeof fetch
+      return { bridge, fetchImpl }
+    }
+
+    // Window 65536 is clamped to num_ctx 32768 → trigger 0.9*32768 = 29491.
+    // Usage 30000 is above the clamped trigger but far below 0.9*65536 = 58982,
+    // so only a run that compares against the CLAMPED window will compact here.
+    const clamped = scripted(5, 30_000, '最终回答。')
+    const compactedResult = await new AgentRuntime({
+      bridgeClient: clamped.bridge, fetchImpl: clamped.fetchImpl, contextWindow: 65_536,
+    }).run('多轮查询')
+    expect(compactedResult.compacted).toBe(true)
+
+    // Negative control: identical script with usage BELOW even the clamped trigger must
+    // NOT compact — proving the previous assertion reflects the window policy, not a
+    // size effect from the five rounds themselves.
+    const below = scripted(5, 10_000, '最终回答。')
+    const untouchedResult = await new AgentRuntime({
+      bridgeClient: below.bridge, fetchImpl: below.fetchImpl, contextWindow: 65_536,
+    }).run('多轮查询')
+    expect(untouchedResult.compacted).toBeUndefined()
+  })
+
+  it('adds a structural digest to a truncated oversized tool result', async () => {
+    const bigItems = Array.from({ length: 200 }, (_, i) => ({ id: `id${i}`, name: `泵体-${i}` }))
+    const bridge: AgentBridgeClient = { async call<T>() { return { items: bigItems } as T } }
+    const bodies: Array<Record<string, unknown>> = []
+    let round = 0
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      round += 1
+      if (round === 1) {
+        return ndjsonResponse([{ message: { role: 'assistant', content: '', tool_calls: [
+          { id: 'c1', function: { index: 0, name: 'navisworks_find_items', arguments: { query: '泵' } } },
+        ] }, prompt_eval_count: 10, eval_count: 0 }])
+      }
+      return ndjsonResponse([{ message: { role: 'assistant', content: '完成。' }, prompt_eval_count: 20, eval_count: 1 }])
+    }) as unknown as typeof fetch
+    await new AgentRuntime({ bridgeClient: bridge, fetchImpl }).run('查大量构件')
+    const toolMessage = JSON.stringify(bodies[1]?.messages)
+    // The oversized wire result was sliced, but the notice still reports the item count and
+    // that the full payload remains locally recallable (P3-C: not a blind slice).
+    expect(toolMessage).toContain('结构：items=200')
+    expect(toolMessage).toContain('完整结果仍保留在本地')
   })
 })
