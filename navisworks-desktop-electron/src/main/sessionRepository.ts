@@ -71,6 +71,10 @@ export interface AppSettings {
   fontScale: number
   /** When true, chat completions run on the API model instead of local. */
   preferApiModel: boolean
+  /** Whether the local Ollama daemon may serve chat requests. */
+  ollamaEnabled: boolean
+  /** Whether the configured API endpoint may serve chat requests. */
+  apiEnabled: boolean
   apiProfiles: ApiProfileSettings[]
   activeApiProfileId: string | null
 }
@@ -143,6 +147,9 @@ export interface WpfAppSettingsSnapshot {
   FontScale?: number | null
   /** Electron-only extensions: API endpoint settings. */
   PreferApiModel?: boolean | null
+  /** Electron-only extensions: provider enable switches. */
+  OllamaEnabled?: boolean | null
+  ApiEnabled?: boolean | null
   ProviderBaseUrl?: string | null
   ProviderApiKey?: string | null
   CloudModel?: string | null
@@ -242,7 +249,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   models: ['qwen3.5:9b-q4_K_M'],
   plugins: [],
   skills: [],
-  reasoningMode: 'fast',
+  reasoningMode: 'low',
   activeSessionId: null,
   gpuVramGb: 8,
   contextWindowTokens: 32768,
@@ -251,6 +258,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   disabledTools: [],
   fontScale: 1,
   preferApiModel: false,
+  ollamaEnabled: true,
+  apiEnabled: true,
   apiProfiles: [],
   activeApiProfileId: null,
 }
@@ -461,6 +470,8 @@ function fromWpfSettingsSnapshot(snapshot: WpfAppSettingsSnapshot): AppSettings 
     disabledTools: snapshot.DisabledTools ?? [],
     fontScale: clampFontScale(optionalFiniteNumber(snapshot.FontScale, 1)),
     preferApiModel: optionalBoolean(snapshot.PreferApiModel, false),
+    ollamaEnabled: optionalBoolean(snapshot.OllamaEnabled, true),
+    apiEnabled: optionalBoolean(snapshot.ApiEnabled, true),
     apiProfiles,
     activeApiProfileId: hasStoredProfiles ? snapshot.ActiveApiProfileId ?? null : fallbackProfileId,
   }
@@ -482,6 +493,8 @@ function toWpfSettingsSnapshot(settings: AppSettings): WpfAppSettingsSnapshot {
     DisabledTools: settings.disabledTools,
     FontScale: settings.fontScale,
     PreferApiModel: settings.preferApiModel,
+    OllamaEnabled: settings.ollamaEnabled,
+    ApiEnabled: settings.apiEnabled,
     ProviderBaseUrl: activeProfile?.baseUrl ?? '',
     ProviderApiKey: '',
     CloudModel: activeProfile?.model ?? '',
@@ -652,6 +665,8 @@ function parseWpfSettingsSnapshot(value: unknown): WpfAppSettingsSnapshot {
     PreferApiModel: typeof entry.PreferApiModel === 'boolean'
       ? entry.PreferApiModel
       : null,
+    OllamaEnabled: optionalBoolean(entry.OllamaEnabled, true),
+    ApiEnabled: optionalBoolean(entry.ApiEnabled, true),
     ProviderBaseUrl: optionalString(entry.ProviderBaseUrl, ''),
     ProviderApiKey: optionalString(entry.ProviderApiKey, ''),
     CloudModel: optionalString(entry.CloudModel, ''),

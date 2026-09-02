@@ -1,5 +1,6 @@
 import type { DesktopApi, DesktopEventName } from '../shared/ipc'
 import type { NavisworksConnectionState, RuntimeInfo } from '../shared/ipc'
+import type { ReasoningEffort } from '../shared/reasoning'
 import {
   type ChatSession,
   type ChatStreamEvent,
@@ -125,7 +126,7 @@ export const desktopGateway = {
     messageId: string
     text: string
     model: string
-    reasoningMode: 'fast' | 'deep'
+    reasoningMode: ReasoningEffort
   }): Promise<{ turnId?: string }> {
     const response = await requireApi().request('chat.start', payload)
     return { turnId: response.turnId }

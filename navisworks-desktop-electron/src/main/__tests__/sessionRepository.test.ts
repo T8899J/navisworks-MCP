@@ -164,6 +164,31 @@ describe('WPF-compatible JSON repositories', () => {
     expect(await new JsonSettingsRepository(paths).load()).toMatchObject({ fontScale: 1.3 })
   })
 
+  it('round-trips provider enable switches and defaults missing ones to enabled', async () => {
+    const paths = await createPaths()
+    const repository = new JsonSettingsRepository(paths)
+    await expect(repository.save({
+      ...DEFAULT_APP_SETTINGS,
+      ollamaEnabled: false,
+      apiEnabled: true,
+    })).resolves.toBe(true)
+    const saved = await readFile(paths.settingsFile, 'utf8')
+    expect(saved).toContain('"OllamaEnabled": false')
+    expect(saved).toContain('"ApiEnabled": true')
+    expect(await repository.load()).toMatchObject({ ollamaEnabled: false, apiEnabled: true })
+
+    // Settings written before the switches existed load as fully enabled.
+    await writeFile(paths.settingsFile, JSON.stringify({
+      SelectedModel: 'qwen-test',
+      Models: ['qwen-test'],
+      ThemeMode: 'dark',
+    }), 'utf8')
+    expect(await new JsonSettingsRepository(paths).load()).toMatchObject({
+      ollamaEnabled: true,
+      apiEnabled: true,
+    })
+  })
+
   it('round-trips API profiles without writing plaintext keys and migrates legacy fields', async () => {
     const paths = await createPaths()
     const repository = new JsonSettingsRepository(paths)

@@ -1,4 +1,4 @@
-import { Box, PanelLeftClose, PanelLeftOpen, RefreshCw } from 'lucide-react'
+import { Box, Check, ChevronDown, PanelLeftClose, PanelLeftOpen, RefreshCw } from 'lucide-react'
 import {
   type SetStateAction,
   useCallback,
@@ -45,12 +45,14 @@ import { SettingsPanel } from './SettingsPanel'
 const DEFAULT_SETTINGS: DesktopSettings = {
   selectedModel: 'qwen3.5:9b-q4_K_M',
   models: ['qwen3.5:9b-q4_K_M'],
-  reasoningMode: 'fast',
+  reasoningMode: 'low',
   themeMode: 'system',
   disabledTools: [],
   fontScale: 1,
   contextWindowTokens: 32768,
   preferApiModel: false,
+  ollamaEnabled: true,
+  apiEnabled: true,
   apiProfiles: [],
   activeApiProfileId: null
 }
@@ -188,9 +190,14 @@ export default function App() {
   const [navisworksConnection, setNavisworksConnection] = useState(DEFAULT_NAVISWORKS_CONNECTION)
   // Round-trip latency of the last cloud connectivity test; null until run.
   const [cloudLatency, setCloudLatency] = useState<{ ok: boolean; ms: number } | null>(null)
-  // Context-ring usage of the active session: tokens of the last round plus
-  // the backend's cache hit rate, when it reports one.
-  const [contextUsage, setContextUsage] = useState<{ used: number; cacheHitRate?: number } | null>(null)
+  // Context-ring usage of the active session: tokens of the last round, the
+  // window that round actually budgeted against, and the backend's cache hit
+  // rate when it reports one.
+  const [contextUsage, setContextUsage] = useState<{
+    used: number
+    window?: number
+    cacheHitRate?: number
+  } | null>(null)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo>()
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
@@ -208,6 +215,7 @@ export default function App() {
   const [approvalResolving, setApprovalResolving] = useState(false)
   const [sessionTransitioning, setSessionTransitioning] = useState(false)
   const [deletingSessionId, setDeletingSessionId] = useState<string>()
+  const [navisworksMenuOpen, setNavisworksMenuOpen] = useState(false)
   const [loading, setLoading] = useState(serviceAvailable)
   const [notice, setNotice] = useState(serviceAvailable ? '' : '桌面服务未连接，请通过 Electron 启动应用。')
   // Notices float above every overlay and dismiss themselves after 3s.
@@ -554,6 +562,7 @@ export default function App() {
         if (typeof done.contextTokensUsed === 'number') {
           setContextUsage({
             used: done.contextTokensUsed,
+            ...(typeof done.contextWindowTokens === 'number' ? { window: done.contextWindowTokens } : {}),
             ...(typeof done.cacheHitRate === 'number' ? { cacheHitRate: done.cacheHitRate } : {})
           })
         }
@@ -916,10 +925,28 @@ export default function App() {
     }
   }
 
+  /**
+   * Re-runs the last prompt. sendText always APPENDS a fresh user+assistant
+   * pair, so the previous attempt — the prompt and everything after it — is
+   * dropped first; otherwise every retry stacks another copy of the same
+   * question in the transcript.
+   */
   const retryLast = () => {
-    if (!session) return
-    const lastUser = [...session.messages].reverse().find((message) => message.role === 'user')
-    if (lastUser) void sendText(lastUser.content)
+    const current = sessionRef.current
+    if (!current || busy) return
+    let lastUserIndex = -1
+    for (let index = current.messages.length - 1; index >= 0; index -= 1) {
+      if (current.messages[index]?.role === 'user') {
+        lastUserIndex = index
+        break
+      }
+    }
+    const lastUser = current.messages[lastUserIndex]
+    if (!lastUser) return
+    const truncated = { ...current, messages: current.messages.slice(0, lastUserIndex) }
+    sessionRef.current = truncated
+    setSession(truncated)
+    void sendText(lastUser.content)
   }
 
   return (
@@ -963,19 +990,25 @@ export default function App() {
               <Box aria-hidden="true" size={14} />
               <span className="status-copy">
                 {navisworksConnection.instances.length > 1 ? (
-                  <select
-                    className="navisworks-instance-select"
-                    aria-label="当前 Navisworks 实例"
-                    value={navisworksConnection.selectedInstanceId ?? ''}
+                  <button
+                    type="button"
+                    className="navisworks-instance-trigger"
                     disabled={busy || navisworksConnection.runningInstanceId !== undefined}
-                    onChange={(event) => void selectNavisworksInstance(event.target.value)}>
-                    {navisworksConnection.instances.map((instance) => (
-                      <option key={instance.instanceId} value={instance.instanceId}>
-                        {instance.documentName ?? '未命名文档'} · PID {instance.processId}
-                        {instance.connected ? '' : '（已断开）'}
-                      </option>
-                    ))}
-                  </select>
+                    aria-haspopup="true"
+                    aria-expanded={navisworksMenuOpen}
+                    onClick={() => setNavisworksMenuOpen((current) => !current)}>
+                    <strong>
+                      {(() => {
+                        const selected = navisworksConnection.instances.find(
+                          (instance) => instance.instanceId === navisworksConnection.selectedInstanceId
+                        )
+                        return selected
+                          ? `${selected.documentName ?? '未命名文档'} · PID ${selected.processId}`
+                          : 'Navisworks'
+                      })()}
+                    </strong>
+                    <ChevronDown aria-hidden="true" size={12} />
+                  </button>
                 ) : (
                   <strong>{navisworks.documentName ?? (navisworks.connected ? 'Navisworks 已连接' : 'Navisworks 未连接')}</strong>
                 )}
@@ -993,6 +1026,60 @@ export default function App() {
                   )
                 })()}
               </span>
+
+              {navisworksConnection.instances.length > 1 && navisworksMenuOpen ? (
+                <div className="navisworks-instance-menu">
+                  {navisworksConnection.instances.map((instance) => {
+                    const isSelected = instance.instanceId === navisworksConnection.selectedInstanceId
+                    const isDisconnected = !instance.connected
+                    return (
+                      <button
+                        key={instance.instanceId}
+                        type="button"
+                        className="instance-menu-item"
+                        data-selected={isSelected}
+                        data-disconnected={isDisconnected}
+                        disabled={isDisconnected || busy || navisworksConnection.runningInstanceId !== undefined}
+                        title={isDisconnected ? '已断开连接，无法切换' : undefined}
+                        onClick={() => {
+                          if (!isDisconnected) {
+                            void selectNavisworksInstance(instance.instanceId)
+                            setNavisworksMenuOpen(false)
+                          }
+                        }}>
+                        <span className="instance-menu-item-title">
+                          {instance.documentName ?? '未命名文档'}
+                        </span>
+                        <span className="instance-menu-item-meta">
+                          PID {instance.processId}
+                          {isDisconnected ? ' · 已断开' : ''}
+                        </span>
+                        {isSelected && !isDisconnected ? <Check aria-hidden="true" size={14} /> : null}
+                      </button>
+                    )
+                  })}
+                  <button
+                    type="button"
+                    className="instance-menu-action"
+                    disabled={busy}
+                    onClick={() => {
+                      void refreshNavisworks()
+                      setNavisworksMenuOpen(false)
+                    }}>
+                    <RefreshCw aria-hidden="true" size={14} className={busy ? 'running' : undefined} />
+                    刷新实例列表
+                  </button>
+                </div>
+              ) : null}
+
+              {navisworksMenuOpen ? (
+                <button
+                  type="button"
+                  className="navisworks-menu-backdrop"
+                  aria-label="关闭实例菜单"
+                  onClick={() => setNavisworksMenuOpen(false)}
+                />
+              ) : null}
             </div>
           </div>
         </header>
@@ -1106,7 +1193,7 @@ export default function App() {
           setSettings(saved)
           return saved
         }}
-        onModelChange={(selectedModel) => updateSettings({ ...settings, selectedModel })}
+        onModelChange={(selectedModel) => updateSettings({ ...settings, selectedModel, preferApiModel: false })}
         onDisabledToolsChange={(disabledTools) => updateSettings({ ...settings, disabledTools })}
         onRefreshModels={refreshModels}
         onFetchCloudModels={(profileId) => desktopGateway.listApiProfileModels(profileId)}

@@ -49,6 +49,7 @@ import {
   type DocumentChangeNotice,
 } from './agent/contextState'
 import { renderVerifiedFacts } from './agent/facts'
+import { localThinkForEffort, type ReasoningEffort } from '../shared/reasoning'
 import {
   DocumentOperationCoordinator,
   ToolExecutionLedger,
@@ -117,7 +118,7 @@ export interface AgentRunInput {
   text: string
   history?: readonly AgentHistoryEntry[]
   model?: string
-  reasoningMode?: 'fast' | 'deep'
+  reasoningMode?: ReasoningEffort
   disabledTools?: readonly string[]
   api?: ApiEndpointConfig
   /** P4: durable digest of earlier (compacted) turns, injected as a leading system block. */
@@ -156,6 +157,13 @@ export interface AgentRunResult {
   thinkingText?: string
   /** Cached prompt tokens / prompt tokens of the last round, when reported. */
   cacheHitRate?: number
+  /**
+   * The finite context window this run actually budgeted against — the local
+   * clamp for Ollama, the provider/model capability window (or the configured
+   * fallback) for API endpoints. Reported so the UI's usage ring measures
+   * against the real budget instead of guessing the provider's window.
+   */
+  contextWindowTokens?: number
   /** True when automatic context compaction ran during this run. */
   compacted?: boolean
   /** P4: the compact summary produced this run (if any), for durable persistence. */
@@ -261,9 +269,10 @@ export class AgentRuntime {
     const model = apiActive
       ? api!.model!.trim()
       : (input.model?.trim() || this.#model)
+    const effort = input.reasoningMode
     const think = apiActive
       ? false
-      : (input.reasoningMode === undefined ? this.#think : input.reasoningMode === 'deep')
+      : (effort === undefined ? this.#think : localThinkForEffort(effort))
     const tools = AGENT_TOOL_DEFINITIONS.filter((definition) => !disabledTools.has(definition.function.name))
     // A single execution scope id for this run; the P5 ledger attributes modifying calls
     // to it so crash recovery / approval re-checks can correlate a call with its run.
@@ -383,6 +392,7 @@ export class AgentRuntime {
           messages: built.messages,
           tools: built.tools,
           think,
+          ...(effort === undefined ? {} : { reasoningEffort: effort }),
           sampling: built.sampling,
           signal: options.signal,
           onDelta: (delta) => {
@@ -400,6 +410,7 @@ export class AgentRuntime {
               isSuccess: false,
               message: '模型没有返回文本或工具调用，请重试或更换模型。',
               contextTokensUsed: latestContextTokens,
+              contextWindowTokens: effectiveWindow,
               errorCode: 'MODEL_EMPTY_RESPONSE',
             }
           }
@@ -407,6 +418,7 @@ export class AgentRuntime {
             isSuccess: true,
             message: lastAssistantText,
             contextTokensUsed: latestContextTokens,
+            contextWindowTokens: effectiveWindow,
             ...(response.thinking.trim() ? { thinkingText: response.thinking } : {}),
             ...(latestCacheHitRate === undefined ? {} : { cacheHitRate: latestCacheHitRate }),
             ...(didCompactRun ? { compacted: true } : {}),
@@ -481,6 +493,7 @@ export class AgentRuntime {
         isSuccess: false,
         message: `工具调用超过 ${this.#maxToolRounds} 轮，已停止以避免循环。请缩小指令范围后重试。`,
         contextTokensUsed: latestContextTokens,
+        contextWindowTokens: effectiveWindow,
         ...(didCompactRun ? { compacted: true } : {}),
         ...(capturedSummary === undefined || capturedSummary === '' ? {} : { compactSummary: capturedSummary }),
         errorCode: 'TOOL_ROUND_LIMIT',
@@ -494,6 +507,7 @@ export class AgentRuntime {
           isSuccess: false,
           message: error.message,
           contextTokensUsed: latestContextTokens,
+          contextWindowTokens: effectiveWindow,
           errorCode: error.code,
         }
       }
@@ -502,6 +516,7 @@ export class AgentRuntime {
           isSuccess: false,
           message: error.message,
           contextTokensUsed: latestContextTokens,
+          contextWindowTokens: effectiveWindow,
           errorCode: error.code,
         }
       }
@@ -509,6 +524,7 @@ export class AgentRuntime {
         isSuccess: false,
         message: `模型调用失败：${errorMessage(error)}`,
         contextTokensUsed: latestContextTokens,
+        contextWindowTokens: effectiveWindow,
         errorCode: 'MODEL_ERROR',
       }
     }
@@ -553,13 +569,12 @@ export class AgentRuntime {
           const message = '上一次相同修改的结果不确定，已阻止自动重试。请先确认当前状态，或明确要求仍然执行。'
           return {
             error: { code: 'AMBIGUOUS_RETRY_BLOCKED', message, ambiguousOutcome: true },
-            wire: {
-              status: 'error',
-              tool: toolCall.name,
-              code: 'AMBIGUOUS_RETRY_BLOCKED',
-              summary: message,
-              ambiguousOutcome: true,
-            },
+            wire: buildToolErrorObservation(
+              toolCall.name,
+              'AMBIGUOUS_RETRY_BLOCKED',
+              message,
+              true,
+            ),
           }
         }
         await ledger?.begin({
@@ -599,7 +614,7 @@ export class AgentRuntime {
           const message = '用户取消了本次视图操作。'
           return {
             error: { code: 'TOOL_CANCELLED', message },
-            wire: { status: 'error', tool: toolCall.name, code: 'TOOL_CANCELLED', summary: message },
+            wire: buildToolErrorObservation(toolCall.name, 'TOOL_CANCELLED', message),
           }
         }
         throwIfAborted(signal)
@@ -617,7 +632,7 @@ export class AgentRuntime {
             const message = '当前 Navisworks 目标已变化，本次操作已取消。'
             return {
               error: { code: 'TARGET_CHANGED', message },
-              wire: { status: 'error', tool: toolCall.name, code: 'TARGET_CHANGED', summary: message },
+              wire: buildToolErrorObservation(toolCall.name, 'TARGET_CHANGED', message),
             }
           }
         } else if (this.#contextState !== undefined
@@ -626,7 +641,7 @@ export class AgentRuntime {
           const message = '文档已变化，已取消本次视图操作，请重新选择目标后重试。'
           return {
             error: { code: 'DOCUMENT_CHANGED', message },
-            wire: { status: 'error', tool: toolCall.name, code: 'DOCUMENT_CHANGED', summary: message },
+            wire: buildToolErrorObservation(toolCall.name, 'DOCUMENT_CHANGED', message),
           }
         }
         if (hashArguments(normalizedArguments) !== argumentsHash) {
@@ -634,7 +649,7 @@ export class AgentRuntime {
           const message = '工具参数在审批后发生变化，已取消执行。'
           return {
             error: { code: 'ARGUMENTS_CHANGED', message },
-            wire: { status: 'error', tool: toolCall.name, code: 'ARGUMENTS_CHANGED', summary: message },
+            wire: buildToolErrorObservation(toolCall.name, 'ARGUMENTS_CHANGED', message),
           }
         }
         if (ambiguous !== undefined) {
@@ -677,7 +692,7 @@ export class AgentRuntime {
       if (isModifying) await ledger?.mark(runId, toolCall.id, 'success')
       return {
         result,
-        wire: { status: 'success', tool: toolCall.name, result },
+        wire: buildToolSuccessObservation(toolCall.name, result),
       }
     } catch (error) {
       if (error instanceof NavisworksTargetError) {
@@ -727,17 +742,7 @@ export class AgentRuntime {
       const errorShape = { code, message, ambiguousOutcome }
       return {
         error: errorShape,
-        wire: {
-          status: 'error',
-          tool: toolCall.name,
-          code,
-          summary: message,
-          ambiguousOutcome,
-          next_actions: [
-            '确认 Navisworks Manage 2023 已启动。',
-            '确认模型文档已打开，并已加载 Navisworks MCP 插件。',
-          ],
-        },
+        wire: buildToolErrorObservation(toolCall.name, code, message, ambiguousOutcome),
       }
     }
   }
@@ -879,6 +884,122 @@ function normalizeHistory(history: readonly AgentHistoryEntry[]): ChatMessage[] 
 
 function hasExplicitAmbiguousRetryConfirmation(input: string): boolean {
   return /(?:仍然|继续|再次|重新)执行|确认重试/.test(input)
+}
+
+function buildToolSuccessObservation(toolName: string, result: unknown): Record<string, unknown> {
+  const record = payloadIsRecord(result) ? result : undefined
+  return {
+    status: 'success',
+    tool: toolName,
+    summary: summarizeToolSuccess(toolName, record),
+    next_actions: toolSuccessNextActions(toolName, record),
+    artifacts: collectToolArtifacts(record),
+    result,
+  }
+}
+
+function summarizeToolSuccess(
+  toolName: string,
+  result: Record<string, unknown> | undefined,
+): string {
+  if (toolName === 'navisworks_status' && typeof result?.connected === 'boolean') {
+    return result.connected ? 'Navisworks 已连接。' : 'Navisworks 未连接。'
+  }
+  if (toolName === 'navisworks_find_items') {
+    const count = Array.isArray(result?.items) ? result.items.length : 0
+    const total = typeof result?.total === 'number' ? result.total : undefined
+    const totalText = total === undefined ? '' : `，共 ${total} 个`
+    const truncatedText = result?.truncated === true ? '，结果尚未完整' : ''
+    return `搜索完成：返回 ${count} 个构件${totalText}${truncatedText}。`
+  }
+  if (toolName === 'navisworks_get_selection') {
+    const count = Array.isArray(result?.items)
+      ? result.items.length
+      : (typeof result?.selectionCount === 'number' ? result.selectionCount : 0)
+    return `已读取当前选择：${count} 个构件。`
+  }
+  if (toolName === 'navisworks_list_viewpoints') {
+    const count = Array.isArray(result?.viewpoints) ? result.viewpoints.length : 0
+    return `已读取保存视点：返回 ${count} 个。`
+  }
+  if (toolName === 'navisworks_get_item_properties') {
+    const count = Array.isArray(result?.items) ? result.items.length : 0
+    return `已读取 ${count} 个构件的属性。`
+  }
+  return `${toolName} 执行成功。`
+}
+
+function toolSuccessNextActions(
+  toolName: string,
+  result: Record<string, unknown> | undefined,
+): string[] {
+  if (result?.truncated !== true) return []
+  if (toolName === 'navisworks_find_items') {
+    return ['如果任务仍需要更多结果，使用完全相同的搜索参数继续调用 navisworks_find_items；否则停止续查并回答。']
+  }
+  return ['结果未完整；仅在当前任务确实需要更多数据时继续分页。']
+}
+
+function collectToolArtifacts(result: Record<string, unknown> | undefined): string[] {
+  if (result === undefined) return []
+  const artifacts = new Set<string>()
+  for (const key of ['items', 'viewpoints', 'results']) {
+    const entries = result[key]
+    if (!Array.isArray(entries)) continue
+    for (const entry of entries) {
+      if (!payloadIsRecord(entry)) continue
+      const id = entry.id ?? entry.itemId ?? entry.viewpointId ?? entry.guid
+      if (typeof id === 'string' && id.trim()) artifacts.add(id.trim())
+      if (artifacts.size >= 20) return [...artifacts]
+    }
+  }
+  return [...artifacts]
+}
+
+function buildToolErrorObservation(
+  toolName: string,
+  code: string,
+  summary: string,
+  ambiguousOutcome?: boolean,
+): Record<string, unknown> {
+  return {
+    status: 'error',
+    tool: toolName,
+    code,
+    summary,
+    next_actions: toolErrorNextActions(code),
+    artifacts: [],
+    ...(ambiguousOutcome === undefined ? {} : { ambiguousOutcome }),
+  }
+}
+
+function toolErrorNextActions(code: string): string[] {
+  switch (code) {
+    case 'AMBIGUOUS_RETRY_BLOCKED':
+      return [
+        '先调用只读工具确认当前状态。',
+        '除非用户明确确认仍要执行，否则停止并不得自动重试相同修改。',
+      ]
+    case 'TOOL_CANCELLED':
+      return ['停止本次修改，等待用户给出新的明确指令。']
+    case 'TARGET_CHANGED':
+    case 'DOCUMENT_CHANGED':
+    case 'INSTANCE_CHANGED':
+      return [
+        '重新读取当前 Navisworks 目标和文档状态后再规划。',
+        '不得自动重试原修改操作。',
+      ]
+    case 'ARGUMENTS_CHANGED':
+      return ['重新生成稳定参数，并对修改操作重新请求审批。']
+    case 'TOOL_NOT_ALLOWED':
+      return ['改用允许列表中的最小必要工具；不需要实时数据时直接回答。']
+    default:
+      return [
+        '确认 Navisworks Manage 2023 已启动。',
+        '确认模型文档已打开，并已加载 Navisworks MCP 插件。',
+        '如果条件未变且相同错误再次出现，停止重试并向用户说明。',
+      ]
+  }
 }
 
 function truncateToolResult(toolName: string, result: string): string {

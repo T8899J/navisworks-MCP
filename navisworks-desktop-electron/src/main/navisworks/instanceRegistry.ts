@@ -1,4 +1,4 @@
-import { readdir, rm } from 'node:fs/promises'
+import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 
 import {
@@ -28,7 +28,6 @@ export interface NavisworksInstanceRegistryOptions {
   bridge: NavisworksBridgeClient
   endpointsDirectory?: string
   legacyEndpointFile?: string
-  staleFailureThreshold?: number
   now?: () => number
 }
 
@@ -37,17 +36,15 @@ export class NavisworksInstanceRegistry {
   readonly #bridge: NavisworksBridgeClient
   readonly #endpointsDirectory: string
   readonly #legacyEndpointFile: string
-  readonly #staleFailureThreshold: number
   readonly #now: () => number
-  readonly #failureCounts = new Map<string, number>()
   readonly #instanceIdByEndpointFile = new Map<string, string>()
   #instances = new Map<string, DiscoveredNavisworksInstance>()
+  #refreshInFlight: Promise<NavisworksInstance[]> | undefined
 
   constructor(options: NavisworksInstanceRegistryOptions) {
     this.#bridge = options.bridge
     this.#endpointsDirectory = options.endpointsDirectory ?? resolveBridgeEndpointsDirectory()
     this.#legacyEndpointFile = options.legacyEndpointFile ?? resolveBridgeEndpointFile()
-    this.#staleFailureThreshold = options.staleFailureThreshold ?? 2
     this.#now = options.now ?? Date.now
   }
 
@@ -60,7 +57,16 @@ export class NavisworksInstanceRegistry {
     return instance === undefined ? undefined : cloneDiscovered(instance)
   }
 
-  async refresh(): Promise<NavisworksInstance[]> {
+  refresh(): Promise<NavisworksInstance[]> {
+    if (this.#refreshInFlight !== undefined) return this.#refreshInFlight
+    const pending = this.#doRefresh().finally(() => {
+      if (this.#refreshInFlight === pending) this.#refreshInFlight = undefined
+    })
+    this.#refreshInFlight = pending
+    return pending
+  }
+
+  async #doRefresh(): Promise<NavisworksInstance[]> {
     const endpointFiles = await this.#listEndpointFiles()
     const discovered = await Promise.all(endpointFiles.map((file) => this.#inspectEndpoint(file)))
     this.#instances = new Map(
@@ -95,7 +101,6 @@ export class NavisworksInstanceRegistry {
     try {
       endpoint = await readBridgeEndpoint(file)
     } catch {
-      await this.#recordFailure(file)
       return undefined
     }
 
@@ -103,7 +108,6 @@ export class NavisworksInstanceRegistry {
     try {
       const status = await new NavisworksInstanceClient(endpoint, this.#bridge)
         .call<NavisworksStatusRecord>('navisworks_status')
-      this.#failureCounts.delete(file)
       const bridgeSessionId = stringValue(status.bridgeSessionId)
       const instanceId = bridgeSessionId ?? fallbackId
       this.#instanceIdByEndpointFile.set(file, instanceId)
@@ -128,7 +132,6 @@ export class NavisworksInstanceRegistry {
     } catch {
       const instanceId = this.#instanceIdByEndpointFile.get(file) ?? fallbackId
       const previous = this.#instances.get(instanceId)
-      await this.#recordFailure(file)
       return {
         instanceId,
         processId: endpoint.ProcessId,
@@ -146,15 +149,6 @@ export class NavisworksInstanceRegistry {
         endpoint: { ...endpoint },
       }
     }
-  }
-
-  async #recordFailure(file: string): Promise<void> {
-    const count = (this.#failureCounts.get(file) ?? 0) + 1
-    this.#failureCounts.set(file, count)
-    if (count < this.#staleFailureThreshold) return
-    await rm(file, { force: true }).catch(() => undefined)
-    this.#failureCounts.delete(file)
-    this.#instanceIdByEndpointFile.delete(file)
   }
 }
 

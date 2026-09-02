@@ -114,6 +114,31 @@ describe('OpenAICompatibleProvider', () => {
     })
   })
 
+  it('sends the reasoning effort verbatim when provided', async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return sseResponse([
+        { choices: [{ delta: { content: '好。' } }] },
+      ])
+    }) as unknown as typeof fetch
+    const provider = new OpenAICompatibleProvider({ baseUrl: BASE, fetchImpl })
+
+    await provider.complete({
+      model: 'qwen-plus',
+      messages: [{ role: 'user', content: 'hi' }],
+      reasoningEffort: 'xhigh',
+    })
+    expect(bodies[0]?.reasoning_effort).toBe('xhigh')
+
+    // A request without an effort step must not add the field.
+    await provider.complete({
+      model: 'qwen-plus',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    expect(bodies[1]).not.toHaveProperty('reasoning_effort')
+  })
+
   it('sends bearer auth only when an api key is configured', async () => {
     const seenHeaders: Array<Record<string, unknown>> = []
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {

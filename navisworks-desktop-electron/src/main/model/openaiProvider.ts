@@ -120,6 +120,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
     if (request.tools?.length) {
       body.tools = request.tools.map(({ impact: _impact, ...definition }) => definition)
     }
+    // Five-step effort picked in the composer; tolerant gateways consume it,
+    // endpoints without reasoning support ignore the unknown field.
+    if (request.reasoningEffort !== undefined) {
+      body.reasoning_effort = request.reasoningEffort
+    }
 
     const timeoutController = new AbortController()
     const timeout = setTimeout(() => {

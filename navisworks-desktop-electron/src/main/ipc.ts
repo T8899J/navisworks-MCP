@@ -33,6 +33,7 @@ import type { Scope } from './kernel/kernel'
 import { externalizeResult, isExternalizedResult, resolveResult } from './agent/toolResultStore'
 import type { SemanticMemory } from './agent/semanticMemory'
 import { validateSender, type SenderTrustOptions } from './security/validateSender'
+import { normalizeReasoningEffort } from '../shared/reasoning'
 import {
   DesktopIpcError,
   IPC_EVENT_CHANNEL,
@@ -52,6 +53,7 @@ import {
   type NavisworksStatus,
   type NavisworksConnectionState,
   type OutputFor,
+  type ReasoningEffort,
   type RuntimeInfo,
   type Session,
   type SessionSummary,
@@ -80,7 +82,7 @@ export interface OllamaRunInput {
   text: string
   history: readonly OllamaHistoryEntry[]
   model?: string
-  reasoningMode?: 'fast' | 'deep'
+  reasoningMode?: ReasoningEffort
   /** Tool names switched off in settings; honored fresh on every request. */
   disabledTools?: readonly string[]
   /** API endpoint, read fresh from settings on every run. */
@@ -108,6 +110,8 @@ export interface OllamaRunResult {
   /** Prompt + completion tokens of the last model round, when reported. */
   contextTokensUsed?: number
   cacheHitRate?: number
+  /** Finite context window the run budgeted against; drives the UI usage ring. */
+  contextWindowTokens?: number
   /** True when automatic context compaction ran during this run. */
   compacted?: boolean
   /** P4: the summary produced by this run's compaction, for durable persistence. */
@@ -324,9 +328,7 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       }
 
       const settings = await persistence.getSettings()
-      const activeEndpoint = settings.preferApiModel
-        ? await persistence.getApiEndpoint(settings.activeApiProfileId)
-        : null
+      const activeEndpoint = await resolveChatEndpoint(persistence, settings)
       const summary = await compactFn(
         messages,
         {
@@ -622,9 +624,7 @@ export class ChatRunRegistry {
         throw controller.signal.reason
       }
       const disabledTools = settings.disabledTools
-      const activeEndpoint = settings.preferApiModel
-        ? await this.persistence.getApiEndpoint(settings.activeApiProfileId)
-        : null
+      const activeEndpoint = await resolveChatEndpoint(this.persistence, settings)
       const result = await this.agent.run(
         {
           sessionId: input.sessionId,
@@ -693,6 +693,7 @@ export class ChatRunRegistry {
         ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText }),
         ...(result.contextTokensUsed === undefined ? {} : { contextTokensUsed: result.contextTokensUsed }),
         ...(result.cacheHitRate === undefined ? {} : { cacheHitRate: result.cacheHitRate }),
+        ...(result.contextWindowTokens === undefined ? {} : { contextWindowTokens: result.contextWindowTokens }),
         ...(result.compacted ? { compacted: true } : {})
       })
     } catch (error) {
@@ -1029,12 +1030,14 @@ export class PersistenceFacade {
         ...current,
         selectedModel,
         models: models.includes(selectedModel) ? [...models] : [selectedModel, ...models],
-        reasoningMode: patch.reasoningMode ?? current.reasoningMode ?? 'fast',
+        reasoningMode: normalizeReasoningEffort(patch.reasoningMode ?? current.reasoningMode),
         themeMode: patch.themeMode ?? current.themeMode ?? 'system',
         disabledTools: patch.disabledTools ?? current.disabledTools,
         fontScale: patch.fontScale ?? current.fontScale ?? 1,
         contextWindowTokens: patch.contextWindowTokens ?? current.contextWindowTokens ?? 32768,
         preferApiModel: patch.preferApiModel ?? current.preferApiModel ?? false,
+        ollamaEnabled: patch.ollamaEnabled ?? current.ollamaEnabled ?? true,
+        apiEnabled: patch.apiEnabled ?? current.apiEnabled ?? true,
         activeApiProfileId: validProfileId(
           patch.activeApiProfileId,
           current.activeApiProfileId,
@@ -1318,7 +1321,7 @@ function defaultPersistedSettings(): PersistedSettings {
     models: ['qwen3.5:9b-q4_K_M'],
     plugins: [],
     skills: [],
-    reasoningMode: 'fast',
+    reasoningMode: 'low',
     activeSessionId: null,
     gpuVramGb: 8,
     contextWindowTokens: 32768,
@@ -1327,13 +1330,15 @@ function defaultPersistedSettings(): PersistedSettings {
     disabledTools: [],
     fontScale: 1,
     preferApiModel: false,
+    ollamaEnabled: true,
+    apiEnabled: true,
     apiProfiles: [],
     activeApiProfileId: null
   }
 }
 
 function toDesktopSettings(settings: PersistedSettings): AppSettings {
-  const reasoningMode = settings.reasoningMode === 'deep' ? 'deep' : 'fast'
+  const reasoningMode = normalizeReasoningEffort(settings.reasoningMode)
   const models = settings.models.includes(settings.selectedModel)
     ? [...settings.models]
     : [settings.selectedModel, ...settings.models]
@@ -1348,6 +1353,8 @@ function toDesktopSettings(settings: PersistedSettings): AppSettings {
     fontScale: Math.min(1.3, Math.max(0.85, settings.fontScale ?? 1)),
     contextWindowTokens: settings.contextWindowTokens ?? 32768,
     preferApiModel: settings.preferApiModel ?? false,
+    ollamaEnabled: settings.ollamaEnabled ?? true,
+    apiEnabled: settings.apiEnabled ?? true,
     apiProfiles: apiProfiles.map((profile): ApiProfile => ({
       id: profile.id,
       name: profile.name,
@@ -1362,6 +1369,27 @@ function toDesktopSettings(settings: PersistedSettings): AppSettings {
 const unavailableSecretProtector: SecretProtector = {
   encrypt: () => { throw new Error('Secure storage unavailable') },
   decrypt: () => { throw new Error('Secure storage unavailable') },
+}
+
+/**
+ * Picks the endpoint a chat should run on from the provider switches. `null`
+ * means local Ollama serves the request. Throws when neither provider can —
+ * both switches off, or local off and no usable API profile — so the user
+ * gets an explicit error instead of a silent fallback.
+ */
+async function resolveChatEndpoint(
+  persistence: Pick<PersistenceFacade, 'getApiEndpoint'>,
+  settings: AppSettings,
+): Promise<(OllamaEndpointOptions & { model: string }) | null> {
+  if (settings.apiEnabled && (settings.preferApiModel || !settings.ollamaEnabled)) {
+    const endpoint = await persistence.getApiEndpoint(settings.activeApiProfileId)
+    if (endpoint) return endpoint
+  }
+  if (settings.ollamaEnabled) return null
+  throw new DesktopIpcError(
+    'SERVICE_UNAVAILABLE',
+    '本地 Ollama 与 API 均已停用，请在设置中启用其中一个模型提供方。'
+  )
 }
 
 function validProfileId(

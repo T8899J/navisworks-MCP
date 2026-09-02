@@ -10,6 +10,23 @@ function ndjsonResponse(chunks: Array<Record<string, unknown>>): Response {
   })
 }
 
+function toolMessageContent(body?: Record<string, unknown>): string {
+  const messages = body?.messages
+  if (!Array.isArray(messages)) return ''
+  const toolMessage = messages.find((message) => (
+    typeof message === 'object'
+    && message !== null
+    && 'role' in message
+    && message.role === 'tool'
+  ))
+  return typeof toolMessage === 'object'
+    && toolMessage !== null
+    && 'content' in toolMessage
+    && typeof toolMessage.content === 'string'
+    ? toolMessage.content
+    : ''
+}
+
 describe('AgentRuntime streaming tool loop', () => {
   it('executes an allowed tool then returns the second-round answer', async () => {
     let bridgeCalls = 0
@@ -58,6 +75,9 @@ describe('AgentRuntime streaming tool loop', () => {
       isSuccess: true,
       message: 'Navisworks 已连接。',
       contextTokensUsed: 38,
+      // No contextWindow was configured, so the local clamp's ceiling is the
+      // budget this run reported back for the UI's usage ring.
+      contextWindowTokens: 32768,
     })
     expect(bridgeCalls).toBe(1)
     expect(events).toEqual([
@@ -68,7 +88,14 @@ describe('AgentRuntime streaming tool loop', () => {
     ])
     expect(requestBodies).toHaveLength(2)
     expect(requestBodies[0]?.stream).toBe(true)
-    expect(JSON.stringify(requestBodies[1])).toContain('"role":"tool"')
+    const observation = JSON.parse(toolMessageContent(requestBodies[1])) as Record<string, unknown>
+    expect(observation).toMatchObject({
+      status: 'success',
+      tool: 'navisworks_status',
+      summary: 'Navisworks 已连接。',
+      next_actions: [],
+      artifacts: [],
+    })
   })
 
   it('forwards thinking deltas and returns the accumulated thinking text', async () => {
@@ -222,6 +249,7 @@ describe('AgentRuntime streaming tool loop', () => {
     expect(tools.length).toBeGreaterThan(0) // the other eight are still offered
     expect(bridgeCalls).toEqual([]) // the disabled call never reached the bridge
     expect(JSON.stringify(requestBodies[1])).toContain('工具已被用户禁用')
+    expect(JSON.stringify(requestBodies[1])).toContain('改用允许列表中的最小必要工具')
     expect(result.isSuccess).toBe(true)
   })
 
@@ -416,7 +444,9 @@ describe('AgentRuntime streaming tool loop', () => {
 
   it('adds a structural digest to a truncated oversized tool result', async () => {
     const bigItems = Array.from({ length: 200 }, (_, i) => ({ id: `id${i}`, name: `泵体-${i}` }))
-    const bridge: AgentBridgeClient = { async call<T>() { return { items: bigItems } as T } }
+    const bridge: AgentBridgeClient = {
+      async call<T>() { return { items: bigItems, total: 300, truncated: true } as T },
+    }
     const bodies: Array<Record<string, unknown>> = []
     let round = 0
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -430,10 +460,62 @@ describe('AgentRuntime streaming tool loop', () => {
       return ndjsonResponse([{ message: { role: 'assistant', content: '完成。' }, prompt_eval_count: 20, eval_count: 1 }])
     }) as unknown as typeof fetch
     await new AgentRuntime({ bridgeClient: bridge, fetchImpl }).run('查大量构件')
-    const toolMessage = JSON.stringify(bodies[1]?.messages)
+    const toolMessage = toolMessageContent(bodies[1])
     // The oversized wire result was sliced, but the notice still reports the item count and
     // that the full payload remains locally recallable (P3-C: not a blind slice).
     expect(toolMessage).toContain('结构：items=200')
     expect(toolMessage).toContain('完整结果仍保留在本地')
+    expect(toolMessage).toContain('搜索完成：返回 200 个构件，共 300 个，结果尚未完整。')
+    expect(toolMessage).toContain('使用完全相同的搜索参数继续调用 navisworks_find_items')
+    expect(toolMessage).toContain('"artifacts":["id0","id1"')
+  })
+
+  it('maps the reasoning effort onto the local think flag', async () => {
+    const bridge: AgentBridgeClient = {
+      async call<T>() { return { connected: true, hasDocument: true } as T },
+    }
+    const bodies: Array<Record<string, unknown>> = []
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return ndjsonResponse([
+        { message: { role: 'assistant', content: '答。' }, done: true, prompt_eval_count: 10, eval_count: 2 },
+      ])
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl })
+
+    await runtime.run({ text: '你好', reasoningMode: 'max' })
+    await runtime.run({ text: '你好', reasoningMode: 'low' })
+
+    expect(bodies[0]?.think).toBe(true)
+    expect(bodies[1]?.think).toBe(false)
+  })
+
+  it('sends the reasoning effort verbatim on API runs', async () => {
+    const bridge: AgentBridgeClient = {
+      async call<T>() { return { connected: true, hasDocument: true } as T },
+    }
+    const urls: string[] = []
+    const bodies: Array<Record<string, unknown>> = []
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      urls.push(String(url))
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"云端回答"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}\n\ndata: [DONE]\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      )
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl })
+
+    const result = await runtime.run({
+      text: '你好',
+      reasoningMode: 'xhigh',
+      api: { baseUrl: 'https://cloud.example.com/v1', model: 'qwen-plus' },
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(urls[0]).toBe('https://cloud.example.com/v1/chat/completions')
+    expect(bodies[0]?.reasoning_effort).toBe('xhigh')
+    // The OpenAI wire never carries Ollama's think flag.
+    expect(bodies[0]).not.toHaveProperty('think')
   })
 })

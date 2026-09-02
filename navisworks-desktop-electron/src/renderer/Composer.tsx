@@ -1,10 +1,16 @@
-import { Check, ChevronLeft, ChevronRight, ChevronUp, CircleStop, Gauge, Send, ShieldAlert, Sparkles } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, CircleStop, Gauge, Send, ShieldAlert } from 'lucide-react'
 import { type KeyboardEvent, type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import {
+  REASONING_EFFORTS,
+  REASONING_EFFORT_LABEL,
+  localDisplayEffort,
+  type ReasoningEffort,
+} from '../shared/reasoning'
 import type { DesktopSettings, ToolApprovalRequest } from './chatTypes'
 import { ConversationColumn } from './ConversationColumn'
+import { EffortSlider } from './EffortSlider'
 import { pickHeroTitle } from './heroTitles'
 
-const REASONING_LABEL = { fast: '快速', deep: '深度' } as const
 const LOCAL_MAX_CONTEXT_TOKENS = 32768
 
 /** Slash commands available from the composer input. */
@@ -32,8 +38,12 @@ interface ComposerProps {
   busy: boolean
   settings: DesktopSettings
   serviceAvailable: boolean
-  /** Token usage of the active session's last reply (context-ring data). */
-  contextUsage?: { used: number; cacheHitRate?: number } | null
+  /**
+   * Token usage of the active session's last reply (context-ring data).
+   * `window` is the budget that reply actually ran against, as reported by the
+   * runtime; absent until the first reply of the session lands.
+   */
+  contextUsage?: { used: number; window?: number; cacheHitRate?: number } | null
   approval?: ToolApprovalRequest | null
   approvalResolving?: boolean
   onDraftChange(value: string): void
@@ -45,7 +55,7 @@ interface ComposerProps {
   onApiModelPick(profileId: string): void
   /** Runs a slash command (e.g. /compact) against the active session. */
   onSlashCommand(cmd: string): void
-  onReasoningChange(mode: 'fast' | 'deep'): void
+  onReasoningChange(mode: ReasoningEffort): void
 }
 
 export function Composer({
@@ -72,18 +82,37 @@ export function Composer({
   const activeApiProfile = settings.apiProfiles.find(
     (profile) => profile.id === settings.activeApiProfileId
   )
+  // Mirror the main-process routing (ipc.ts resolveChatEndpoint) so the shown
+  // model is the one that will actually serve the next run.
   const usingApi = Boolean(
-    settings.preferApiModel
+    settings.apiEnabled
+    && (settings.preferApiModel || !settings.ollamaEnabled)
     && activeApiProfile?.baseUrl.trim()
     && activeApiProfile.model.trim()
   )
   const activeModel = usingApi ? activeApiProfile!.model : settings.selectedModel
-  // Context-window badge: API models advertise 1M; local models top out at
-  // 32K (the runtime caps num_ctx to the same value).
-  const contextTotal = usingApi
-    ? 1_000_000
+  // Effort slider steps: five for API models, only the two extremes for the
+  // local daemon (Low → fast, Max → deep). A middle step persisted from an
+  // API run displays as its local equivalent while local is active.
+  const effortTicks: readonly ReasoningEffort[] = usingApi
+    ? REASONING_EFFORTS
+    : (['low', 'max'] as const)
+  const activeEffort = usingApi ? settings.reasoningMode : localDisplayEffort(settings.reasoningMode)
+  const effortIndex = Math.max(0, effortTicks.indexOf(activeEffort))
+  // Context-window budget. The runtime reports the window each finished run
+  // actually budgeted against, so the ring measures the real thing rather than
+  // assuming a provider window. Before the first reply of a session lands,
+  // mirror the runtime's own fallback (agentRuntime.run): the local clamp for
+  // Ollama, the configured window for an API endpoint that advertises none —
+  // a cloud run is never assumed to be a fixed 1M.
+  const fallbackContextTotal = usingApi
+    ? Math.max(1024, settings.contextWindowTokens)
     : Math.min(settings.contextWindowTokens, LOCAL_MAX_CONTEXT_TOKENS)
-  const contextLabel = usingApi ? '1M' : formatContextLabel(contextTotal)
+  const reportedWindow = contextUsage?.window
+  const contextTotal = reportedWindow !== undefined && reportedWindow > 0
+    ? reportedWindow
+    : fallbackContextTotal
+  const contextLabel = formatContextLabel(contextTotal)
   const usedTokens = contextUsage?.used ?? 0
   const contextPct = usedTokens > 0 ? Math.min(100, (usedTokens / contextTotal) * 100) : 0
   const ringCircumference = 2 * Math.PI * 9
@@ -92,10 +121,13 @@ export function Composer({
   const panelRef = useRef<HTMLDivElement>(null)
   const [isComposing, setIsComposing] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [expanded, setExpanded] = useState<'model' | 'reasoning' | null>(null)
-  // The option list cascades sideways; it opens to the right only when the
-  // panel sits too close to the window's left edge for a left cascade.
-  const [cascadeSide, setCascadeSide] = useState<'left' | 'right'>('left')
+  /**
+   * Two views inside the same panel: `'effort'` shows the purple-neon pill
+   * with model/mode label and drag handle; `'model'` swaps the pill for a
+   * full-bleed model list. Closing the menu resets this back to effort so
+   * a fresh open always lands on the pill.
+   */
+  const [pickerMode, setPickerMode] = useState<'effort' | 'model'>('effort')
   const canSend = serviceAvailable && !busy && draft.trim().length > 0
   // Slash command mode: "/" as the first character opens the command menu
   // above the input (until a space turns the text into a normal message).
@@ -149,28 +181,22 @@ export function Composer({
     }
   }, [menuOpen])
 
-  // Pick the cascade direction once per expansion: the submenu (~216px wide)
-  // opens left by default, right when the panel hugs the window's left edge.
+  // A closed panel must reopen on the effort pill, never mid-model-list.
   useEffect(() => {
-    if (!menuOpen || !expanded) return
-    const panel = panelRef.current
-    if (!panel) return
-    const left = panel.getBoundingClientRect().left
-    setCascadeSide(left < 240 ? 'right' : 'left')
-  }, [menuOpen, expanded])
-
-  // A menu closed without picking anything must not resurrect its last-hovered
-  // cascade card on reopen; section expansion lives only while the panel is open.
-  useEffect(() => {
-    if (!menuOpen) setExpanded(null)
+    if (!menuOpen) setPickerMode('effort')
   }, [menuOpen])
 
   const closeMenu = () => {
     setMenuOpen(false)
-    setExpanded(null)
+    setPickerMode('effort')
   }
+  // The local daemon only knows two effort steps (Low → fast, Max → deep).
+  // Switching to a local model writes the two-step equivalent of any middle
+  // step so the persisted value always matches what the runtime applies.
   const pickModel = (model: string) => {
     onModelChange(model)
+    const compatible = localDisplayEffort(settings.reasoningMode)
+    if (compatible !== settings.reasoningMode) onReasoningChange(compatible)
     closeMenu()
   }
   const pickApiModel = (profileId: string) => {
@@ -183,9 +209,8 @@ export function Composer({
   }
   const isSlashCommandDraft = slashQuery !== null
     && SLASH_COMMANDS.some((command) => command.cmd === slashQuery.trim())
-  const pickReasoning = (mode: 'fast' | 'deep') => {
-    onReasoningChange(mode)
-    closeMenu()
+  const pickEffort = (effort: ReasoningEffort) => {
+    if (effort !== settings.reasoningMode) onReasoningChange(effort)
   }
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -285,9 +310,11 @@ export function Composer({
                   active model's window; hover shows the details panel. */}
               <span
                 className={`context-ring${usingApi ? ' api' : ''}`}
-                title={usingApi
-                  ? `上下文窗口 ${contextLabel}（API 模型）`
-                  : `上下文窗口 ${contextLabel}（本地模型最高 32K）`}>
+                title={reportedWindow !== undefined && reportedWindow > 0
+                  ? `上下文窗口 ${contextLabel}（本轮实际预算）`
+                  : usingApi
+                    ? `上下文窗口 ${contextLabel}（预算回退值，可能低于模型上限）`
+                    : `上下文窗口 ${contextLabel}（本地模型最高 32K）`}>
                 <svg viewBox="0 0 22 22" aria-hidden="true">
                   <circle className="context-ring-track" cx="11" cy="11" r="9" />
                   {contextPct > 0 ? (
@@ -329,38 +356,56 @@ export function Composer({
                 className="composer-menu-trigger"
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
-                title={`${activeModel} · ${REASONING_LABEL[settings.reasoningMode]}`}
+                title={`${activeModel} · ${REASONING_EFFORT_LABEL[activeEffort]}`}
                 onClick={() => setMenuOpen((open) => !open)}>
-                <Sparkles aria-hidden="true" size={13} />
                 <span className="composer-menu-trigger-model">{activeModel}</span>
                 <span className="composer-menu-trigger-sep" aria-hidden="true">·</span>
-                <span className="composer-menu-trigger-mode">{REASONING_LABEL[settings.reasoningMode]}</span>
-                <ChevronUp aria-hidden="true" size={13} className={menuOpen ? 'flipped' : undefined} />
+                <span className="composer-menu-trigger-mode">{REASONING_EFFORT_LABEL[activeEffort]}</span>
               </button>
 
               <div
                 className={`composer-menu-panel${menuOpen ? ' open' : ''}`}
-                role="menu"
                 aria-hidden={!menuOpen}
                 ref={panelRef}>
-                <div
-                  className={`menu-section${cascadeSide === 'right' ? ' cascade-right' : ''}`}
-                  data-expanded={expanded === 'model'}
-                  onMouseEnter={() => setExpanded('model')}>
-                  <button
-                    type="button"
-                    className="menu-section-header"
-                    aria-expanded={expanded === 'model'}
-                    onClick={() => setExpanded((current) => current === 'model' ? null : 'model')}>
-                    <span className="menu-section-label">模型</span>
-                    <span className="menu-section-value">{activeModel}</span>
-                    {cascadeSide === 'right'
-                      ? <ChevronRight aria-hidden="true" size={13} />
-                      : <ChevronLeft aria-hidden="true" size={13} />}
-                  </button>
-                  <div className="menu-section-list">
-                    <div className="menu-options model-options">
-                      {settings.models.map((model) => (
+                {pickerMode === 'effort' ? (
+                  <div className="composer-picker-effort">
+                    <button
+                      type="button"
+                      className="composer-picker-chip"
+                      title={activeModel}
+                      onClick={() => setPickerMode('model')}>
+                      <span className="composer-picker-chip-name">{activeModel}</span>
+                      <span className="composer-picker-chip-sep" aria-hidden="true">·</span>
+                      <span className="composer-picker-chip-mode">{REASONING_EFFORT_LABEL[activeEffort]}</span>
+                      <ChevronRight aria-hidden="true" size={12} className="composer-picker-chip-chev" />
+                    </button>
+                    <EffortSlider
+                      value={effortIndex}
+                      max={Math.max(0, effortTicks.length - 1)}
+                      ariaLabel="推理强度"
+                      onChange={(next) => {
+                        const effort = effortTicks[next]
+                        if (effort !== undefined) pickEffort(effort)
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <div className="composer-model-pane" role="menu" aria-label="可选模型">
+                    <div className="composer-model-pane-head">
+                      <button
+                        type="button"
+                        className="composer-model-back"
+                        onClick={() => setPickerMode('effort')}>
+                        <ChevronLeft aria-hidden="true" size={13} />
+                        <span>选择模型</span>
+                      </button>
+                      <span className="composer-model-count">
+                        {((settings.apiEnabled ? settings.apiProfiles.filter((p) => p.baseUrl.trim() && p.model.trim()).length : 0)
+                          + (settings.ollamaEnabled ? settings.models.length : 0))}
+                      </span>
+                    </div>
+                    <div className="composer-model-list">
+                      {settings.ollamaEnabled ? settings.models.map((model) => (
                         <button
                           key={model}
                           type="button"
@@ -375,8 +420,8 @@ export function Composer({
                             <Check aria-hidden="true" size={13} />
                           ) : null}
                         </button>
-                      ))}
-                      {settings.apiProfiles
+                      )) : null}
+                      {settings.apiEnabled ? settings.apiProfiles
                         .filter((profile) => profile.baseUrl.trim() && profile.model.trim())
                         .map((profile) => (
                         <button
@@ -393,47 +438,10 @@ export function Composer({
                             ? <Check aria-hidden="true" size={13} />
                             : null}
                         </button>
-                      ))}
+                      )) : null}
                     </div>
                   </div>
-                </div>
-
-                <div
-                  className={`menu-section${cascadeSide === 'right' ? ' cascade-right' : ''}`}
-                  data-expanded={expanded === 'reasoning'}
-                  onMouseEnter={() => setExpanded('reasoning')}>
-                  <button
-                    type="button"
-                    className="menu-section-header"
-                    aria-expanded={expanded === 'reasoning'}
-                    onClick={() => setExpanded((current) => current === 'reasoning' ? null : 'reasoning')}>
-                    <span className="menu-section-label">思考程度</span>
-                    <span className="menu-section-value">{REASONING_LABEL[settings.reasoningMode]}</span>
-                    {cascadeSide === 'right'
-                      ? <ChevronRight aria-hidden="true" size={13} />
-                      : <ChevronLeft aria-hidden="true" size={13} />}
-                  </button>
-                  <div className="menu-section-list">
-                    <div className="menu-options">
-                      {(['fast', 'deep'] as const).map((mode) => (
-                        <button
-                          key={mode}
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={mode === settings.reasoningMode}
-                          className="menu-option"
-                          data-selected={mode === settings.reasoningMode}
-                          onClick={() => pickReasoning(mode)}>
-                          <span className="menu-option-name">{REASONING_LABEL[mode]}</span>
-                          <span className="menu-option-hint">
-                            {mode === 'fast' ? '直接回答，速度优先' : '先推理再回答，更严谨'}
-                          </span>
-                          {mode === settings.reasoningMode ? <Check aria-hidden="true" size={13} /> : null}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
+                )}
               </div>
 
               {busy ? (

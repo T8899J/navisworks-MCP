@@ -10,6 +10,7 @@ import {
   type AppSettings,
 } from '../sessionRepository'
 import { ToolCatalog } from '../toolCatalog'
+import { localThinkForEffort, normalizeReasoningEffort } from '../../shared/reasoning'
 import { NavisworksInstanceRegistry } from '../navisworks/instanceRegistry'
 import { NavisworksInstanceSelection } from '../navisworks/instanceSelection'
 import {
@@ -49,7 +50,7 @@ export async function installApplicationServices(
   const runtime = new AgentRuntime({
     bridgeClient: bridge,
     model: persistedSettings?.selectedModel,
-    think: persistedSettings?.reasoningMode === 'deep',
+    think: localThinkForEffort(normalizeReasoningEffort(persistedSettings?.reasoningMode)),
     contextWindow: persistedSettings?.contextWindowTokens,
     numPredict: persistedSettings?.numPredict,
     contextState: appScope.require(ContextStateToken),

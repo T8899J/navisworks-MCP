@@ -159,6 +159,8 @@ interface SettingsPanelProps {
   onProviderChange(patch: {
     preferApiModel?: boolean
     activeApiProfileId?: string | null
+    ollamaEnabled?: boolean
+    apiEnabled?: boolean
   }): void | Promise<void>
   onSaveApiProfile(profile: {
     id?: string
@@ -554,6 +556,20 @@ export function SettingsPanel({
                     新建
                   </button>
                 </div>
+                <div className="settings-row">
+                  <label htmlFor="api-enabled">
+                    启用 API
+                    <small>关闭后对话不再使用 API 配置</small>
+                  </label>
+                  <input
+                    id="api-enabled"
+                    className="settings-switch"
+                    type="checkbox"
+                    checked={settings.apiEnabled}
+                    disabled={!serviceAvailable}
+                    onChange={(event) => void onProviderChange({ apiEnabled: event.currentTarget.checked })}
+                  />
+                </div>
                 <div className="api-profile-tabs" role="listbox" aria-label="API 配置">
                   {settings.apiProfiles.map((profile) => (
                     <button
@@ -678,7 +694,7 @@ export function SettingsPanel({
                   </div>
 
                   <div className="api-profile-actions">
-                    <button className="secondary-button" type="button" disabled={!selectedProfile.baseUrl || !selectedProfile.model} onClick={() => void onProviderChange({ activeApiProfileId: selectedProfile.id, preferApiModel: true })}>
+                    <button className="secondary-button" type="button" disabled={!settings.apiEnabled || !selectedProfile.baseUrl || !selectedProfile.model} onClick={() => void onProviderChange({ activeApiProfileId: selectedProfile.id, preferApiModel: true })}>
                       设为当前
                     </button>
                     {pendingProfileDelete ? <>
@@ -701,6 +717,20 @@ export function SettingsPanel({
                       获取模型
                     </button>
                   </div>
+                </div>
+                <div className="settings-row">
+                  <label htmlFor="ollama-enabled">
+                    启用本地 Ollama
+                    <small>关闭后对话不再使用本地模型</small>
+                  </label>
+                  <input
+                    id="ollama-enabled"
+                    className="settings-switch"
+                    type="checkbox"
+                    checked={settings.ollamaEnabled}
+                    disabled={!serviceAvailable}
+                    onChange={(event) => void onProviderChange({ ollamaEnabled: event.currentTarget.checked })}
+                  />
                 </div>
                 <div className="provider-field">
                   <div className="cloud-model-row">

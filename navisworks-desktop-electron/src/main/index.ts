@@ -343,6 +343,7 @@ async function runAgent(
     content: result.message,
     ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText }),
     ...(result.cacheHitRate === undefined ? {} : { cacheHitRate: result.cacheHitRate }),
+    ...(result.contextWindowTokens === undefined ? {} : { contextWindowTokens: result.contextWindowTokens }),
     ...(result.compacted ? { compacted: true } : {}),
     ...(result.compactSummary === undefined ? {} : { compactSummary: result.compactSummary }),
     ...(result.semanticMemory === undefined ? {} : { semanticMemory: result.semanticMemory }),

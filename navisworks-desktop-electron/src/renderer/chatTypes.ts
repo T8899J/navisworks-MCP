@@ -1,6 +1,8 @@
 import { toolNameSchema, type ApiProfile, type ToolApprovalRequest, type ToolName } from '../shared/ipc'
+import { normalizeReasoningEffort, type ReasoningEffort } from '../shared/reasoning'
 
 export type { ApiProfile, ToolApprovalRequest }
+export type { ReasoningEffort }
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'error'
 
@@ -43,13 +45,17 @@ export interface ChatSession extends SessionSummary {
 export interface DesktopSettings {
   selectedModel: string
   models: string[]
-  reasoningMode: 'fast' | 'deep'
+  reasoningMode: ReasoningEffort
   themeMode: 'system' | 'light' | 'dark'
   disabledTools: ToolName[]
   fontScale: number
   /** Local model context window (tokens); the runtime caps it at 32K. */
   contextWindowTokens: number
   preferApiModel: boolean
+  /** Whether the local Ollama daemon may serve chat requests. */
+  ollamaEnabled: boolean
+  /** Whether the configured API endpoint may serve chat requests. */
+  apiEnabled: boolean
   apiProfiles: ApiProfile[]
   activeApiProfileId: string | null
 }
@@ -76,6 +82,8 @@ export interface ChatStreamEvent {
   result?: unknown
   contextTokensUsed?: number
   cacheHitRate?: number
+  /** Finite context window the finished run budgeted against. */
+  contextWindowTokens?: number
   compacted?: boolean
   error?: string | { code: string; message: string }
 }
@@ -218,7 +226,7 @@ export function normalizeSettings(value: unknown): DesktopSettings {
   return {
     selectedModel,
     models,
-    reasoningMode: String(source.reasoningMode ?? source.ReasoningMode).toLowerCase() === 'deep' ? 'deep' : 'fast',
+    reasoningMode: normalizeReasoningEffort(source.reasoningMode ?? source.ReasoningMode),
     themeMode: source.themeMode === 'light' || source.themeMode === 'dark' ? source.themeMode : 'system',
     disabledTools: toolNameSchema.options.filter((name) => rawDisabled.has(name)),
     fontScale: Number.isFinite(rawFontScale) ? Math.min(1.3, Math.max(0.85, rawFontScale)) : 1,
@@ -229,6 +237,8 @@ export function normalizeSettings(value: unknown): DesktopSettings {
         ?? 32768
     ) || 32768,
     preferApiModel: Boolean(source.preferApiModel ?? source.PreferApiModel ?? false),
+    ollamaEnabled: Boolean(source.ollamaEnabled ?? source.OllamaEnabled ?? true),
+    apiEnabled: Boolean(source.apiEnabled ?? source.ApiEnabled ?? true),
     apiProfiles,
     activeApiProfileId: typeof source.activeApiProfileId === 'string' ? source.activeApiProfileId : null
   }

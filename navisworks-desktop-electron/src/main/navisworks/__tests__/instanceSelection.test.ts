@@ -24,6 +24,7 @@ describe('NavisworksInstanceSelection', () => {
     selection.observe(instances)
     selection.select('B', instances)
     expect(selection.selectedInstanceId).toBe('B')
+    expect(selection.instancesForUi(instances).map((item) => item.instanceId)).toEqual(['A', 'B'])
   })
 
   it('keeps a closed selected A disconnected instead of failing over to B', () => {

@@ -1,5 +1,6 @@
 import type { BridgeCallOptions } from '../bridgeClient'
 import type { AgentToolContract } from '../toolCatalog'
+import type { ReasoningEffort } from '../../shared/reasoning'
 
 /**
  * Provider-neutral chat message. Each provider maps this onto its own wire
@@ -53,6 +54,8 @@ export interface CompletionRequest {
   tools?: readonly AgentToolContract[]
   /** Local reasoning toggle (Ollama `think`); cloud providers may ignore it. */
   think?: boolean
+  /** Five-step effort sent verbatim to API endpoints as `reasoning_effort`. */
+  reasoningEffort?: ReasoningEffort
   sampling?: SamplingOptions
   signal?: AbortSignal
   onDelta?: (delta: CompletionDelta) => void

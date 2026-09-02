@@ -842,7 +842,7 @@ describe('desktop IPC settings routes', () => {
     models: ['qwen3.5:9b-q4_K_M'],
     plugins: [],
     skills: [],
-    reasoningMode: 'fast',
+    reasoningMode: 'low',
     activeSessionId: null,
     gpuVramGb: 8,
     contextWindowTokens: 8192,
@@ -850,6 +850,8 @@ describe('desktop IPC settings routes', () => {
     themeMode: 'system',
     disabledTools: [],
     preferApiModel: false,
+    ollamaEnabled: true,
+    apiEnabled: true,
     apiProfiles: [],
     activeApiProfileId: null,
   }
@@ -1074,6 +1076,155 @@ describe('desktop IPC settings routes', () => {
       expect(run).toHaveBeenCalledTimes(1)
       const runInput = run.mock.calls[0]?.[0] as { api?: unknown }
       expect(runInput.api).toBeUndefined()
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('migrates legacy fast/deep reasoning modes onto the five-step scale', async () => {
+    const harness = createHarness({
+      ollama: stubAgent(),
+      settings: statefulSettingsStub({ ...baseSettings, reasoningMode: 'deep' }),
+    })
+    try {
+      const got = await harness.invoke('settings.get', undefined)
+      expect(got).toMatchObject({ ok: true })
+      if (got.ok) {
+        expect((got.data as { reasoningMode: string }).reasoningMode).toBe('max')
+      }
+
+      const updated = await harness.invoke('settings.update', {
+        settings: { reasoningMode: 'high' },
+      })
+      expect(updated).toMatchObject({
+        ok: true,
+        data: expect.objectContaining({ reasoningMode: 'high' }),
+      })
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('persists provider enable switches through settings.update', async () => {
+    const harness = createHarness({
+      ollama: stubAgent(),
+      settings: statefulSettingsStub({ ...baseSettings }),
+    })
+    try {
+      const updated = await harness.invoke('settings.update', {
+        settings: { ollamaEnabled: false, apiEnabled: false },
+      })
+      expect(updated).toMatchObject({
+        ok: true,
+        data: expect.objectContaining({ ollamaEnabled: false, apiEnabled: false }),
+      })
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('keeps chat on the local model when the API switch is off', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run(input) {
+        seen.push(input as unknown as Record<string, unknown>)
+        return { content: '好的。' }
+      },
+    }
+    const harness = createHarness({
+      ollama: agent,
+      settings: statefulSettingsStub({
+        ...baseSettings,
+        preferApiModel: true,
+        apiEnabled: false,
+        apiProfiles: [{
+          id: 'active-profile',
+          name: '当前',
+          baseUrl: 'https://active.example.com/v1',
+          model: 'active-model',
+          apiKeyCiphertext: 'encrypted:active-key',
+          legacyApiKey: '',
+        }],
+        activeApiProfileId: 'active-profile',
+      }),
+      secrets: {
+        encrypt: (value) => `encrypted:${value}`,
+        decrypt: (value) => value.replace(/^encrypted:/, ''),
+      },
+    })
+    try {
+      const started = await harness.invoke('chat.start', chatStartInput())
+      expect(started).toMatchObject({ ok: true })
+      await vi.waitFor(() => expect(seen).toHaveLength(1))
+      expect(seen[0]?.api).toBeUndefined()
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('forces the API profile when the local Ollama switch is off', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run(input) {
+        seen.push(input as unknown as Record<string, unknown>)
+        return { content: '好的。' }
+      },
+    }
+    const harness = createHarness({
+      ollama: agent,
+      settings: statefulSettingsStub({
+        ...baseSettings,
+        preferApiModel: false,
+        ollamaEnabled: false,
+        apiProfiles: [{
+          id: 'active-profile',
+          name: '当前',
+          baseUrl: 'https://active.example.com/v1',
+          model: 'active-model',
+          apiKeyCiphertext: 'encrypted:active-key',
+          legacyApiKey: '',
+        }],
+        activeApiProfileId: 'active-profile',
+      }),
+      secrets: {
+        encrypt: (value) => `encrypted:${value}`,
+        decrypt: (value) => value.replace(/^encrypted:/, ''),
+      },
+    })
+    try {
+      const started = await harness.invoke('chat.start', chatStartInput())
+      expect(started).toMatchObject({ ok: true })
+      await vi.waitFor(() => expect(seen).toHaveLength(1))
+      expect(seen[0]?.api).toEqual({
+        baseUrl: 'https://active.example.com/v1',
+        apiKey: 'active-key',
+        model: 'active-model',
+      })
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('errors the chat run when both provider switches are off', async () => {
+    const harness = createHarness({
+      ollama: stubAgent(),
+      settings: statefulSettingsStub({
+        ...baseSettings,
+        ollamaEnabled: false,
+        apiEnabled: false,
+      }),
+    })
+    try {
+      const started = await harness.invoke('chat.start', chatStartInput())
+      expect(started).toMatchObject({ ok: true })
+      const sender = TRUSTED_EVENT.sender as unknown as { send: ReturnType<typeof vi.fn> }
+      await vi.waitFor(() => {
+        const errorCall = sender.send.mock.calls.find((call) => call[1] === 'chat.error')
+        if (!errorCall) throw new Error('chat.error not emitted yet')
+        expect(errorCall[2]).toMatchObject({ error: { code: 'SERVICE_UNAVAILABLE' } })
+      })
     } finally {
       await harness.dispose()
     }

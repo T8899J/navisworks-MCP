@@ -1,7 +1,11 @@
 import { z } from 'zod'
+import { REASONING_EFFORTS, type ReasoningEffort } from '../reasoning'
 
 const nonEmptyString = z.string().trim().min(1)
 const dateTimeString = z.string().trim().min(1)
+
+export const reasoningEffortSchema = z.enum(REASONING_EFFORTS)
+export type { ReasoningEffort }
 
 export const messageRoleSchema = z.enum(['user', 'assistant', 'system', 'error'])
 
@@ -111,12 +115,16 @@ export const apiProfileSchema = z.strictObject({
 export const appSettingsSchema = z.strictObject({
   selectedModel: z.string(),
   models: z.array(z.string()),
-  reasoningMode: z.enum(['fast', 'deep']),
+  reasoningMode: reasoningEffortSchema,
   themeMode: themeModeSchema,
   disabledTools: z.array(toolNameSchema),
   fontScale: z.number().min(0.85).max(1.3),
   contextWindowTokens: z.number().int().min(1024).max(1_000_000),
   preferApiModel: z.boolean(),
+  /** Whether the local Ollama daemon may serve chat requests. */
+  ollamaEnabled: z.boolean(),
+  /** Whether the configured API endpoint may serve chat requests. */
+  apiEnabled: z.boolean(),
   apiProfiles: z.array(apiProfileSchema),
   activeApiProfileId: z.string().nullable()
 })
@@ -241,7 +249,7 @@ export const requestSchemas = {
       messageId: nonEmptyString,
       text: nonEmptyString,
       model: z.string().optional(),
-      reasoningMode: z.enum(['fast', 'deep']).optional()
+      reasoningMode: reasoningEffortSchema.optional()
     }),
     output: z.strictObject({
       runId: nonEmptyString,
@@ -321,6 +329,7 @@ export const chatEventSchema = z.discriminatedUnion('kind', [
     thinkingText: z.string().optional(),
     contextTokensUsed: z.number().optional(),
     cacheHitRate: z.number().optional(),
+    contextWindowTokens: z.number().optional(),
     compacted: z.boolean().optional()
   }),
   z.strictObject({
@@ -358,6 +367,7 @@ const chatDoneEventSchema = z.strictObject({
   thinkingText: z.string().optional(),
   contextTokensUsed: z.number().optional(),
   cacheHitRate: z.number().optional(),
+  contextWindowTokens: z.number().optional(),
   compacted: z.boolean().optional()
 })
 
