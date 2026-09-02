@@ -117,9 +117,9 @@ void main() {
   // 8-bit drawing buffer hard-clips to the same pure white on every tier.
   // A mix is bounded by construction, so the tier tint survives exactly
   // where the eye is looking.
-  vec3 color = base + (u_to - u_from) * 0.35 * energy;
-  vec3 bloomCol = mix(u_to, vec3(1.0), 0.5);
-  color = mix(color, bloomCol, glow * 0.8);
+  vec3 color = base + (u_to - u_from) * 0.22 * energy;
+  vec3 bloomCol = mix(u_to, vec3(1.0), 0.25);
+  color = mix(color, bloomCol, glow * 0.58);
 
   // Moving specular sheen: a narrow bright line that sweeps from the handle
   // toward the left edge, one sweep per u_sheen wrap. dx*dx avoids pow(x,2)
@@ -127,7 +127,7 @@ void main() {
   float sheenX = u_head - u_sheen * u_head;
   float sheenDx = (uv.x - sheenX) * 18.0;
   float sheen = exp(-sheenDx * sheenDx);
-  color += vec3(0.30) * sheen * (0.35 + 0.65 * energy);
+  color += vec3(0.14) * sheen * (0.30 + 0.70 * energy);
 
   // Bounded light: only the sheen core may kiss 1.0; nothing plateaus there.
   color = min(color, vec3(1.0));

@@ -131,7 +131,7 @@ export function EffortSlider({
       const ty = Math.sin(angle) * dist - (isHigh ? 6 : 2)
       const dur = 420 + Math.random() * (480 + level * 220)
       const size = 2 + Math.random() * (1 + level * 1.6)
-      const opacity = 0.4 + level * 0.4
+      const opacity = 0.28 + level * 0.32
       fresh.push({
         id: ++particleId,
         x,

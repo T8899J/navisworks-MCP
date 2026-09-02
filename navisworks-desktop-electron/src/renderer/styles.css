@@ -1818,12 +1818,13 @@ summary:focus-visible,
 /* Effort-mode bar — a rectangular channel with no fill of its own, no border
    of its own either: only a very faint pixel-grid texture sits on top of the
    panel's surface, the slot itself is just a darker inset groove. All the
-   colour comes from the fill layer, whose purple gradient is picked per
+   colour comes from the fill layer, whose tier gradient is picked per
    effort tier (see `[data-level]` rules below). The handle spans the bar's
    full inner height, so it reads as a solid block sliding inside a channel
    rather than a knob floating on a track. */
 .composer-pill {
   position: relative;
+  isolation: isolate;
   display: flex;
   width: 100%;
   height: 26px;
@@ -1833,24 +1834,23 @@ summary:focus-visible,
   /* Faint dotted grid (8px cells, single pixel dot) — almost invisible until
      the user really looks, so it reads as "channel" without being busy. */
   background-image: radial-gradient(
-    rgba(255, 255, 255, 0.05) 0.5px,
+    rgba(255, 255, 255, 0.035) 0.5px,
     transparent 0.6px
   );
   background-size: 8px 8px;
   border: 0;
   border-radius: 6px;
   outline: none;
-  box-shadow: inset 0 0 0 1px rgba(168, 85, 247, 0.18);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
   touch-action: none;
   user-select: none;
   /* No clipping: the fill keeps its own corner radius so it stays inside the
-     bar, while the handle glow is free to spill past the edges — that spill
-     is what sells the neon effect. */
+     bar, while the restrained handle glow may spill past the edges. */
 }
 
 .composer-pill:focus-visible {
   box-shadow:
-    inset 0 0 0 1px rgba(168, 85, 247, 0.25),
+    inset 0 0 0 1px color-mix(in srgb, var(--text) 14%, transparent),
     0 0 0 2px var(--focus-ring);
 }
 
@@ -1884,6 +1884,7 @@ summary:focus-visible,
    fill's look. */
 .composer-pill-fill {
   position: absolute;
+  z-index: 0;
   top: 0;
   left: 0;
   bottom: 0;
@@ -1904,21 +1905,21 @@ summary:focus-visible,
 :root[data-theme="light"] .composer-pill,
 :root[data-theme-mode="light"] .composer-pill {
   background-image: radial-gradient(
-    rgba(76, 29, 149, 0.07) 0.5px,
+    rgba(0, 0, 0, 0.045) 0.5px,
     transparent 0.6px
   );
   background-size: 8px 8px;
-  box-shadow: inset 0 0 0 1px rgba(124, 58, 237, 0.22);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
 }
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]):not([data-theme-mode="dark"]) .composer-pill {
     background-image: radial-gradient(
-      rgba(76, 29, 149, 0.07) 0.5px,
+      rgba(0, 0, 0, 0.045) 0.5px,
       transparent 0.6px
     );
     background-size: 8px 8px;
-    box-shadow: inset 0 0 0 1px rgba(124, 58, 237, 0.22);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
   }
 }
 
@@ -1966,31 +1967,34 @@ summary:focus-visible,
    Its halo tracks `--bar-glow` (muted to match the calmer palette). */
 .composer-pill-handle {
   position: absolute;
+  z-index: 2;
   top: 2px;
   bottom: 2px;
   width: 14px;
   border-radius: 3px;
-  background: #ffffff;
+  background: color-mix(in srgb, #ffffff 84%, var(--bar-to) 16%);
   box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.22),
-    0 0 6px var(--bar-glow);
+    0 0 0 1px rgba(0, 0, 0, 0.20),
+    0 0 5px color-mix(in srgb, var(--bar-glow) 70%, transparent);
   transform: translateX(-50%);
   pointer-events: none;
   transition: left 90ms ease-out;
 }
 
-/* Particle burst layer — soft purple sparks emitted at the handle on every
+/* Particle burst layer — soft tier-coloured sparks emitted at the handle on every
    pointer-move while dragging. Kept muted so it complements the fill instead
    of competing with it. */
 .composer-pill-particles {
   position: absolute;
   inset: 0;
+  z-index: 3;
   overflow: visible;
   pointer-events: none;
 }
 
 .effort-particle {
   position: absolute;
+  z-index: 3;
   display: block;
   border-radius: 50%;
   pointer-events: none;
