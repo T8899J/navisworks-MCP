@@ -5,15 +5,42 @@ Windows named pipe whose ACL grants access only to the current user.
 
 ## Discovery
 
-The plug-in writes:
+Each plug-in process writes its own discovery file:
 
 ```text
-%LOCALAPPDATA%\NavisworksCodexMcp\endpoint.json
+%LOCALAPPDATA%\NavisworksCodexMcp\endpoints\{ProcessId}.json
 ```
 
 The document contains the pipe name, protocol version, process ID, plug-in
 version, and host version. It does not contain credentials. Access to the pipe
 is restricted by Windows to the current user.
+
+The process that creates an endpoint owns its lifetime and removes only that file
+when it unloads. Desktop clients are readers: a pipe timeout marks the instance
+disconnected but must not delete the file. The Electron client scans every numeric
+JSON file in `endpoints`; when none exists it may read the legacy `endpoint.json`
+as a transition fallback.
+
+The repository and currently installed legacy `navisworks-mcp.mjs` bundle still
+read only `endpoint.json`. They are not discovery-compatible with a rebuilt plug-in
+that writes only the per-process directory; fixing that bundle is a separate task.
+
+Document identity is returned by `navisworks_status`, not stored in the endpoint file:
+
+```json
+{
+  "connected": true,
+  "hasDocument": true,
+  "bridgeSessionId": "plugin-lifetime-guid",
+  "documentInstanceId": "active-document-guid",
+  "documentTitle": "Model.nwf",
+  "documentFileName": "D:\\Models\\Model.nwf"
+}
+```
+
+`bridgeSessionId` is stable for one plug-in load. `documentInstanceId` changes when the
+active document changes, closes, or the same path is reopened. Clients must invalidate
+document-bound item IDs, viewpoint references and pending modifications when either identity changes.
 
 ## Framing
 

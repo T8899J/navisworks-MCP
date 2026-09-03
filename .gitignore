@@ -9,3 +9,7 @@ navisworks-desktop/sessions.json
 *.suo
 .nuget/
 .claude/settings.local.json
+.zcode/
+.ruff_cache/
+.workbuddy/
+.tmp-ref/

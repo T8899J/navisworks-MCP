@@ -3,6 +3,7 @@ import { AgentRuntime, type AgentBridgeClient } from '../agentRuntime'
 import { ContextState } from '../agent/contextState'
 import { fromWpfSessionSnapshot, toWpfSessionSnapshot, type ConversationSession } from '../sessionRepository'
 import { renderVerifiedFacts } from '../agent/facts'
+import { NAVISWORKS_WORKSPACE_PROMPT } from '../agent/prompts'
 
 function ndjsonResponse(chunks: Array<Record<string, unknown>>): Response {
   return new Response(chunks.map((c) => `${JSON.stringify(c)}\n`).join(''), {
@@ -23,9 +24,11 @@ describe('P4 — durable compact summary injected into the model request', () =>
       compactSummary: '早前已确认三台泵并隐藏了第一台',
     })
     const messages = bodies[0]?.messages as Array<{ role: string; content: string }>
-    // index 0 is the stable system prompt; index 1 is the injected durable summary block.
+    // The stable core and workspace system prompts precede the injected durable summary.
     expect(messages[1]?.role).toBe('system')
-    expect(messages[1]?.content).toContain('早前已确认三台泵')
+    expect(messages[1]?.content).toBe(NAVISWORKS_WORKSPACE_PROMPT)
+    expect(messages[2]?.role).toBe('system')
+    expect(messages[2]?.content).toContain('早前已确认三台泵')
   })
 
   it('auto-compaction surfaces the produced summary for persistence', async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AgentRuntime, type AgentBridgeClient } from '../agentRuntime'
+import { CURI_CORE_PROMPT, NAVISWORKS_WORKSPACE_PROMPT } from '../agent/prompts'
 
 /** Builds a fetch response whose body is the ndjson stream Ollama actually sends. */
 function ndjsonResponse(chunks: Array<Record<string, unknown>>): Response {
@@ -28,6 +29,62 @@ function toolMessageContent(body?: Record<string, unknown>): string {
 }
 
 describe('AgentRuntime streaming tool loop', () => {
+  it('sends core and workspace prompts before dynamic context and the current turn', async () => {
+    const requestBodies: Array<Record<string, unknown>> = []
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return ndjsonResponse([
+        { message: { role: 'assistant', content: '收到。' }, prompt_eval_count: 10, eval_count: 2 },
+      ])
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({
+      bridgeClient: { async call<T>() { return { connected: true } as T } },
+      fetchImpl,
+    })
+
+    await runtime.run({
+      text: '继续检查',
+      currentDocument: {
+        connected: true,
+        documentName: 'Current.nwf',
+        documentInstanceId: 'doc-current',
+      },
+      documentNotice: {
+        revision: 1,
+        previous: { documentName: 'Previous.nwf', documentInstanceId: 'doc-previous' },
+        current: { documentName: 'Current.nwf', documentInstanceId: 'doc-current' },
+        changedAt: 1,
+        reason: 'document-changed',
+      },
+      semanticMemory: {
+        goals: ['核对当前模型'],
+        constraints: [],
+        decisions: [],
+        notes: [],
+        updatedAt: 1,
+      },
+      compactSummary: '此前已完成准备工作',
+    })
+
+    const messages = requestBodies[0]?.messages as Array<{ role: string; content: string }>
+    expect(messages.map((message) => message.role)).toEqual([
+      'system',
+      'system',
+      'system',
+      'system',
+      'system',
+      'system',
+      'user',
+    ])
+    expect(messages[0]?.content).toBe(CURI_CORE_PROMPT)
+    expect(messages[1]?.content).toBe(NAVISWORKS_WORKSPACE_PROMPT)
+    expect(messages[2]?.content).toContain('【当前 Navisworks 文档】')
+    expect(messages[3]?.content).toContain('【Navisworks 当前环境发生变化】')
+    expect(messages[4]?.content).toContain('【会话语义记忆')
+    expect(messages[5]?.content).toContain('此前已完成准备工作')
+    expect(messages[6]?.content).toBe('继续检查')
+  })
+
   it('executes an allowed tool then returns the second-round answer', async () => {
     let bridgeCalls = 0
     const bridge: AgentBridgeClient = {
