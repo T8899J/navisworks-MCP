@@ -103,6 +103,10 @@ export function EffortSlider({
   const pct = max <= 0
     ? 0
     : Math.max(0, Math.min(100, (boundedValue / max) * 100))
+  // Moving the thumb left by the same percentage of its own width makes its
+  // left edge travel exactly through trackWidth - thumbWidth: 0 stays flush
+  // left and 100 stays flush right without measuring the rendered track.
+  const thumbTransform = `translate(${-pct}%, -50%)`
 
   const spawn = useCallback((x: number, y: number, level: number, now: number) => {
     // Reduced motion: the CSS kill-switch flattens the burst to an instant
@@ -247,7 +251,11 @@ export function EffortSlider({
       {!flowReady && (
         <div className="composer-pill-fill" aria-hidden="true" style={{ width: `${pct}%` }} />
       )}
-      <div className="composer-pill-handle" aria-hidden="true" style={{ left: `${pct}%` }} />
+      <div
+        className="composer-pill-handle"
+        aria-hidden="true"
+        style={{ left: `${pct}%`, transform: thumbTransform }}
+      />
       <div className="composer-pill-particles" aria-hidden="true">
         {particles.map((p) => (
           <span

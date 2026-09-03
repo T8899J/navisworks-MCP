@@ -27,12 +27,10 @@ void main() {
  *  3. a low-alpha white sheen sweeps from the handle toward the left edge;
  *     its phase (u_sheen, 0…1) wraps host-side so the sweep repeats forever.
  *
- * Color follows an aurora "curiosity → creation" ramp: u_from/u_to are the
- * current tier's endpoints, shifting from cool cyan (low effort — curiosity)
- * through indigo toward warm fuchsia-pink (high effort — creation), and the
- * head glow mixes toward a bright tint of the tier colour (bounded — never
- * additive white, which clipped to a flat white plateau and erased the tier
- * palette at the head).
+ * Color follows a cumulative aurora "curiosity → creation" ramp. u_palette
+ * contains the full cyan-to-violet chain and u_level reveals one additional
+ * stop per tier, so higher effort retains every earlier colour. u_from/u_to
+ * remain the current tier's endpoints for the head glow and Max bubbles.
  */
 export const FLOW_FRAGMENT_SHADER = /* glsl */ `#version 300 es
 precision highp float;
@@ -40,9 +38,13 @@ precision highp float;
 uniform vec2  u_resolution;
 uniform float u_time;   // flow phase (seconds-equivalent), host-wrapped
 uniform float u_sheen;  // sheen phase in [0,1), one sweep per wrap
+uniform float u_bubble_time;  // independent bubble phase, host-wrapped
+uniform float u_max_burst;    // transient 0…1 burst when entering Max
 uniform float u_head;   // eased fill fraction 0…1
+uniform float u_level;  // normalized effort tier 0…1; Max is exactly 1
 uniform vec3  u_from;
 uniform vec3  u_to;
+uniform vec3  u_palette[6];
 
 out vec4 fragColor;
 
@@ -73,6 +75,15 @@ float fbm(vec2 p) {
   return v / 0.875;
 }
 
+vec3 cumulativePalette(float t, float lastStop) {
+  float p = clamp(t, 0.0, 1.0) * clamp(lastStop, 1.0, 5.0);
+  if (p < 1.0) return mix(u_palette[0], u_palette[1], p);
+  if (p < 2.0) return mix(u_palette[1], u_palette[2], p - 1.0);
+  if (p < 3.0) return mix(u_palette[2], u_palette[3], p - 2.0);
+  if (p < 4.0) return mix(u_palette[3], u_palette[4], p - 3.0);
+  return mix(u_palette[4], u_palette[5], clamp(p - 4.0, 0.0, 1.0));
+}
+
 void main() {
   // Aspect-corrected UV. The bar is ~15x wider than tall, so one unit of
   // uv.x spans far more pixels than one unit of uv.y: the WIDE axis is the
@@ -101,10 +112,10 @@ void main() {
   // reads as a glow beginning, not as a hard neon wall at x=0.
   float leftFade = smoothstep(0.0, 0.12, uv.x);
 
-  // Base fill gradient (from → to) as a positional ramp across the fill:
-  // every point reads its colour from where it sits, never from the head.
+  // Cumulative base gradient. Level 0 exposes palette stops 0→1; every
+  // higher level adds one stop until Max shows the complete 0→5 chain.
   float baseT = u_head > 1e-5 ? uv.x / u_head : 0.0;
-  vec3 base = mix(u_from, u_to, clamp(baseT, 0.0, 1.0));
+  vec3 base = cumulativePalette(baseT, 1.0 + u_level * 4.0);
 
   // Head glow: peak at the head, falloff to the left. The distance is
   // clamped to 0 — a negative distance would make exp() explode and burn
@@ -117,9 +128,49 @@ void main() {
   // 8-bit drawing buffer hard-clips to the same pure white on every tier.
   // A mix is bounded by construction, so the tier tint survives exactly
   // where the eye is looking.
-  vec3 color = base + (u_to - u_from) * 0.22 * energy;
+  vec3 color = base * (0.88 + 0.12 * energy);
   vec3 bloomCol = mix(u_to, vec3(1.0), 0.25);
   color = mix(color, bloomCol, glow * 0.58);
+  // Max entry boosts the entire coloured fluid, not just the head highlight.
+  color *= 1.0 + 0.22 * u_max_burst;
+
+  // Max-tier bubbles: five rings remain during normal Max operation; seven
+  // more join only for the entry burst. Their independent phase lets the host
+  // accelerate them without teleporting the main flow field.
+  float maxTier = smoothstep(0.90, 0.99, u_level);
+  float bubbles = 0.0;
+  for (int i = 0; i < 12; i++) {
+    float fi = float(i);
+    float bubblePhase = fract(
+      u_bubble_time * (0.032 + fi * 0.004) + hash12(vec2(fi, 4.2))
+    );
+    float bubbleX = bubblePhase * (aspect + 0.8) - 0.4;
+    float bubbleY = 0.18 + 0.64 * hash12(vec2(fi, 8.7));
+    float bubbleRadius = 0.07 + 0.05 * hash12(vec2(fi, 12.4));
+    float bubbleDist = length(warpP - vec2(bubbleX, bubbleY));
+    float bubbleOuter = 1.0 - smoothstep(
+      bubbleRadius,
+      bubbleRadius + 0.025,
+      bubbleDist
+    );
+    float bubbleInner = smoothstep(
+      bubbleRadius * 0.52,
+      bubbleRadius * 0.78,
+      bubbleDist
+    );
+    float bubblePresence = i < 5 ? 1.0 : u_max_burst;
+    bubbles += bubbleOuter * bubbleInner * bubblePresence;
+  }
+  vec3 bubbleCol = mix(u_from, vec3(1.0), 0.32);
+  color = mix(
+    color,
+    bubbleCol,
+    clamp(
+      bubbles * maxTier * (0.46 + 0.12 * u_max_burst),
+      0.0,
+      0.62
+    )
+  );
 
   // Moving specular sheen: a narrow bright line that sweeps from the handle
   // toward the left edge, one sweep per u_sheen wrap. dx*dx avoids pow(x,2)
@@ -140,12 +191,21 @@ void main() {
 `
 
 /**
- * The five effort tiers' fill colours (from/to) and their glow, matching the
- * `[data-level]` ramp in styles.css. Shader and CSS share this palette so a
- * tier change re-tints both the WebGL flow and the CSS handle halo in step.
+ * The shared six-stop palette plus the five tiers' current endpoints/glow,
+ * matching the cumulative `[data-level]` gradients in styles.css. A tier
+ * change reveals one more stop while the handle and head adopt the new end.
  * `speed` is consumed by the host: it scales how fast the flow/sheen phases
  * advance, so a tier change re-times the drift without teleporting it.
  */
+export const FLOW_STOPS = [
+  '#a5f3fc',
+  '#67e8f9',
+  '#7dd3fc',
+  '#818cf8',
+  '#8b5cf6',
+  '#6d28d9'
+] as const
+
 export const FLOW_TIERS: ReadonlyArray<{
   name: string
   from: string
@@ -153,11 +213,11 @@ export const FLOW_TIERS: ReadonlyArray<{
   glow: string
   speed: number
 }> = [
-  { name: 'l0', from: '#a5f3fc', to: '#67e8f9', glow: 'rgba(103,232,249,0.45)', speed: 0.5 },
-  { name: 'l1', from: '#67e8f9', to: '#7dd3fc', glow: 'rgba(125,211,252,0.45)', speed: 0.7 },
-  { name: 'l2', from: '#7dd3fc', to: '#818cf8', glow: 'rgba(129,140,248,0.5)', speed: 1.0 },
-  { name: 'l3', from: '#a78bfa', to: '#e879f9', glow: 'rgba(232,121,249,0.55)', speed: 1.25 },
-  { name: 'l4', from: '#e879f9', to: '#f9a8d4', glow: 'rgba(249,168,212,0.6)', speed: 1.5 }
+  { name: 'l0', from: FLOW_STOPS[0], to: FLOW_STOPS[1], glow: 'rgba(103,232,249,0.45)', speed: 0.5 },
+  { name: 'l1', from: FLOW_STOPS[1], to: FLOW_STOPS[2], glow: 'rgba(125,211,252,0.45)', speed: 0.7 },
+  { name: 'l2', from: FLOW_STOPS[2], to: FLOW_STOPS[3], glow: 'rgba(129,140,248,0.5)', speed: 1.0 },
+  { name: 'l3', from: FLOW_STOPS[3], to: FLOW_STOPS[4], glow: 'rgba(139,92,246,0.55)', speed: 1.25 },
+  { name: 'l4', from: FLOW_STOPS[4], to: FLOW_STOPS[5], glow: 'rgba(109,40,217,0.6)', speed: 1.5 }
 ]
 
 /** Interpolates a tier index (0…4, fractional allowed) into the palette. */

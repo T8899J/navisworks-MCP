@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import {
   FLOW_FRAGMENT_SHADER,
+  FLOW_STOPS,
   FLOW_VERTEX_SHADER,
   flowTierColors
 } from './flowShader'
@@ -32,9 +33,13 @@ interface DrawState {
   resolution: WebGLUniformLocation
   time: WebGLUniformLocation
   sheen: WebGLUniformLocation
+  bubbleTime: WebGLUniformLocation
+  maxBurst: WebGLUniformLocation
   head: WebGLUniformLocation
+  level: WebGLUniformLocation
   from: WebGLUniformLocation
   to: WebGLUniformLocation
+  palette: WebGLUniformLocation
   buf: WebGLBuffer
 }
 
@@ -77,9 +82,13 @@ function createState(gl: WebGL2RenderingContext): DrawState {
     resolution: gl.getUniformLocation(program, 'u_resolution')!,
     time: gl.getUniformLocation(program, 'u_time')!,
     sheen: gl.getUniformLocation(program, 'u_sheen')!,
+    bubbleTime: gl.getUniformLocation(program, 'u_bubble_time')!,
+    maxBurst: gl.getUniformLocation(program, 'u_max_burst')!,
     head: gl.getUniformLocation(program, 'u_head')!,
+    level: gl.getUniformLocation(program, 'u_level')!,
     from: gl.getUniformLocation(program, 'u_from')!,
     to: gl.getUniformLocation(program, 'u_to')!,
+    palette: gl.getUniformLocation(program, 'u_palette[0]')!,
     buf
   }
 }
@@ -101,7 +110,11 @@ function setVec3(gl: WebGL2RenderingContext, loc: WebGLUniformLocation | null, h
   gl.uniform3f(loc, r, g, b)
 }
 
+const FLOW_PALETTE_RGB = new Float32Array(FLOW_STOPS.flatMap(hexToRgb01))
+
 const clamp01 = (v: number): number => Math.max(0, Math.min(1, v))
+const MAX_BURST_DURATION_SECONDS = 3
+const MAX_BURST_FADE_SECONDS = 0.3
 
 /**
  * A zero-DOM WebGL2 canvas that draws the effort bar's flowing light: an
@@ -176,6 +189,9 @@ export function FlowLightCanvas({
     // Host-side phase accumulators (f64, so no precision drift in JS itself).
     let flowPhase = 0
     let sheenPhase = 0
+    let bubblePhase = 0
+    let maxBurst = 0
+    let maxBurstElapsed = MAX_BURST_DURATION_SECONDS
     let headSmooth = clamp01(progressRef.current)
     let scrubSmooth = clamp01(scrubRef.current)
     // Tier palette is cached per level — flowTierColors parses hex strings,
@@ -227,24 +243,51 @@ export function FlowLightCanvas({
         ? Math.max(0, Math.min(4, levelRef.current))
         : 0
       if (level01 !== cachedLevel) {
+        const previousLevel = cachedLevel
         cachedLevel = level01
         cachedColors = flowTierColors(level01)
+        // Only an actual tier transition into Max gets the burst. Mounting an
+        // already-Max slider must not replay it whenever the menu is opened.
+        if (
+          Number.isFinite(previousLevel) &&
+          previousLevel < 4 &&
+          level01 === 4 &&
+          !reducedMotionRef.current
+        ) {
+          maxBurst = 1
+          maxBurstElapsed = 0
+        } else if (level01 < 4) {
+          maxBurst = 0
+          maxBurstElapsed = MAX_BURST_DURATION_SECONDS
+        }
+      }
+
+      if (maxBurst > 0) {
+        maxBurstElapsed = Math.min(MAX_BURST_DURATION_SECONDS, maxBurstElapsed + dt)
+        maxBurst = clamp01(
+          (MAX_BURST_DURATION_SECONDS - maxBurstElapsed) / MAX_BURST_FADE_SECONDS
+        )
       }
 
       // Tier speed x eased scrub, baked into the phase advance. The shader
       // never multiplies time by speed, so a tier change re-times the drift
       // without the field jumping.
       const speed = cachedColors.speed * (1 + scrubSmooth * 1.6)
-      flowPhase = (flowPhase + dt * speed) % 4096
+      flowPhase = (flowPhase + dt * speed * (1 + maxBurst * 2.4)) % 4096
       sheenPhase = (sheenPhase + dt * speed * 0.18) % 1
+      bubblePhase = (bubblePhase + dt * speed * (1 + maxBurst * 17)) % 4096
 
       gl.useProgram(state.program)
       gl.uniform2f(state.resolution, width, height)
       gl.uniform1f(state.time, flowPhase)
       gl.uniform1f(state.sheen, sheenPhase)
+      gl.uniform1f(state.bubbleTime, bubblePhase)
+      gl.uniform1f(state.maxBurst, maxBurst)
       gl.uniform1f(state.head, headSmooth)
+      gl.uniform1f(state.level, level01 / 4)
       setVec3(gl, state.from, cachedColors.from)
       setVec3(gl, state.to, cachedColors.to)
+      gl.uniform3fv(state.palette, FLOW_PALETTE_RGB)
       gl.bindBuffer(gl.ARRAY_BUFFER, state.buf)
       // WebGL2 has a default VAO and the vertex shader derives its position
       // from gl_VertexID, so no attributes are enabled anywhere.

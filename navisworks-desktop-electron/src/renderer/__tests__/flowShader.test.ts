@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   FLOW_FRAGMENT_SHADER,
+  FLOW_STOPS,
   FLOW_TIERS,
   FLOW_VERTEX_SHADER,
   flowTierColors
@@ -10,7 +11,18 @@ describe('flowShader GLSL sources', () => {
   it('declares every uniform the host binds', () => {
     // Keep these two files from drifting: every name FlowLightCanvas asks
     // `getUniformLocation` for must appear in the fragment source.
-    const uniforms = ['u_resolution', 'u_time', 'u_sheen', 'u_head', 'u_from', 'u_to']
+    const uniforms = [
+      'u_resolution',
+      'u_time',
+      'u_sheen',
+      'u_bubble_time',
+      'u_max_burst',
+      'u_head',
+      'u_level',
+      'u_from',
+      'u_to',
+      'u_palette'
+    ]
     for (const name of uniforms) {
       expect(FLOW_FRAGMENT_SHADER).toContain(`uniform `)
       expect(FLOW_FRAGMENT_SHADER).toContain(name)
@@ -59,20 +71,50 @@ describe('flowShader GLSL sources', () => {
   it('sheen phase comes pre-wrapped from the host so the sweep repeats', () => {
     expect(FLOW_FRAGMENT_SHADER).toContain('u_head - u_sheen * u_head')
   })
+
+  it('keeps the flowing bubble layer exclusive to the Max tier', () => {
+    expect(FLOW_FRAGMENT_SHADER).toContain('smoothstep(0.90, 0.99, u_level)')
+    expect(FLOW_FRAGMENT_SHADER).toContain('for (int i = 0; i < 12; i++)')
+    expect(FLOW_FRAGMENT_SHADER).toContain('i < 5 ? 1.0 : u_max_burst')
+    expect(FLOW_FRAGMENT_SHADER).toContain('u_bubble_time')
+    expect(FLOW_FRAGMENT_SHADER).toContain('u_max_burst')
+  })
+
+  it('reveals more of the cumulative palette as the effort level rises', () => {
+    expect(FLOW_FRAGMENT_SHADER).toContain('cumulativePalette(baseT, 1.0 + u_level * 4.0)')
+    expect(FLOW_FRAGMENT_SHADER).toContain('u_palette[5]')
+  })
 })
 
 describe('flowTierColors', () => {
   it('returns the exact tier palette at integer levels', () => {
     expect(flowTierColors(0)).toEqual({ from: '#a5f3fc', to: '#67e8f9', speed: 0.5 })
-    expect(flowTierColors(4)).toEqual({ from: '#e879f9', to: '#f9a8d4', speed: 1.5 })
+    expect(flowTierColors(4)).toEqual({ from: '#8b5cf6', to: '#6d28d9', speed: 1.5 })
   })
 
   it('interpolates between adjacent tiers at fractional levels', () => {
     const mid = flowTierColors(2.5)
-    // midpoint between l2 (#7dd3fc→#818cf8) and l3 (#a78bfa→#e879f9)
-    expect(mid.from).toBe('#92affb')
-    expect(mid.to).toBe('#b583f9')
+    // midpoint between l2 (#7dd3fc→#818cf8) and l3 (#818cf8→#8b5cf6)
+    expect(mid.from).toBe('#7fb0fa')
+    expect(mid.to).toBe('#8674f7')
     expect(mid.speed).toBeCloseTo(1.125, 5)
+  })
+
+  it('chains every tier endpoint into the next tier without a color jump', () => {
+    for (let index = 1; index < FLOW_TIERS.length; index += 1) {
+      expect(FLOW_TIERS[index]!.from).toBe(FLOW_TIERS[index - 1]!.to)
+    }
+  })
+
+  it('keeps the complete cyan-to-violet sequence in one shared palette', () => {
+    expect(FLOW_STOPS).toEqual([
+      '#a5f3fc',
+      '#67e8f9',
+      '#7dd3fc',
+      '#818cf8',
+      '#8b5cf6',
+      '#6d28d9'
+    ])
   })
 
   it('clamps out-of-range levels instead of throwing', () => {

@@ -1,4 +1,4 @@
-import { Check, ChevronLeft, ChevronRight, CircleStop, Gauge, Send, ShieldAlert } from 'lucide-react'
+import { Check, ChevronRight, CircleStop, Gauge, Send, ShieldAlert } from 'lucide-react'
 import { type KeyboardEvent, type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   REASONING_EFFORTS,
@@ -186,10 +186,6 @@ export function Composer({
     if (!menuOpen) setPickerMode('effort')
   }, [menuOpen])
 
-  const closeMenu = () => {
-    setMenuOpen(false)
-    setPickerMode('effort')
-  }
   // The local daemon only knows two effort steps (Low → fast, Max → deep).
   // Switching to a local model writes the two-step equivalent of any middle
   // step so the persisted value always matches what the runtime applies.
@@ -197,11 +193,11 @@ export function Composer({
     onModelChange(model)
     const compatible = localDisplayEffort(settings.reasoningMode)
     if (compatible !== settings.reasoningMode) onReasoningChange(compatible)
-    closeMenu()
+    setPickerMode('effort')
   }
   const pickApiModel = (profileId: string) => {
     onApiModelPick(profileId)
-    closeMenu()
+    setPickerMode('effort')
   }
   const runSlashCommand = (cmd: string) => {
     onDraftChange('')
@@ -376,7 +372,9 @@ export function Composer({
                       onClick={() => setPickerMode('model')}>
                       <span className="composer-picker-chip-name">{activeModel}</span>
                       <span className="composer-picker-chip-sep" aria-hidden="true">·</span>
-                      <span className="composer-picker-chip-mode">{REASONING_EFFORT_LABEL[activeEffort]}</span>
+                      <span className="composer-picker-chip-mode" data-effort={activeEffort}>
+                        {REASONING_EFFORT_LABEL[activeEffort]}
+                      </span>
                       <ChevronRight aria-hidden="true" size={12} className="composer-picker-chip-chev" />
                     </button>
                     <EffortSlider
@@ -391,19 +389,6 @@ export function Composer({
                   </div>
                 ) : (
                   <div className="composer-model-pane" role="menu" aria-label="可选模型">
-                    <div className="composer-model-pane-head">
-                      <button
-                        type="button"
-                        className="composer-model-back"
-                        onClick={() => setPickerMode('effort')}>
-                        <ChevronLeft aria-hidden="true" size={13} />
-                        <span>选择模型</span>
-                      </button>
-                      <span className="composer-model-count">
-                        {((settings.apiEnabled ? settings.apiProfiles.filter((p) => p.baseUrl.trim() && p.model.trim()).length : 0)
-                          + (settings.ollamaEnabled ? settings.models.length : 0))}
-                      </span>
-                    </div>
                     <div className="composer-model-list">
                       {settings.ollamaEnabled ? settings.models.map((model) => (
                         <button
@@ -415,7 +400,6 @@ export function Composer({
                           data-selected={!settings.preferApiModel && model === settings.selectedModel}
                           onClick={() => pickModel(model)}>
                           <span className="menu-option-name">{model}</span>
-                          <span className="menu-option-tag">本地</span>
                           {!settings.preferApiModel && model === settings.selectedModel ? (
                             <Check aria-hidden="true" size={13} />
                           ) : null}
@@ -432,8 +416,7 @@ export function Composer({
                           className="menu-option"
                           data-selected={settings.preferApiModel && settings.activeApiProfileId === profile.id}
                           onClick={() => pickApiModel(profile.id)}>
-                          <span className="menu-option-name">{profile.name} / {profile.model}</span>
-                          <span className="menu-option-tag api">API</span>
+                          <span className="menu-option-name">{profile.model}</span>
                           {settings.preferApiModel && settings.activeApiProfileId === profile.id
                             ? <Check aria-hidden="true" size={13} />
                             : null}
