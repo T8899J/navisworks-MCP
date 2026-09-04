@@ -20,7 +20,8 @@ namespace NavisworksCodexMcp.Plugin
                 TestSearchPageAtLimitRemainsResumable();
                 TestScopeAllAdvancesFromNamesToProperties();
                 TestEndpointRegistryKeepsInstancesIndependent();
-                Console.WriteLine("PROTOCOL_TESTS: PASS (7/7)");
+                TestDocumentIdentityFollowsReadiness();
+                Console.WriteLine("PROTOCOL_TESTS: PASS (8/8)");
                 return 0;
             }
             catch (Exception exception)
@@ -183,6 +184,43 @@ namespace NavisworksCodexMcp.Plugin
                     Directory.Delete(dataDirectory, true);
                 }
             }
+        }
+
+        private static void TestDocumentIdentityFollowsReadiness()
+        {
+            // The reported bug: ActiveDocumentChanged fired while the document
+            // was still clear, so the identity stayed null after the models
+            // arrived. A readiness move on the same document must re-mint it.
+            Assert(
+                DocumentIdentityPolicy.ShouldResetIdentity(
+                    sameDocumentObject: true,
+                    documentHasModels: true,
+                    hasIdentity: false),
+                "A document that finished loading did not get an identity.");
+            Assert(
+                DocumentIdentityPolicy.ShouldResetIdentity(
+                    sameDocumentObject: true,
+                    documentHasModels: false,
+                    hasIdentity: true),
+                "A document that went clear kept a stale identity.");
+            Assert(
+                DocumentIdentityPolicy.ShouldResetIdentity(
+                    sameDocumentObject: false,
+                    documentHasModels: true,
+                    hasIdentity: true),
+                "A switched document did not reset its identity.");
+            Assert(
+                !DocumentIdentityPolicy.ShouldResetIdentity(
+                    sameDocumentObject: true,
+                    documentHasModels: true,
+                    hasIdentity: true),
+                "A steady loaded document re-minted its identity.");
+            Assert(
+                !DocumentIdentityPolicy.ShouldResetIdentity(
+                    sameDocumentObject: true,
+                    documentHasModels: false,
+                    hasIdentity: false),
+                "A steady no-document state triggered a spurious reset.");
         }
 
         private static void Assert(bool condition, string message)

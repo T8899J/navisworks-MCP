@@ -29,6 +29,10 @@ export const desktopGateway = {
     return Boolean(api())
   },
 
+  async windowControl(action: 'minimize' | 'toggle-maximize' | 'close'): Promise<void> {
+    await requireApi().request('window.control', { action })
+  },
+
   async listSessions(): Promise<SessionSummary[]> {
     const response = await requireApi().request('sessions.list')
     return response.map(normalizeSummary)

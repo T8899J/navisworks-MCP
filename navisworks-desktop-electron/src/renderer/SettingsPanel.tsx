@@ -1,7 +1,6 @@
 import {
   Bot,
   Check,
-  CheckCircle2,
   ChevronDown,
   Database,
   KeyRound,
@@ -10,20 +9,16 @@ import {
   Palette,
   Plus,
   RefreshCw,
-  Settings,
   Trash2,
-  Wrench,
-  X
+  Wrench
 } from 'lucide-react'
 import {
-  type KeyboardEvent as ReactKeyboardEvent,
   useEffect,
-  useId,
   useRef,
   useState
 } from 'react'
 import type { ThemeMode, ToolName } from '../shared/ipc'
-import type { DesktopSettings, NavisworksStatus } from './chatTypes'
+import type { DesktopSettings } from './chatTypes'
 
 export interface RuntimeDiagnostics {
   dataDirectory?: string
@@ -147,13 +142,12 @@ const thumbAlignedLeft = (index: number, count: number): string =>
   `calc(${THUMB_HALF_WIDTH_PX}px + (100% - ${THUMB_HALF_WIDTH_PX * 2}px) * ${index / (count - 1)})`
 
 interface SettingsPanelProps {
-  open: boolean
   settings: DesktopSettings
   themeMode: ThemeMode
-  navisworks: NavisworksStatus
   serviceAvailable: boolean
   diagnostics?: RuntimeDiagnostics
-  onClose(): void
+  /** Category picked in the sidebar's settings list; renders its page. */
+  activePage: SettingsPageId
   onThemeModeChange(mode: ThemeMode): void | Promise<void>
   onFontScaleChange(scale: number): void | Promise<void>
   onProviderChange(patch: {
@@ -180,12 +174,11 @@ interface SettingsPanelProps {
   cloudLatency?: { ok: boolean; ms: number } | null
   onNotice(message: string): void
   onTestApiProfile(profileId: string): Promise<{ connected: boolean; message: string }>
-  onRefreshNavisworks(): void | Promise<void>
 }
 
-type SettingsPageId = 'appearance' | 'model' | 'tools' | 'runtime' | 'navisworks'
+export type SettingsPageId = 'appearance' | 'model' | 'tools' | 'runtime'
 
-const SETTINGS_PAGES: Array<{
+export const SETTINGS_PAGES: Array<{
   id: SettingsPageId
   label: string
   icon: typeof Palette
@@ -193,18 +186,15 @@ const SETTINGS_PAGES: Array<{
   { id: 'appearance', label: '外观', icon: Palette },
   { id: 'model', label: '模型', icon: Bot },
   { id: 'tools', label: '工具', icon: Wrench },
-  { id: 'runtime', label: '运行信息', icon: Database },
-  { id: 'navisworks', label: 'Navisworks', icon: CheckCircle2 }
+  { id: 'runtime', label: '运行信息', icon: Database }
 ]
 
 export function SettingsPanel({
-  open,
   settings,
   themeMode,
-  navisworks,
   serviceAvailable,
   diagnostics,
-  onClose,
+  activePage,
   onThemeModeChange,
   onFontScaleChange,
   onProviderChange,
@@ -216,25 +206,16 @@ export function SettingsPanel({
   onFetchCloudModels,
   cloudLatency,
   onNotice,
-  onTestApiProfile,
-  onRefreshNavisworks
+  onTestApiProfile
 }: SettingsPanelProps) {
-  const titleId = useId()
-  const panelRef = useRef<HTMLDivElement>(null)
-  const closeRef = useRef<HTMLButtonElement>(null)
-  const restoreFocusRef = useRef<HTMLElement | null>(null)
   // Separate busy flags: the connectivity test and the local model refresh
   // are unrelated operations and must never disable each other.
   const [testBusy, setTestBusy] = useState(false)
   const [refreshBusy, setRefreshBusy] = useState(false)
   const [cloudModelsBusy, setCloudModelsBusy] = useState(false)
   const [cloudModels, setCloudModels] = useState<string[]>([])
-  const [navisworksBusy, setNavisworksBusy] = useState(false)
-  // Last-viewed page survives close/reopen within the session.
-  const [activePage, setActivePage] = useState<SettingsPageId>('appearance')
   // Provider connection inputs keep local text state (cherry-studio style
   // blur-commit) and re-sync when the saved settings change underneath.
-  // Hooks stay above the `if (!open)` early return — React forbids reordering.
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(
     settings.activeApiProfileId ?? settings.apiProfiles[0]?.id ?? null
   )
@@ -261,43 +242,6 @@ export function SettingsPanel({
     setCloudModels([])
   }, [selectedProfile?.id, selectedProfile?.name, selectedProfile?.baseUrl, selectedProfile?.model])
 
-  useEffect(() => {
-    if (!open) return
-    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const frame = window.requestAnimationFrame(() => closeRef.current?.focus())
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      window.cancelAnimationFrame(frame)
-      document.body.style.overflow = previousOverflow
-      restoreFocusRef.current?.focus()
-    }
-  }, [open])
-
-  if (!open) return null
-
-  const trapFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      onClose()
-      return
-    }
-    if (event.key !== 'Tab') return
-    const focusable = panelRef.current?.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
-    )
-    if (!focusable?.length) return
-    const first = focusable[0]
-    const last = focusable[focusable.length - 1]
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault()
-      last?.focus()
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault()
-      first?.focus()
-    }
-  }
-
   const refreshModels = async () => {
     setRefreshBusy(true)
     try {
@@ -318,15 +262,6 @@ export function SettingsPanel({
       if (!result.connected) onNotice(result.message)
     } finally {
       setTestBusy(false)
-    }
-  }
-
-  const refreshNavisworks = async () => {
-    setNavisworksBusy(true)
-    try {
-      await onRefreshNavisworks()
-    } finally {
-      setNavisworksBusy(false)
     }
   }
 
@@ -441,49 +376,13 @@ export function SettingsPanel({
   }
 
   return (
-    <div className="settings-overlay" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose()
-    }}>
-      <div
-        ref={panelRef}
-        className="settings-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        onKeyDown={trapFocus}>
-        <header className="settings-header">
-          <div className="settings-title-copy">
-            <span className="settings-title-icon" aria-hidden="true"><Settings size={18} /></span>
-            <h2 id={titleId}>设置</h2>
-          </div>
-          <button ref={closeRef} className="icon-button" type="button" aria-label="关闭设置" onClick={onClose}>
-            <X aria-hidden="true" size={18} />
-          </button>
-        </header>
-
-        <div className="settings-content">
-          <nav className="settings-nav" aria-label="设置分类">
-            {SETTINGS_PAGES.map((page) => {
-              const NavIcon = page.icon
-              const active = activePage === page.id
-              return (
-                <button
-                  key={page.id}
-                  type="button"
-                  className="settings-nav-item"
-                  data-active={active}
-                  aria-current={active ? 'page' : undefined}
-                  onClick={() => setActivePage(page.id)}>
-                  <NavIcon aria-hidden="true" size={16} />
-                  <span>{page.label}</span>
-                </button>
-              )
-            })}
-          </nav>
-          <div className="settings-page" role="region" aria-label={activePageMeta.label}>
-            <header className="settings-page-heading">
-              <h3>{activePageMeta.label}</h3>
-            </header>
+    <section
+      className="settings-page"
+      role="region"
+      aria-label={activePageMeta.label}>
+      <header className="settings-page-heading">
+        <h3>{activePageMeta.label}</h3>
+      </header>
             {activePage === 'appearance' ? (
               <>
                 <fieldset className="theme-choice">
@@ -795,20 +694,6 @@ export function SettingsPanel({
                 {diagnostics?.runtime ? <div><dt>运行时</dt><dd>{diagnostics.runtime}</dd></div> : null}
               </dl>
             ) : null}
-
-            {activePage === 'navisworks' ? (
-              <div className="connection-card" data-connected={navisworks.connected}>
-                <span className="status-dot" aria-hidden="true" />
-                <div><strong>{navisworks.connected ? '已连接' : '未连接'}</strong><small>{navisworks.documentName || navisworks.status}</small></div>
-                <button className="secondary-button" type="button" disabled={navisworksBusy || !serviceAvailable} onClick={() => void refreshNavisworks()}>
-                  <RefreshCw className={navisworksBusy ? 'running' : undefined} aria-hidden="true" size={14} />
-                  刷新
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </div>
-      </div>
-    </div>
+    </section>
   )
 }

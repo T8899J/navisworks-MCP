@@ -1,14 +1,20 @@
-import { PanelLeftClose, Pin, PinOff, Search, Settings, SquarePen, Trash2 } from 'lucide-react'
+import { ArrowLeft, PanelLeftClose, Pin, PinOff, Search, Settings, SquarePen, Trash2 } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { useMemo } from 'react'
 import type { SessionSummary } from './chatTypes'
 import { splitSessionList } from './sessionList'
+import { SETTINGS_PAGES, type SettingsPageId } from './SettingsPanel'
 
 interface SidebarProps {
   sessions: SessionSummary[]
   activeSessionId?: string
   open: boolean
   busy?: boolean
+  /** Renders the settings category list instead of the session list. */
+  settingsMode?: boolean
+  activeSettingsPage?: SettingsPageId
+  onSettingsPageChange?(page: SettingsPageId): void
+  onExitSettings?(): void
   onClose(): void
   onCreate(): void
   onOpenSearch(): void
@@ -23,6 +29,10 @@ export function Sidebar({
   activeSessionId,
   open,
   busy,
+  settingsMode = false,
+  activeSettingsPage = 'appearance',
+  onSettingsPageChange,
+  onExitSettings,
   onClose,
   onCreate,
   onOpenSearch,
@@ -87,51 +97,92 @@ export function Sidebar({
         data-open={open}
         aria-hidden={!open}
         aria-label="会话导航">
-        <div className="sidebar-header">
-          <span className="app-name">Curi</span>
-          <div className="sidebar-title-actions">
-            <button
-              className="icon-button sidebar-search-toggle"
-              type="button"
-              aria-label="搜索聊天"
-              aria-haspopup="dialog"
-              title="搜索聊天"
-              onClick={onOpenSearch}>
-              <Search aria-hidden="true" size={22} />
+        {settingsMode ? (
+          <>
+            <div className="session-row settings-category-row">
+              <button
+                type="button"
+                className="session-select settings-category-item"
+                onClick={() => onExitSettings?.()}>
+                <span className="session-title-line">
+                  <ArrowLeft aria-hidden="true" size={13} />
+                  <span className="session-title">返回工作区</span>
+                </span>
+              </button>
+            </div>
+            <nav className="session-list settings-category-list" aria-label="设置分类">
+              {SETTINGS_PAGES.map((page) => {
+                const NavIcon = page.icon
+                const active = page.id === activeSettingsPage
+                return (
+                  <div
+                    key={page.id}
+                    className="session-row"
+                    data-active={active}>
+                    <button
+                      type="button"
+                      className="session-select settings-category-item"
+                      aria-current={active ? 'page' : undefined}
+                      onClick={() => onSettingsPageChange?.(page.id)}>
+                      <span className="session-title-line">
+                        <NavIcon aria-hidden="true" size={13} />
+                        <span className="session-title">{page.label}</span>
+                      </span>
+                    </button>
+                  </div>
+                )
+              })}
+            </nav>
+          </>
+        ) : (
+          <>
+            <div className="sidebar-header">
+              <span className="app-name">Curi</span>
+              <div className="sidebar-title-actions">
+                <button
+                  className="icon-button sidebar-search-toggle"
+                  type="button"
+                  aria-label="搜索聊天"
+                  aria-haspopup="dialog"
+                  title="搜索聊天"
+                  onClick={onOpenSearch}>
+                  <Search aria-hidden="true" size={22} />
+                </button>
+                <button className="icon-button sidebar-close" type="button" aria-label="收起会话栏" onClick={onClose}>
+                  <PanelLeftClose aria-hidden="true" size={18} />
+                </button>
+              </div>
+            </div>
+
+            <button className="new-session-button" type="button" onClick={onCreate} disabled={busy}>
+              <SquarePen aria-hidden="true" size={15} />
+              新对话
             </button>
-            <button className="icon-button sidebar-close" type="button" aria-label="收起会话栏" onClick={onClose}>
-              <PanelLeftClose aria-hidden="true" size={18} />
-            </button>
-          </div>
-        </div>
 
-        <button className="new-session-button" type="button" onClick={onCreate} disabled={busy}>
-          <SquarePen aria-hidden="true" size={15} />
-          新对话
-        </button>
+            <div className="session-list" role="list" aria-label="会话列表">
+              {sessions.length === 0 ? (
+                <div className="session-empty">还没有会话</div>
+              ) : (
+                <>
+                  {renderGroup('置顶', list.pinned)}
+                  {list.groups.map((group) => renderGroup(group.label, group.sessions))}
+                </>
+              )}
+            </div>
 
-        <div className="session-list" role="list" aria-label="会话列表">
-          {sessions.length === 0 ? (
-            <div className="session-empty">还没有会话</div>
-          ) : (
-            <>
-              {renderGroup('置顶', list.pinned)}
-              {list.groups.map((group) => renderGroup(group.label, group.sessions))}
-            </>
-          )}
-        </div>
-
-        <div className="sidebar-footer">
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="打开设置"
-            aria-haspopup="dialog"
-            title="设置"
-            onClick={onOpenSettings}>
-            <Settings aria-hidden="true" size={18} />
-          </button>
-        </div>
+            <div className="sidebar-footer">
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="打开设置"
+                aria-haspopup="dialog"
+                title="设置"
+                onClick={onOpenSettings}>
+                <Settings aria-hidden="true" size={18} />
+              </button>
+            </div>
+          </>
+        )}
       </aside>
       {open ? <button className="sidebar-backdrop" type="button" aria-label="关闭会话栏" onClick={onClose} /> : null}
     </>

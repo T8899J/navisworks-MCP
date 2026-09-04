@@ -2,8 +2,8 @@
   color-scheme: dark;
   font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
   font-synthesis: none;
-  --background: #151515;
-  --sidebar: #191919;
+  --background: #141414;
+  --sidebar: #1d1d1d;
   --surface: #202020;
   --surface-elevated: #282828;
   --surface-hover: #303030;
@@ -21,7 +21,7 @@
   --accent: #e9e9e9;
   --accent-ink: #151515;
   --focus-ring: rgba(255, 255, 255, 0.72);
-  --header-background: rgba(21, 21, 21, 0.92);
+  --header-background: rgba(20, 20, 20, 0.92);
   --overlay-background: rgba(0, 0, 0, 0.58);
   --composer-surface: rgba(34, 34, 34, 0.94);
   --composer-border: rgba(255, 255, 255, 0.14);
@@ -34,7 +34,9 @@
   --error-surface: rgba(128, 47, 47, 0.18);
   --error-border: rgba(240, 138, 138, 0.28);
   --conversation-max-width: 920px;
-  --conversation-side-space: clamp(12px, 3.4vw, 48px);
+  /* Floor of 22px keeps the composer/message edges clear of the pane's
+     18px rounded corner — their border lines must never cross the arc. */
+  --conversation-side-space: clamp(22px, 3.4vw, 48px);
   --conversation-rail-gutter: 0px;
   /* Global font scale (appearance setting). Sizes below ride it so text
      grows while the layout frame stays fixed. */
@@ -53,8 +55,8 @@
 :root[data-theme="light"],
 :root[data-theme-mode="light"] {
   color-scheme: light;
-  --background: #f7f7f7;
-  --sidebar: #f1f1f1;
+  --background: #fbfbfb;
+  --sidebar: #eaeaea;
   --surface: #ffffff;
   --surface-elevated: #ffffff;
   --surface-hover: #e8e8e8;
@@ -72,7 +74,7 @@
   --accent: #1f1f1f;
   --accent-ink: #ffffff;
   --focus-ring: #005fb8;
-  --header-background: rgba(247, 247, 247, 0.94);
+  --header-background: rgba(251, 251, 251, 0.94);
   --overlay-background: rgba(0, 0, 0, 0.35);
   --composer-surface: rgba(255, 255, 255, 0.94);
   --composer-border: rgba(0, 0, 0, 0.12);
@@ -91,8 +93,8 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]):not([data-theme-mode="dark"]) {
     color-scheme: light;
-    --background: #f7f7f7;
-    --sidebar: #f1f1f1;
+    --background: #fbfbfb;
+    --sidebar: #eaeaea;
     --surface: #ffffff;
     --surface-elevated: #ffffff;
     --surface-hover: #e8e8e8;
@@ -110,7 +112,7 @@
     --accent: #1f1f1f;
     --accent-ink: #ffffff;
     --focus-ring: #005fb8;
-    --header-background: rgba(247, 247, 247, 0.94);
+    --header-background: rgba(251, 251, 251, 0.94);
     --overlay-background: rgba(0, 0, 0, 0.35);
     --composer-surface: rgba(255, 255, 255, 0.94);
     --composer-border: rgba(0, 0, 0, 0.12);
@@ -190,14 +192,124 @@ summary:focus-visible,
   border: 0;
 }
 
+/* Frameless window: self-drawn title bar above the app shell. */
+.app-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  /* Shows through the chat pane's rounded top-left corner: the pane reads as
+     floating above the sidebar-colored base. */
+  background: var(--sidebar);
+}
+
+.title-bar {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: 34px;
+  /* Sidebar color covers the whole strip, window buttons included. */
+  background: var(--sidebar);
+  border-bottom: 0;
+}
+
+.title-bar-menu {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 100%;
+  padding-left: 6px;
+}
+
+/* Menu entries share one pill hover that wraps only the label/icon — the
+   same shape and rhythm as the sidebar's session rows. */
+.title-bar-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 9px;
+  color: color-mix(in srgb, var(--text) 78%, transparent);
+  font-size: var(--text-label);
+  font-weight: 550;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.title-bar-item:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.title-bar-icon {
+  /* Small rounded rectangle: wider than tall, but not a long pill. */
+  width: 32px;
+  padding: 0;
+  border-radius: 6px;
+}
+
+.title-bar-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.title-bar-item:disabled:hover {
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.title-bar-drag {
+  flex: 1;
+  height: 100%;
+  -webkit-app-region: drag;
+}
+
+.title-bar-controls {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.title-bar-button {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 100%;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.title-bar-button:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.title-bar-close:hover {
+  color: #fff;
+  background: #e81123;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 276px minmax(0, 1fr);
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   min-width: 0;
+  /* Collapse animates the grid track itself: the instant 276px→0 swap made
+     the whole layout jump with no transition to see. */
+  transition: grid-template-columns 200ms ease;
 }
 
-/* Desktop collapse changes layout ownership: the hidden sidebar occupies no grid track. */
+/* Desktop collapse squeezes the track to zero while the sidebar content
+   fades and slides out inside the shrinking column. */
 .app-shell:has(> .sidebar[data-open="false"]) {
   grid-template-columns: 0 minmax(0, 1fr);
 }
@@ -212,8 +324,9 @@ summary:focus-visible,
   padding: 18px 12px 10px;
   overflow: hidden;
   background: var(--sidebar);
-  border-right: 1px solid var(--border-subtle);
-  transition: opacity 140ms ease, transform 140ms ease, visibility 140ms;
+  /* No right border: the sidebar/pane color step already separates them. */
+  transition: opacity 180ms ease, transform 200ms ease, padding 200ms ease,
+    visibility 200ms;
 }
 
 .sidebar[data-open="false"] {
@@ -467,8 +580,19 @@ summary:focus-visible,
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: 58px minmax(0, 1fr);
+  grid-template-rows: 54px minmax(0, 1fr);
   background: var(--background);
+  /* Rounded where the pane meets the title bar's sidebar strip: the content
+     area reads as a floating card instead of running edge to edge. overflow
+     clips the header's own background so the radius stays visible. */
+  overflow: hidden;
+  border-top-left-radius: 18px;
+}
+
+/* The settings view is a single full-height page (it carries its own header),
+   so the header+content row template must not squeeze it into the 54px row. */
+.chat-pane[data-view="settings"] {
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .chat-header {
@@ -480,9 +604,25 @@ summary:focus-visible,
   align-items: center;
   gap: 10px;
   padding: 0 18px;
-  background: var(--header-background);
-  border-bottom: 1px solid var(--border-subtle);
-  backdrop-filter: blur(16px);
+  /* Same fill as the pane body: the header never scrolls content behind
+     itself, so a distinct translucent fill + blur only drew a visible band
+     across the pane's top. Flat and seamless now. */
+  background: var(--background);
+}
+
+/* Bottom separator drawn as an inset pseudo-element: it starts at the
+   pane's corner radius so the line never cuts across the rounded corner. */
+.chat-header::after {
+  content: "";
+  position: absolute;
+  /* Full width: the corner arc lives at the pane's top (y < 18px), the
+     separator at the header's bottom edge (y = 54px) — they never meet, so
+     the line simply runs edge to edge. */
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--border-subtle);
 }
 
 .chat-title {
@@ -502,6 +642,7 @@ summary:focus-visible,
 .header-actions {
   display: flex;
   min-width: 0;
+  grid-column: 3;
   align-items: center;
   justify-content: flex-end;
   gap: 7px;
@@ -1966,7 +2107,14 @@ summary:focus-visible,
     0 0 0 1px rgba(0, 0, 0, 0.20),
     0 0 5px color-mix(in srgb, var(--bar-glow) 70%, transparent);
   pointer-events: none;
+  /* 90ms ease only shapes discrete jumps (keyboard etc.). While dragging the
+     handle must track the pointer instantly: the flow light already does, so
+     any handle lag reads as the light outrunning the slider. */
   transition: left 90ms ease-out, transform 90ms ease-out;
+}
+
+.composer-pill[data-scrubbing="true"] .composer-pill-handle {
+  transition: none;
 }
 
 /* Particle burst layer — soft tier-coloured sparks emitted at the handle on every
@@ -2238,30 +2386,15 @@ summary:focus-visible,
   font-size: var(--text-label);
 }
 
-.settings-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: var(--overlay-background);
-  backdrop-filter: blur(5px);
-}
-
-.settings-panel {
-  display: grid;
-  width: min(900px, 100%);
-  /* Fixed frame height: every page shares one window size; taller pages
-     scroll inside the page column instead of resizing the dialog. */
-  height: min(700px, calc(100vh - 48px));
-  grid-template-rows: auto minmax(0, 1fr);
-  overflow: hidden;
-  color: var(--text);
+/* Settings fills the two app regions: the sidebar shows the category list,
+   the chat-pane shows the active page — same surfaces as the main view. */
+.settings-page {
+  min-height: 0;
+  padding: 18px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   background: var(--background);
-  border: 1px solid var(--border-strong);
-  border-radius: 16px;
-  box-shadow: 0 24px 80px var(--shadow-color);
 }
 
 .settings-header {
@@ -2305,45 +2438,22 @@ summary:focus-visible,
   font-weight: 700;
 }
 
-.settings-content {
-  display: grid;
-  min-height: 0;
-  grid-template-columns: 172px minmax(0, 1fr);
+/* Sidebar category entries in settings mode: reuse .session-row visuals
+   verbatim (the wrapper carries data-active); only the icon gap is added. */
+.settings-category-row {
+  flex: 0 0 auto;
+  margin-bottom: 6px;
 }
 
-.settings-nav {
-  display: flex;
-  min-height: 0;
-  flex-direction: column;
-  gap: 2px;
-  padding: 14px 10px;
-  background: var(--surface);
-  border-right: 1px solid var(--border-subtle);
+.settings-category-list {
+  gap: 4px;
 }
 
-.settings-nav-item {
+.settings-category-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
-  color: var(--text-secondary);
-  font-size: var(--text-label);
-  font-weight: 590;
-  text-align: left;
-  background: transparent;
-  border: 0;
-  border-radius: 8px;
-  cursor: pointer;
-}
-
-.settings-nav-item:hover {
-  color: var(--text);
-  background: var(--surface-hover);
-}
-
-.settings-nav-item[data-active="true"] {
-  color: var(--text);
-  background: var(--surface-active);
+  padding-right: 11px;
 }
 
 .settings-page {
@@ -3312,7 +3422,7 @@ select:focus-visible,
 
 @media (max-width: 620px) {
   :root {
-    --conversation-side-space: 12px;
+    --conversation-side-space: 22px;
   }
 
   .chat-header {
@@ -3335,37 +3445,6 @@ select:focus-visible,
 
   .role-user .message-shell {
     max-width: 88%;
-  }
-
-  .settings-overlay {
-    align-items: end;
-    padding: 0;
-  }
-
-  .settings-panel {
-    width: 100%;
-    height: min(88vh, 700px);
-    border-right: 0;
-    border-bottom: 0;
-    border-left: 0;
-    border-radius: 16px 16px 0 0;
-  }
-
-  .settings-content {
-    grid-template-columns: 1fr;
-  }
-
-  .settings-nav {
-    flex-direction: row;
-    gap: 4px;
-    padding: 10px 12px 0;
-    overflow-x: auto;
-    border-right: 0;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .settings-nav-item {
-    white-space: nowrap;
   }
 
   .settings-page {
@@ -3422,7 +3501,6 @@ select:focus-visible,
   .sidebar,
   .chat-header,
   .composer-surface,
-  .settings-panel,
   .theme-option,
   .connection-card {
     border-color: CanvasText;
@@ -3437,9 +3515,5 @@ select:focus-visible,
   .secondary-button,
   .new-session-button {
     border: 1px solid ButtonText;
-  }
-
-  .settings-overlay {
-    background: transparent;
   }
 }

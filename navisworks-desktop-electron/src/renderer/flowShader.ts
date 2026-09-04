@@ -27,6 +27,14 @@ void main() {
  *  3. a low-alpha white sheen sweeps from the handle toward the left edge;
  *     its phase (u_sheen, 0…1) wraps host-side so the sweep repeats forever.
  *
+ * When the head moves backward (effort lowered), [0, u_head] shrinks and the
+ * hard mask would evaporate the whole revealed region in one frame — a
+ * visible gap. u_trail extends a fading band past the head instead: light
+ * that the head just abandoned keeps drawing from the same fbm field and
+ * alpha-fades over u_trail, so lowering the effort reads as the light
+ * flowing back, not being chopped off. u_trail is host-driven (it stretches
+ * with the retreat speed) and is 0 whenever the head is still or advancing.
+ *
  * Color follows a cumulative aurora "curiosity → creation" ramp. u_palette
  * contains the full cyan-to-violet chain and u_level reveals one additional
  * stop per tier, so higher effort retains every earlier colour. u_from/u_to
@@ -41,6 +49,7 @@ uniform float u_sheen;  // sheen phase in [0,1), one sweep per wrap
 uniform float u_bubble_time;  // independent bubble phase, host-wrapped
 uniform float u_max_burst;    // transient 0…1 burst when entering Max
 uniform float u_head;   // eased fill fraction 0…1
+uniform float u_trail;  // backward-fade width past the head, 0…0.35
 uniform float u_level;  // normalized effort tier 0…1; Max is exactly 1
 uniform vec3  u_from;
 uniform vec3  u_to;
@@ -94,7 +103,15 @@ void main() {
   float aspect = u_resolution.x / max(u_resolution.y, 1.0);
   vec2 warpP = vec2(uv.x * aspect, uv.y);
 
-  if (uv.x > u_head) {
+  // Mask: full light inside [0, u_head]; past the head, a fading trail of
+  // width u_trail keeps the just-abandoned light flowing back instead of
+  // evaporating in one frame. u_trail = 0 (forward / idle) must be an exact
+  // hard cut: any epsilon-wide tail would let the light peek past the handle.
+  float trailFade = 1.0 - smoothstep(0.0, u_trail, uv.x - u_head);
+  float maskAlpha = uv.x <= u_head
+    ? 1.0
+    : (u_trail > 0.0 ? trailFade : 0.0);
+  if (maskAlpha <= 0.0) {
     fragColor = vec4(0.0);
     return;
   }
@@ -114,7 +131,10 @@ void main() {
 
   // Cumulative base gradient. Level 0 exposes palette stops 0→1; every
   // higher level adds one stop until Max shows the complete 0→5 chain.
-  float baseT = u_head > 1e-5 ? uv.x / u_head : 0.0;
+  // Inside the backward trail (uv.x > u_head) the normalized position pins
+  // to 1.0 so the fading band keeps the head colour instead of sampling
+  // past the palette's last stop.
+  float baseT = u_head > 1e-5 ? min(uv.x / u_head, 1.0) : 0.0;
   vec3 base = cumulativePalette(baseT, 1.0 + u_level * 4.0);
 
   // Head glow: peak at the head, falloff to the left. The distance is
@@ -185,8 +205,9 @@ void main() {
 
   // Premultiplied output: near the left edge the shader fades to transparent
   // so the CSS fallback's transparent→from gradient shows through, giving
-  // the same soft fade-in the static fill always had.
-  fragColor = vec4(color * leftFade, leftFade);
+  // the same soft fade-in the static fill always had. The mask alpha carries
+  // the backward trail's fade on the way out.
+  fragColor = vec4(color * leftFade * maskAlpha, leftFade * maskAlpha);
 }
 `
 
@@ -236,6 +257,70 @@ export function flowTierColors(level: number): { from: string; to: string; speed
     to: mixHex(a.to, b.to, f),
     speed: a.speed + (b.speed - a.speed) * f
   }
+}
+
+/** How fast the eased head chases its target while NOT dragging (1/s). */
+const FLOW_HEAD_EASE_RATE = 14
+/** Below this remaining gap the head snaps to the target and stops easing. */
+const FLOW_HEAD_SNAP_EPSILON = 0.0005
+
+/**
+ * Advances the flow-light's head toward the slider's fill fraction.
+ *
+ * While the user is dragging (or motion is reduced), the head tracks the
+ * target 1:1: the handle follows the pointer instantly, so an eased head
+ * trails a fast drag and opens a visible gap between the handle and the
+ * light's front. The exponential ease only shapes discrete jumps (keyboard
+ * steps, programmatic changes) when the gesture is idle. Reduced motion also
+ * snaps because the host freezes dt at 0 there — an eased head could never
+ * move at all, and a static bar must still follow the value instantly.
+ */
+export function advanceFlowHead(
+  current: number,
+  target: number,
+  dtSeconds: number,
+  dragging: boolean,
+  reducedMotion: boolean
+): number {
+  const t = Number.isFinite(target)
+    ? Math.max(0, Math.min(1, target))
+    : Math.max(0, Math.min(1, current))
+  if (dragging || reducedMotion) return t
+  const next = current + (t - current) * (1 - Math.exp(-dtSeconds * FLOW_HEAD_EASE_RATE))
+  return Math.abs(t - next) < FLOW_HEAD_SNAP_EPSILON ? t : next
+}
+
+/** Widest the backward trail may grow, as a fraction of the bar. */
+const FLOW_TRAIL_MAX = 0.35
+/** How fast the trail fades once the head stops retreating (1/s). The
+ *  afterglow must read as a quick flow-back (~150 ms), not linger past the
+ *  handle — anything slower reads as the light lagging the slider. */
+const FLOW_TRAIL_DECAY_RATE = 20
+/** Fraction of one frame's retreat stretched into trail width (0…1 scale). */
+const FLOW_TRAIL_GAIN = 0.9
+
+/**
+ * Advances the backward trail width that keeps lowered-effort light from
+ * evaporating in one frame.
+ *
+ * The trail accumulates each frame's head retreat (scaled by FLOW_TRAIL_GAIN)
+ * on top of the decaying remainder, so its width tracks the RECENT retreat —
+ * a wake behind the handle, not the gesture's high-water mark. Forward motion
+ * kills it outright: a lingering band would draw light past the handle and
+ * the fill's leading edge would outrun the slider.
+ */
+export function advanceFlowTrail(
+  currentTrail: number,
+  previousHead: number,
+  currentHead: number,
+  dtSeconds: number
+): number {
+  const retreat = previousHead - currentHead
+  if (retreat < 0) return 0
+  let next = currentTrail * Math.exp(-dtSeconds * FLOW_TRAIL_DECAY_RATE)
+  next = Math.min(next + retreat * FLOW_TRAIL_GAIN, FLOW_TRAIL_MAX)
+  if (next < 1e-4) next = 0
+  return next
 }
 
 function mixHex(a: string, b: string, t: number): string {

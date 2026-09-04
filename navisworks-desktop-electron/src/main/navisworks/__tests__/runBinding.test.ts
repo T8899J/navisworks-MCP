@@ -52,6 +52,38 @@ describe('Navisworks Run binding', () => {
       { query: 'x' },
     )).rejects.toMatchObject({ code: 'TARGET_INSTANCE_DISCONNECTED' })
   })
+
+  it('binds a legacy plugin whose status does not report bridgeSessionId', async () => {
+    // Status shape of plugins before 2026-09-01: no bridgeSessionId field.
+    const bridge = bridgeStub({ connected: true, documentInstanceId: 'doc-a' })
+    const binding = await createNavisworksRunBinding(instanceA(), bridge)
+    expect(binding).toMatchObject({
+      instanceId: 'bridge-a',
+      pipeName: 'pipe-a',
+      bridgeSessionId: '1:2026-09-01T00:00:00Z',
+      documentInstanceId: 'doc-a',
+    })
+  })
+
+  it('executes calls against a legacy binding without a reported session id', async () => {
+    const bridge = bridgeStub({ connected: true })
+    const binding = await createNavisworksRunBinding(instanceA(), bridge)
+    await expect(callWithNavisworksRunBinding(
+      bridge,
+      binding,
+      'navisworks_get_selection',
+      { limit: 5 },
+    )).resolves.toMatchObject({ ok: true })
+  })
+
+  it('fails closed when a reported session id mismatches the discovered instance', async () => {
+    const bridge = bridgeStub({
+      connected: true,
+      bridgeSessionId: 'bridge-restarted',
+    })
+    await expect(createNavisworksRunBinding(instanceA(), bridge))
+      .rejects.toMatchObject({ code: 'INSTANCE_CHANGED' })
+  })
 })
 
 function bridgeStub(status: Record<string, unknown>): NavisworksBridgeClient {

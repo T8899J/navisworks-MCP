@@ -3,6 +3,8 @@ import {
   FLOW_FRAGMENT_SHADER,
   FLOW_STOPS,
   FLOW_VERTEX_SHADER,
+  advanceFlowHead,
+  advanceFlowTrail,
   flowTierColors
 } from './flowShader'
 
@@ -36,6 +38,7 @@ interface DrawState {
   bubbleTime: WebGLUniformLocation
   maxBurst: WebGLUniformLocation
   head: WebGLUniformLocation
+  trail: WebGLUniformLocation
   level: WebGLUniformLocation
   from: WebGLUniformLocation
   to: WebGLUniformLocation
@@ -85,6 +88,7 @@ function createState(gl: WebGL2RenderingContext): DrawState {
     bubbleTime: gl.getUniformLocation(program, 'u_bubble_time')!,
     maxBurst: gl.getUniformLocation(program, 'u_max_burst')!,
     head: gl.getUniformLocation(program, 'u_head')!,
+    trail: gl.getUniformLocation(program, 'u_trail')!,
     level: gl.getUniformLocation(program, 'u_level')!,
     from: gl.getUniformLocation(program, 'u_from')!,
     to: gl.getUniformLocation(program, 'u_to')!,
@@ -193,6 +197,7 @@ export function FlowLightCanvas({
     let maxBurst = 0
     let maxBurstElapsed = MAX_BURST_DURATION_SECONDS
     let headSmooth = clamp01(progressRef.current)
+    let trailSmooth = 0
     let scrubSmooth = clamp01(scrubRef.current)
     // Tier palette is cached per level — flowTierColors parses hex strings,
     // which would otherwise allocate on every frame for identical input.
@@ -226,12 +231,22 @@ export function FlowLightCanvas({
         : Math.min(lastMs === 0 ? 1 / 60 : (nowMs - lastMs) / 1000, 1 / 30)
       lastMs = nowMs
 
-      // Eased head: the light's front travels toward the target value
-      // instead of teleporting, which is what sells "flow" during drags
-      // and keyboard jumps alike.
+      // Eased head: the light's front travels toward the target value on
+      // discrete jumps, but tracks the handle 1:1 while dragging — an eased
+      // head trails a fast drag and opens a visible gap at the slider.
       const targetHead = clamp01(progressRef.current)
-      headSmooth += (targetHead - headSmooth) * (1 - Math.exp(-dt * 14))
-      if (Math.abs(targetHead - headSmooth) < 0.0005) headSmooth = targetHead
+      const previousHead = headSmooth
+      headSmooth = advanceFlowHead(
+        headSmooth,
+        targetHead,
+        dt,
+        scrubRef.current > 0,
+        reducedMotionRef.current
+      )
+      // Lowering the effort shrinks [0, head]; without a fade the abandoned
+      // region evaporates in one frame (visible gap while dragging back).
+      // The trail stretches with the retreat and relaxes when it stops.
+      trailSmooth = advanceFlowTrail(trailSmooth, previousHead, headSmooth, dt)
 
       // Eased scrub energy: press/release ramp instead of a 0→1 step.
       const targetScrub = clamp01(scrubRef.current)
@@ -284,6 +299,7 @@ export function FlowLightCanvas({
       gl.uniform1f(state.bubbleTime, bubblePhase)
       gl.uniform1f(state.maxBurst, maxBurst)
       gl.uniform1f(state.head, headSmooth)
+      gl.uniform1f(state.trail, trailSmooth)
       gl.uniform1f(state.level, level01 / 4)
       setVec3(gl, state.from, cachedColors.from)
       setVec3(gl, state.to, cachedColors.to)

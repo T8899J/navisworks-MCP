@@ -1098,7 +1098,11 @@ namespace NavisworksCodexMcp.Plugin
         private void EnsureDocumentState()
         {
             Document currentDocument = Application.ActiveDocument;
-            if (!ReferenceEquals(currentDocument, cachedDocument))
+            bool documentHasModels = currentDocument != null && !currentDocument.IsClear;
+            if (DocumentIdentityPolicy.ShouldResetIdentity(
+                    ReferenceEquals(currentDocument, cachedDocument),
+                    documentHasModels,
+                    documentInstanceId != null))
             {
                 ResetSessionState();
             }

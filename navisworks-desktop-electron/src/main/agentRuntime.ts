@@ -62,7 +62,7 @@ import {
 } from './agent/semanticMemory'
 import {
   CURI_CORE_PROMPT,
-  NAVISWORKS_WORKSPACE_PROMPT,
+  NAVISWORKS_CAPABILITY_PROMPT,
 } from './agent/prompts'
 
 type AgentRequest = Omit<CompletionRequest, 'sampling'> & { sampling?: SamplingOptions }
@@ -298,7 +298,7 @@ export class AgentRuntime {
         kind: 'other',
         message: {
           role: 'system',
-          content: NAVISWORKS_WORKSPACE_PROMPT,
+          content: NAVISWORKS_CAPABILITY_PROMPT,
         },
       },
     ]

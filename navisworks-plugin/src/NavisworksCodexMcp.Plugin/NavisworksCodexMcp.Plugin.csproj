@@ -53,6 +53,7 @@
     <Compile Include="BridgeFrameProtocol.cs" />
     <Compile Include="BridgeLogger.cs" />
     <Compile Include="BridgeServer.cs" />
+    <Compile Include="DocumentIdentityPolicy.cs" />
     <Compile Include="NavisworksMcpPlugin.cs" />
     <Compile Include="NavisworksToolService.cs" />
     <Compile Include="SearchContinuationPolicy.cs" />

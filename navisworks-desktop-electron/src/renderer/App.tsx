@@ -1,4 +1,4 @@
-import { Box, Check, ChevronDown, PanelLeftClose, PanelLeftOpen, RefreshCw } from 'lucide-react'
+import { Box, Check, ChevronDown, RefreshCw } from 'lucide-react'
 import {
   type SetStateAction,
   useCallback,
@@ -39,8 +39,13 @@ import {
   shouldShowHeroComposer
 } from './sessionLifecycle'
 import { Sidebar } from './Sidebar'
+import { TitleBar } from './TitleBar'
 import { SearchOverlay } from './SearchOverlay'
-import { SettingsPanel } from './SettingsPanel'
+import { SettingsPanel, type SettingsPageId } from './SettingsPanel'
+import {
+  deriveNavisworksRebindState,
+  navisworksRebindStateKey,
+} from './navisworksConnection'
 
 const DEFAULT_SETTINGS: DesktopSettings = {
   selectedModel: 'qwen3.5:9b-q4_K_M',
@@ -206,6 +211,8 @@ export default function App() {
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true)
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Settings category picked in the sidebar's list; survives close/reopen.
+  const [settingsPage, setSettingsPage] = useState<SettingsPageId>('appearance')
   // Chat-search overlay, scoped to the conversation pane (see SearchOverlay).
   const [searchOpen, setSearchOpen] = useState(false)
   // In-app delete confirmation target. Native dialogs are off-limits:
@@ -914,6 +921,38 @@ export default function App() {
     }
   }
 
+  // Stale-target rebind UX: discovery never switches the explicit target, so
+  // the UI must tell the user the old target is gone and (when candidates
+  // exist) open the instance menu for an explicit re-selection.
+  const navisworksRebindState = deriveNavisworksRebindState(navisworksConnection)
+  const navisworksRebindKey = navisworksRebindStateKey(navisworksRebindState)
+  const lastRebindKeyRef = useRef<string>('none')
+  useEffect(() => {
+    if (navisworksRebindState.kind === 'none') {
+      lastRebindKeyRef.current = navisworksRebindKey
+      return
+    }
+    // Notify once per distinct stale/rebind state; repeated polls with the
+    // same state stay silent.
+    if (lastRebindKeyRef.current === navisworksRebindKey) return
+    lastRebindKeyRef.current = navisworksRebindKey
+    if (navisworksRebindState.kind === 'disconnected') {
+      setNotice('之前选择的 Navisworks 已断开，目前没有检测到可用实例。')
+      return
+    }
+    setNotice(navisworksRebindState.kind === 'single-replacement'
+      ? '之前选择的 Navisworks 已断开，检测到一个可用实例，请重新连接。'
+      : '之前选择的 Navisworks 已断开，请选择要继续使用的实例。')
+    setNavisworksMenuOpen(true)
+  }, [navisworksRebindKey, navisworksRebindState])
+  // A stale target always keeps an entry point to the instance menu, even
+  // when only one replacement candidate exists (instances may hold the stale
+  // snapshot too, but the choice must not depend on that implicit detail).
+  const canChooseNavisworksInstance =
+    navisworksConnection.instances.length > 1
+    || navisworksRebindState.kind === 'single-replacement'
+    || navisworksRebindState.kind === 'multiple-replacements'
+
   const selectNavisworksInstance = async (instanceId: string) => {
     if (busy || navisworksConnection.runningInstanceId) return
     try {
@@ -950,15 +989,21 @@ export default function App() {
   }
 
   return (
-    <div
-      className="app-shell"
-      data-session-transitioning={sessionTransitioning}
-      data-deleting-session={deletingSessionId}>
-      <Sidebar
+    <div className="app-root">
+      <TitleBar sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((current) => !current)} />
+      <div
+        className="app-shell"
+        data-session-transitioning={sessionTransitioning}
+        data-deleting-session={deletingSessionId}>
+        <Sidebar
         sessions={sessions}
         activeSessionId={activeSessionId}
         open={sidebarOpen}
         busy={busy || sessionTransitioning}
+        settingsMode={settingsOpen}
+        activeSettingsPage={settingsPage}
+        onSettingsPageChange={setSettingsPage}
+        onExitSettings={() => setSettingsOpen(false)}
         onClose={() => setSidebarOpen(false)}
         onCreate={openNewSession}
         onOpenSearch={() => setSearchOpen(true)}
@@ -968,17 +1013,41 @@ export default function App() {
         onDelete={requestDeleteSession}
       />
 
-      <main className="chat-pane">
+      <main className="chat-pane" data-view={settingsOpen ? 'settings' : 'chat'}>
+        {settingsOpen ? (
+          <SettingsPanel
+            settings={settings}
+            themeMode={appearance.themeMode}
+            serviceAvailable={serviceAvailable}
+            activePage={settingsPage}
+            diagnostics={runtimeInfo ? {
+              dataDirectory: runtimeInfo.dataDirectory,
+              runtime: `${runtimeInfo.version} · ${runtimeInfo.platform} · ${runtimeInfo.profile}${runtimeInfo.isPackaged ? ' · 已打包' : ' · 开发版'}`
+            } : undefined}
+            onThemeModeChange={updateAppearance}
+            onFontScaleChange={(fontScale) => updateSettings({ ...settings, fontScale })}
+            onProviderChange={(patch) => updateSettings({ ...settings, ...patch })}
+            onSaveApiProfile={async (profile) => {
+              const saved = await desktopGateway.saveApiProfile(profile)
+              setSettings(saved)
+              return saved
+            }}
+            onDeleteApiProfile={async (profileId) => {
+              const saved = await desktopGateway.deleteApiProfile(profileId)
+              setSettings(saved)
+              return saved
+            }}
+            onModelChange={(selectedModel) => updateSettings({ ...settings, selectedModel, preferApiModel: false })}
+            onDisabledToolsChange={(disabledTools) => updateSettings({ ...settings, disabledTools })}
+            onRefreshModels={refreshModels}
+            onFetchCloudModels={(profileId) => desktopGateway.listApiProfileModels(profileId)}
+            cloudLatency={cloudLatency}
+            onNotice={setNotice}
+            onTestApiProfile={testApiProfile}
+          />
+        ) : (
+          <>
         <header className="chat-header">
-          <button
-            className="icon-button sidebar-toggle"
-            type="button"
-            aria-expanded={sidebarOpen}
-            aria-controls="conversation-sidebar"
-            onClick={() => setSidebarOpen((current) => !current)}
-            aria-label={sidebarOpen ? '收起会话栏' : '打开会话栏'}>
-            {sidebarOpen ? <PanelLeftClose aria-hidden="true" size={18} /> : <PanelLeftOpen aria-hidden="true" size={18} />}
-          </button>
           {showHero ? null : (
             <div className="chat-title">
               <h1>{session?.title || '新会话'}</h1>
@@ -989,7 +1058,7 @@ export default function App() {
               <span className="status-dot" />
               <Box aria-hidden="true" size={14} />
               <span className="status-copy">
-                {navisworksConnection.instances.length > 1 ? (
+                {canChooseNavisworksInstance ? (
                   <button
                     type="button"
                     className="navisworks-instance-trigger"
@@ -1003,7 +1072,7 @@ export default function App() {
                           (instance) => instance.instanceId === navisworksConnection.selectedInstanceId
                         )
                         return selected
-                          ? `${selected.documentName ?? '未命名文档'} · PID ${selected.processId}`
+                          ? `${selected.documentName ?? '未命名文档'} · ${selected.connected ? `PID ${selected.processId}` : '已断开'}`
                           : 'Navisworks'
                       })()}
                     </strong>
@@ -1027,11 +1096,16 @@ export default function App() {
                 })()}
               </span>
 
-              {navisworksConnection.instances.length > 1 && navisworksMenuOpen ? (
+              {canChooseNavisworksInstance && navisworksMenuOpen ? (
                 <div className="navisworks-instance-menu">
                   {navisworksConnection.instances.map((instance) => {
                     const isSelected = instance.instanceId === navisworksConnection.selectedInstanceId
                     const isDisconnected = !instance.connected
+                    // Rebind candidates are marked as available; the copy must
+                    // NOT claim a candidate is the restarted old instance.
+                    const isReplacementCandidate = !isDisconnected && !isSelected
+                      && (navisworksRebindState.kind === 'single-replacement'
+                        || navisworksRebindState.kind === 'multiple-replacements')
                     return (
                       <button
                         key={instance.instanceId}
@@ -1051,8 +1125,11 @@ export default function App() {
                           {instance.documentName ?? '未命名文档'}
                         </span>
                         <span className="instance-menu-item-meta">
-                          PID {instance.processId}
-                          {isDisconnected ? ' · 已断开' : ''}
+                          {isSelected && isDisconnected
+                            ? '当前目标 · 已断开'
+                            : isReplacementCandidate
+                              ? `可用 · ${instance.documentName ?? '未命名文档'}`
+                              : `PID ${instance.processId}${isDisconnected ? ' · 已断开' : ''}`}
                         </span>
                         {isSelected && !isDisconnected ? <Check aria-hidden="true" size={14} /> : null}
                       </button>
@@ -1120,6 +1197,8 @@ export default function App() {
           />
 
         </div>
+          </>
+        )}
       </main>
 
       {searchOpen ? (
@@ -1168,40 +1247,7 @@ export default function App() {
           </div>
         </div>
       ) : null}
-
-      <SettingsPanel
-        open={settingsOpen}
-        settings={settings}
-        themeMode={appearance.themeMode}
-        navisworks={navisworks}
-        serviceAvailable={serviceAvailable}
-        diagnostics={runtimeInfo ? {
-          dataDirectory: runtimeInfo.dataDirectory,
-          runtime: `${runtimeInfo.version} · ${runtimeInfo.platform} · ${runtimeInfo.profile}${runtimeInfo.isPackaged ? ' · 已打包' : ' · 开发版'}`
-        } : undefined}
-        onClose={() => setSettingsOpen(false)}
-        onThemeModeChange={updateAppearance}
-        onFontScaleChange={(fontScale) => updateSettings({ ...settings, fontScale })}
-        onProviderChange={(patch) => updateSettings({ ...settings, ...patch })}
-        onSaveApiProfile={async (profile) => {
-          const saved = await desktopGateway.saveApiProfile(profile)
-          setSettings(saved)
-          return saved
-        }}
-        onDeleteApiProfile={async (profileId) => {
-          const saved = await desktopGateway.deleteApiProfile(profileId)
-          setSettings(saved)
-          return saved
-        }}
-        onModelChange={(selectedModel) => updateSettings({ ...settings, selectedModel, preferApiModel: false })}
-        onDisabledToolsChange={(disabledTools) => updateSettings({ ...settings, disabledTools })}
-        onRefreshModels={refreshModels}
-        onFetchCloudModels={(profileId) => desktopGateway.listApiProfileModels(profileId)}
-        cloudLatency={cloudLatency}
-        onNotice={setNotice}
-        onTestApiProfile={testApiProfile}
-        onRefreshNavisworks={refreshNavisworks}
-      />
+      </div>
     </div>
   )
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AgentRuntime, type AgentBridgeClient } from '../agentRuntime'
-import { CURI_CORE_PROMPT, NAVISWORKS_WORKSPACE_PROMPT } from '../agent/prompts'
+import { CURI_CORE_PROMPT, NAVISWORKS_CAPABILITY_PROMPT } from '../agent/prompts'
 
 /** Builds a fetch response whose body is the ndjson stream Ollama actually sends. */
 function ndjsonResponse(chunks: Array<Record<string, unknown>>): Response {
@@ -29,7 +29,7 @@ function toolMessageContent(body?: Record<string, unknown>): string {
 }
 
 describe('AgentRuntime streaming tool loop', () => {
-  it('sends core and workspace prompts before dynamic context and the current turn', async () => {
+  it('sends core and capability prompts before dynamic context and the current turn', async () => {
     const requestBodies: Array<Record<string, unknown>> = []
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
@@ -77,7 +77,7 @@ describe('AgentRuntime streaming tool loop', () => {
       'user',
     ])
     expect(messages[0]?.content).toBe(CURI_CORE_PROMPT)
-    expect(messages[1]?.content).toBe(NAVISWORKS_WORKSPACE_PROMPT)
+    expect(messages[1]?.content).toBe(NAVISWORKS_CAPABILITY_PROMPT)
     expect(messages[2]?.content).toContain('【当前 Navisworks 文档】')
     expect(messages[3]?.content).toContain('【Navisworks 当前环境发生变化】')
     expect(messages[4]?.content).toContain('【会话语义记忆')

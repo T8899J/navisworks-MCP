@@ -228,6 +228,10 @@ export const requestSchemas = {
     input: z.strictObject({ themeMode: themeModeSchema }),
     output: appearanceStateSchema
   },
+  'window.control': {
+    input: z.strictObject({ action: z.enum(['minimize', 'toggle-maximize', 'close']) }),
+    output: z.strictObject({}).transform(() => ({} as Record<string, never>))
+  },
   'ollama.models.list': {
     input: z.strictObject({
       baseUrl: z.string().url().optional(),

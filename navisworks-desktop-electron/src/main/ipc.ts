@@ -242,6 +242,16 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
 
   const handlers = {
     'app.runtime.get': routeHandler<'app.runtime.get'>(() => dependencies.runtimeInfo),
+    'window.control': routeHandler<'window.control'>(({ action }, { sender }) => {
+      const window = BrowserWindow.fromWebContents(sender)
+      if (window === null || window.isDestroyed()) return {}
+      if (action === 'minimize') window.minimize()
+      else if (action === 'toggle-maximize') {
+        if (window.isMaximized()) window.unmaximize()
+        else window.maximize()
+      } else if (action === 'close') window.close()
+      return {}
+    }),
     'sessions.list': routeHandler<'sessions.list'>(() => persistence.listSessions()),
     'sessions.get': routeHandler<'sessions.get'>(({ sessionId }) => persistence.getSession(sessionId)),
     'sessions.save': routeHandler<'sessions.save'>(({ session }) => persistence.saveSession(session)),
@@ -396,11 +406,16 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
         throw new DesktopIpcError('NOT_FOUND', '目标 Navisworks 实例不存在或已经关闭。')
       }
       const state = buildNavisworksConnectionState(dependencies.instanceSelection, instances)
-      broadcastNavisworksConnectionState(state)
-      broadcastNavisworksStatus(statusForSelectedInstance(
+      // Rebinding to a new instance must immediately refresh the Document
+      // Scope: the old document's facts / reference sets / notices are
+      // invalidated against the NEW instance/document identity here.
+      const status = statusForSelectedInstance(
         dependencies.instanceRegistry,
         dependencies.instanceSelection,
-      ))
+      )
+      dependencies.contextState?.observe(status)
+      broadcastNavisworksConnectionState(state)
+      broadcastNavisworksStatus(status)
       return state
     }),
     'navisworks.tool.execute': routeHandler<'navisworks.tool.execute'>(async ({ toolName, arguments: args }) => {
@@ -570,9 +585,11 @@ export class ChatRunRegistry {
         if (selected === undefined || !selected.connected) {
           navisworksUnavailable = {
             code: 'TARGET_INSTANCE_DISCONNECTED',
+            // UI/user-selection prerequisite: the model cannot fix this by
+            // retrying tools; the user must pick an instance from the menu.
             message: selectedInstanceId === undefined
-              ? '请选择要使用的 Navisworks 实例。'
-              : '当前选择的 Navisworks 已断开，请明确选择其他实例。',
+              ? '当前没有选择 Navisworks 实例，请先选择一个实例。'
+              : '之前选择的 Navisworks 已断开，请从实例菜单重新选择一个可用实例。',
           }
           this.contextState?.observe({ connected: false })
         } else {

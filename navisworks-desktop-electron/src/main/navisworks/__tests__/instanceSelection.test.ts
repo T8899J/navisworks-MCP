@@ -34,6 +34,25 @@ describe('NavisworksInstanceSelection', () => {
     expect(selection.selectedInstanceId).toBe('A')
     expect(selection.selected([instance('B')])).toMatchObject({ instanceId: 'A', connected: false })
   })
+
+  it('keeps A selected as a disconnected snapshot when discovery finds nothing', () => {
+    const selection = new NavisworksInstanceSelection()
+    selection.observe([instance('A')])
+    selection.observe([])
+    expect(selection.selectedInstanceId).toBe('A')
+    expect(selection.selected([])).toMatchObject({ instanceId: 'A', connected: false })
+  })
+
+  it('does not auto-select B or C when selected A is disconnected and both appear', () => {
+    const selection = new NavisworksInstanceSelection()
+    selection.observe([instance('A')])
+    selection.observe([instance('B'), instance('C')])
+    expect(selection.selectedInstanceId).toBe('A')
+    expect(selection.selected([instance('B'), instance('C')])).toMatchObject({
+      instanceId: 'A',
+      connected: false,
+    })
+  })
 })
 
 function instance(instanceId: string): NavisworksInstance {

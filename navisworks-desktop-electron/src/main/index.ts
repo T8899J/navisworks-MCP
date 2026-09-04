@@ -188,6 +188,9 @@ function createMainWindow(): BrowserWindow {
     show: false,
     autoHideMenuBar: true,
     title: 'Navisworks MCP Desktop',
+    // Frameless: the renderer draws its own title bar (drag region + window
+    // controls); the system title bar with its caption text is gone.
+    frame: false,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#141414' : '#f7f7f7',
     webPreferences: {
       preload: preloadPath,

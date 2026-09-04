@@ -224,6 +224,7 @@ export function EffortSlider({
       /* Bucketed 0…4 so CSS can pick a per-tier aurora colour for the fill;
          the bar itself carries no background of its own. */
       data-level={max > 0 ? Math.round((boundedValue / max) * 4) : 0}
+      data-scrubbing={scrubEnergy > 0 || activePointer.current !== null}
       role="slider"
       aria-valuemin={0}
       aria-valuemax={max}

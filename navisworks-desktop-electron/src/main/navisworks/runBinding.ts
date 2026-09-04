@@ -3,7 +3,11 @@ import type {
   BridgeEndpoint,
   NavisworksBridgeClient,
 } from '../bridgeClient'
-import type { DiscoveredNavisworksInstance, NavisworksRunBinding } from './instanceTypes'
+import {
+  temporaryInstanceId,
+  type DiscoveredNavisworksInstance,
+  type NavisworksRunBinding,
+} from './instanceTypes'
 
 type EndpointBridgeClient = Pick<NavisworksBridgeClient, 'callToEndpoint'>
 
@@ -44,13 +48,18 @@ export async function createNavisworksRunBinding(
     )
   }
   const status = await readBoundStatus(instance.endpoint, bridge, options)
-  const bridgeSessionId = stringValue(status.bridgeSessionId)
-  if (bridgeSessionId === undefined || bridgeSessionId !== instance.bridgeSessionId) {
+  // Plugins before 2026-09-01 never report bridgeSessionId. The pipe name is
+  // minted per listener start (PID + GUID), so a restarted plugin can never
+  // answer on the same endpoint — the endpoint-derived id is a safe fallback
+  // session identity, not a weakening of the strict check.
+  const reportedSessionId = stringValue(status.bridgeSessionId)
+  if (reportedSessionId !== undefined && reportedSessionId !== instance.bridgeSessionId) {
     throw new NavisworksTargetError(
       'INSTANCE_CHANGED',
       '目标 Navisworks 实例已经重启，请重新选择后再试。',
     )
   }
+  const bridgeSessionId = reportedSessionId ?? endpointSessionId(instance.endpoint)
   const endpoint = Object.freeze({ ...instance.endpoint })
   return Object.freeze({
     instanceId: instance.instanceId,
@@ -96,7 +105,13 @@ function assertBindingIdentity(binding: NavisworksRunBinding, status: StatusIden
       '目标 Navisworks 已关闭。',
     )
   }
-  if (stringValue(status.bridgeSessionId) !== binding.bridgeSessionId) {
+  // Same legacy-plugin fallback as binding creation: when the plugin does not
+  // report a session id at all, verify the endpoint identity instead; a
+  // reported id must still match exactly.
+  const reportedSessionId = stringValue(status.bridgeSessionId)
+  if (reportedSessionId !== undefined
+    ? reportedSessionId !== binding.bridgeSessionId
+    : endpointSessionId(binding.endpoint) !== binding.bridgeSessionId) {
     throw new NavisworksTargetError(
       'INSTANCE_CHANGED',
       '目标 Navisworks 实例已经重启，本轮操作已终止。',
@@ -130,6 +145,11 @@ async function readBoundStatus(
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/** Fallback session identity for plugins that do not report bridgeSessionId. */
+function endpointSessionId(endpoint: Readonly<BridgeEndpoint>): string {
+  return temporaryInstanceId(endpoint)
 }
 
 function statusDocumentName(status: StatusIdentity): string | undefined {

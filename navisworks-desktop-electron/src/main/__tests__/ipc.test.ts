@@ -12,7 +12,7 @@ vi.mock('electron', () => ({
   },
 }))
 
-import { ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import { BrowserWindow, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import {
   ChatRunRegistry,
   PersistenceFacade,
@@ -199,6 +199,7 @@ function createHarness(options: {
   tools?: ToolCatalog
   instanceRegistry?: NavisworksInstanceRegistry
   instanceSelection?: NavisworksInstanceSelection
+  contextState?: ContextState
 }): IpcHarness {
   const store = options.store ?? createSessionStore()
   const dependencies: DesktopIpcDependencies = {
@@ -223,6 +224,7 @@ function createHarness(options: {
     secrets: options.secrets,
     instanceRegistry: options.instanceRegistry,
     instanceSelection: options.instanceSelection,
+    contextState: options.contextState,
   }
 
   const dispose = registerDesktopIpc(dependencies)
@@ -281,6 +283,78 @@ describe('Navisworks instance IPC selection', () => {
       const selected = await harness.invoke('navisworks.instance.select', { instanceId: 'instance-b' })
       expect(selected).toMatchObject({ ok: true, data: { selectedInstanceId: 'instance-b' } })
     } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('rebinding from a stale A to B updates ContextState and broadcasts the new identity', async () => {
+    const instanceA = discoveredInstance('instance-a', 12340, 'Model-A.nwf')
+    const instanceB = discoveredInstance('instance-b', 18120, 'Model-B.nwf')
+    let refreshCount = 0
+    const current = () => (refreshCount <= 1 ? [instanceA] : [instanceB])
+    const registry = {
+      get instances() { return current().map((instance) => ({ ...instance })) },
+      async refresh() {
+        refreshCount += 1
+        return current().map((instance) => ({ ...instance }))
+      },
+      get(instanceId: string) {
+        return current().find((instance) => instance.instanceId === instanceId)
+      },
+    } as unknown as NavisworksInstanceRegistry
+    const contextState = new ContextState()
+    const observe = vi.spyOn(contextState, 'observe')
+    const windowWebContents = fakeSender()
+    const fakeWindow = { isDestroyed: () => false, webContents: windowWebContents }
+    const getAllWindows = vi.mocked(BrowserWindow.getAllWindows)
+    getAllWindows.mockReturnValue([fakeWindow as never])
+    const harness = createHarness({
+      ollama: stubAgent(),
+      instanceRegistry: registry,
+      instanceSelection: new NavisworksInstanceSelection(),
+      contextState,
+    })
+    try {
+      // A is the only instance at first: auto-selected as the safe default.
+      await harness.invoke('navisworks.instances.list', undefined)
+      // A closed and B (re)started: A remains the explicit target, kept as a
+      // disconnected snapshot; no silent switch to B.
+      const stale = await harness.invoke('navisworks.instances.list', undefined)
+      expect(stale).toMatchObject({
+        ok: true,
+        data: {
+          selectedInstanceId: 'instance-a',
+          instances: expect.arrayContaining([
+            expect.objectContaining({ instanceId: 'instance-a', connected: false }),
+            expect.objectContaining({ instanceId: 'instance-b', connected: true }),
+          ]),
+        },
+      })
+
+      const selected = await harness.invoke('navisworks.instance.select', { instanceId: 'instance-b' })
+      expect(selected).toMatchObject({ ok: true, data: { selectedInstanceId: 'instance-b' } })
+
+      // ContextState must have observed the NEW instance's status so the old
+      // document's facts / reference sets are invalidated against B.
+      expect(observe).toHaveBeenCalledTimes(1)
+      expect(observe.mock.calls[0]?.[0]).toMatchObject({
+        connected: true,
+        instanceId: 'instance-b',
+        bridgeSessionId: 'instance-b',
+        documentInstanceId: 'doc-18120',
+      })
+
+      const send = windowWebContents.send as unknown as ReturnType<typeof vi.fn>
+      const connectionEvents = send.mock.calls.filter((call) => call[1] === 'navisworks.instances.changed')
+      expect(connectionEvents.at(-1)?.[2]).toMatchObject({ selectedInstanceId: 'instance-b' })
+      const statusEvents = send.mock.calls.filter((call) => call[1] === 'navisworks.status.changed')
+      expect(statusEvents.at(-1)?.[2]).toMatchObject({
+        connected: true,
+        instanceId: 'instance-b',
+        documentInstanceId: 'doc-18120',
+      })
+    } finally {
+      getAllWindows.mockReturnValue([])
       await harness.dispose()
     }
   })
