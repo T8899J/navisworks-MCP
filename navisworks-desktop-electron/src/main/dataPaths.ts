@@ -16,6 +16,8 @@ export interface DesktopDataPaths {
   toolResultsDirectory: string
   executionLedgerFile: string
   executionLedgerBackupFile: string
+  tasksFile: string
+  tasksBackupFile: string
   buildConfiguration: DesktopBuildConfiguration
   sourceDescription: string
 }
@@ -171,6 +173,8 @@ function buildPaths(
     toolResultsDirectory: path.join(rootDirectory, 'tool-results'),
     executionLedgerFile: path.join(rootDirectory, 'execution-ledger.json'),
     executionLedgerBackupFile: path.join(rootDirectory, 'execution-ledger.backup.json'),
+    tasksFile: path.join(rootDirectory, 'tasks.json'),
+    tasksBackupFile: path.join(rootDirectory, 'tasks.backup.json'),
     buildConfiguration,
     sourceDescription,
   }

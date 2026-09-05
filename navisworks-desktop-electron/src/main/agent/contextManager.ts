@@ -16,7 +16,7 @@ export const COMPACT_MAX_TRANSCRIPT_CHARS = 30_000
 export const LOCAL_MAX_CONTEXT_TOKENS = 32_768
 
 export type ContextPressure = 'idle' | 'soft' | 'compact'
-export type ContextBlockKind = 'document-transition' | 'semantic-memory' | 'compact-summary' | 'verified-facts' | 'reference-set' | 'recall' | 'other'
+export type ContextBlockKind = 'document-transition' | 'semantic-memory' | 'compact-summary' | 'verified-facts' | 'reference-set' | 'recall' | 'task-state' | 'other'
 
 export interface ContextBlock {
   message: ChatMessage
@@ -98,6 +98,21 @@ export class ContextManager {
 
   addContextBlock(message: ChatMessage, kind: ContextBlockKind = 'other'): void {
     if (message.role !== 'system') throw new Error('Context block must be a system message.')
+    this.#contextBlocks.push({ message: { ...message }, kind })
+  }
+
+  /**
+   * Singleton block per kind: a repeated set for the same kind REPLACES the
+   * previous block in place instead of stacking. task-state uses this so every
+   * task update refreshes one block rather than accumulating stale ones.
+   */
+  setSingletonContextBlock(kind: ContextBlockKind, message: ChatMessage): void {
+    if (message.role !== 'system') throw new Error('Context block must be a system message.')
+    const existing = this.#contextBlocks.find((block) => block.kind === kind)
+    if (existing !== undefined) {
+      existing.message = { ...message }
+      return
+    }
     this.#contextBlocks.push({ message: { ...message }, kind })
   }
 

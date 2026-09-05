@@ -4,6 +4,8 @@ import {
   ExecutionLedgerRepository,
   ToolExecutionLedger,
 } from '../agent/executionLedger'
+import { TaskManager } from '../agent/taskManager'
+import { TaskRepository } from '../agent/taskRepository'
 import type { DesktopDataPaths } from '../dataPaths'
 import { token, type Scope, type ServiceToken } from './kernel'
 import { AgentScopeManager } from './agentScopes'
@@ -13,12 +15,14 @@ export const ContextStateToken = token<ContextState>('agent.contextState')
 export const ExecutionLedgerToken = token<ToolExecutionLedger>('agent.executionLedger')
 export const OperationCoordinatorToken = token<DocumentOperationCoordinator>('agent.operationCoordinator')
 export const AgentScopeManagerToken = token<AgentScopeManager>('agent.scopeManager')
+export const TaskManagerToken = token<TaskManager>('agent.taskManager')
 
 export interface InstalledAgentServices {
   contextState: ContextState
   executionLedger: ToolExecutionLedger
   operationCoordinator: DocumentOperationCoordinator
   scopeManager: AgentScopeManager
+  taskManager: TaskManager
 }
 
 /**
@@ -31,13 +35,18 @@ export interface InstalledAgentServices {
  */
 export async function installAgentServices(
   appScope: Scope,
-  paths?: Pick<DesktopDataPaths, 'executionLedgerFile' | 'executionLedgerBackupFile'>,
+  paths?: Pick<DesktopDataPaths,
+    'executionLedgerFile' | 'executionLedgerBackupFile' | 'tasksFile' | 'tasksBackupFile'>,
 ): Promise<InstalledAgentServices> {
   const contextState = new ContextState()
   const executionLedger = new ToolExecutionLedger(paths === undefined
     ? undefined
     : new ExecutionLedgerRepository(paths.executionLedgerFile, paths.executionLedgerBackupFile))
   await executionLedger.initialize()
+  const taskManager = new TaskManager(paths === undefined
+    ? undefined
+    : new TaskRepository(paths.tasksFile, paths.tasksBackupFile))
+  await taskManager.initialize()
   const operationCoordinator = new DocumentOperationCoordinator()
   const scopeManager = new AgentScopeManager(appScope)
   contextState.registry.onInvalidate((previous) => {
@@ -50,7 +59,8 @@ export async function installAgentServices(
     .register(ExecutionLedgerToken, executionLedger)
     .register(OperationCoordinatorToken, operationCoordinator)
     .register(AgentScopeManagerToken, scopeManager)
-  return { contextState, executionLedger, operationCoordinator, scopeManager }
+    .register(TaskManagerToken, taskManager)
+  return { contextState, executionLedger, operationCoordinator, scopeManager, taskManager }
 }
 
 export type { ServiceToken }

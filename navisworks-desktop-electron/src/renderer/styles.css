@@ -974,6 +974,14 @@ summary:focus-visible,
   scroll-behavior: smooth;
 }
 
+/* While a nav drag owns the scroller (flag set by MessageList at drag-start,
+   removed on release/cancel/unmount), smooth travel must be OFF: the scrub
+   writes scrollTop every frame, and interleaved smooth scrolls would lag the
+   hand and interrupt each other. */
+.message-scroller[data-nav-scrubbing="true"] {
+  scroll-behavior: auto !important;
+}
+
 /* Subtle scrollbars: transparent track blends into the surface; the thumb is
    a thin, low-contrast pill so the sidebar, conversation and settings-page
    scrolls feel calm. Firefox falls back to scrollbar-width: thin + a muted
@@ -1386,10 +1394,19 @@ summary:focus-visible,
   transform: translateY(-50%);
 }
 
-/* While scrubbing the pointer owns the whole conversation's scroll axis —
-   say so under the cursor. */
+/* Scrubbing keeps the hand: the rail reads as a row of jump targets, not a
+   resize handle — the drag owns the scroll axis but never shows ↕. */
 .message-nav.is-dragging {
-  cursor: ns-resize;
+  cursor: pointer;
+}
+
+/* While a nav drag is live, pointer capture keeps the gesture running
+   anywhere in the window — hold the hand cursor app-wide for the gesture's
+   lifetime so crossing the conversation text never flashes a text, arrow or
+   resize cursor mid-drag. Removed on pointerup/pointercancel/unmount. */
+body.message-nav-scrubbing,
+body.message-nav-scrubbing * {
+  cursor: pointer !important;
 }
 
 .message-nav-item {

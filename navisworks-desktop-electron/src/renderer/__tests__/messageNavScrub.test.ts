@@ -1,73 +1,110 @@
 import { describe, expect, it } from 'vitest'
 import {
   NAV_DRAG_THRESHOLD_PX,
-  clickTargetTurnIndex,
+  clamp01,
+  interpolateScrollTop,
   navDragReducer,
-  navScrubScrollOptions,
-  nearestTurnIndex,
-  ratioFromClientY,
+  nearestStopIndexFromClientY,
   type NavDragState,
+  type NavScrubStop,
 } from '../messageNavScrub'
 
-const NAV = { top: 100, height: 400 }
-const TURN_COUNT = 5
+// Bars sit evenly spaced on the rail but their turns sit at wildly uneven
+// scroll positions — the whole point of anchor stops: a rail fraction is NOT
+// a document fraction. (Const tuple so bar indexes stay non-optional.)
+const stops = [
+  { index: 0, anchorId: 'turn-0', railY: 100, scrollTop: 0 },
+  { index: 1, anchorId: 'turn-1', railY: 120, scrollTop: 180 },
+  { index: 2, anchorId: 'turn-2', railY: 140, scrollTop: 900 },
+  { index: 3, anchorId: 'turn-3', railY: 160, scrollTop: 1240 },
+  { index: 4, anchorId: 'turn-4', railY: 180, scrollTop: 2600 },
+] as const satisfies readonly NavScrubStop[]
 
-describe('messageNavScrub geometry', () => {
-  it('maps pointer positions across the whole rail box to ratios', () => {
-    expect(ratioFromClientY(NAV.top, NAV.top, NAV.height)).toBe(0)
-    expect(ratioFromClientY(NAV.top + 200, NAV.top, NAV.height)).toBe(0.5)
-    expect(ratioFromClientY(NAV.top + NAV.height, NAV.top, NAV.height)).toBe(1)
-    // Clamped at both ends so travel past the rail still means the ends.
-    expect(ratioFromClientY(-50, NAV.top, NAV.height)).toBe(0)
-    expect(ratioFromClientY(9999, NAV.top, NAV.height)).toBe(1)
+// Press + the move that crosses the threshold — the gesture's start.
+function dragStart(clientY: number, anchorIndex: number, pointerOffsetY = 0): NavDragState {
+  const pressed = navDragReducer(null, {
+    kind: 'pointerdown',
+    pointerId: 1,
+    clientY,
+    anchorIndex,
+    pointerOffsetY,
+  }).state!
+  return navDragReducer(pressed, { kind: 'pointermove', clientY: clientY + NAV_DRAG_THRESHOLD_PX + 1 }).state!
+}
+
+describe('interpolateScrollTop maps bars onto real turn positions', () => {
+  it('each bar resolves exactly to its turn\'s measured scrollTop', () => {
+    expect(interpolateScrollTop(100, stops)).toBe(0)
+    expect(interpolateScrollTop(120, stops)).toBe(180)
+    expect(interpolateScrollTop(140, stops)).toBe(900)
+    expect(interpolateScrollTop(160, stops)).toBe(1240)
+    expect(interpolateScrollTop(180, stops)).toBe(2600)
   })
 
-  it('resolves a ratio to the nearest turn with midpoint rounding', () => {
-    expect(nearestTurnIndex(0, TURN_COUNT)).toBe(0)
-    expect(nearestTurnIndex(1, TURN_COUNT)).toBe(TURN_COUNT - 1)
-    // 0.18 of 4 gaps = 0.72 → nearest turn 1; 0.3 = 1.2 → nearest turn 1;
-    // 0.35 = 1.4 → still 1; 0.4 = 1.6 → turn 2.
-    expect(nearestTurnIndex(0.18, TURN_COUNT)).toBe(1)
-    expect(nearestTurnIndex(0.3, TURN_COUNT)).toBe(1)
-    expect(nearestTurnIndex(0.4, TURN_COUNT)).toBe(2)
+  it('between two bars it travels between THEIR positions, not the document\'s', () => {
+    // Halfway between turn 1 (180) and turn 2 (900) — a global ratio ×
+    // maxScroll would land somewhere entirely different here.
+    expect(interpolateScrollTop(130, stops)).toBe((180 + 900) / 2)
+    expect(interpolateScrollTop(125, stops)).toBe(180 + (900 - 180) * 0.25)
+  })
+
+  it('beyond the rail ends clamps to the first/last turn', () => {
+    expect(interpolateScrollTop(50, stops)).toBe(0)
+    expect(interpolateScrollTop(9999, stops)).toBe(2600)
+  })
+
+  it('returns 0 for an empty rail', () => {
+    expect(interpolateScrollTop(130, [])).toBe(0)
   })
 })
 
-describe('messageNavScrub click resolution', () => {
-  it('clicking an actual bar jumps to that turn, ignoring position drift', () => {
-    // Pressed bar 3 even though the release ratio would land on 0.
-    expect(clickTargetTurnIndex(3, 0.1, TURN_COUNT)).toBe(3)
+describe('nearestStopIndexFromClientY resolves presses to bars', () => {
+  it('lands on the pressed bar itself', () => {
+    expect(nearestStopIndexFromClientY(140, stops)).toBe(2)
   })
 
-  it('clicking the blank gap between bars resolves to the nearest turn', () => {
-    expect(clickTargetTurnIndex(null, 0.31, TURN_COUNT)).toBe(1)
-    expect(clickTargetTurnIndex(null, 0.45, TURN_COUNT)).toBe(2)
-    expect(clickTargetTurnIndex(null, 0.98, TURN_COUNT)).toBe(4)
+  it('presses on gaps or padding pick the bar nearest the pointer', () => {
+    expect(nearestStopIndexFromClientY(128, stops)).toBe(1)
+    expect(nearestStopIndexFromClientY(133, stops)).toBe(2)
+    expect(nearestStopIndexFromClientY(90, stops)).toBe(0)
+    expect(nearestStopIndexFromClientY(4000, stops)).toBe(4)
   })
 
-  it('clicking left/right padding still resolves via the y ratio', () => {
-    // The x offset never enters this function — padding clicks are valid.
-    expect(clickTargetTurnIndex(null, 0.55, TURN_COUNT)).toBe(2)
-  })
-
-  it('returns null when there is nothing to jump to', () => {
-    expect(clickTargetTurnIndex(null, 0.5, 0)).toBeNull()
-    expect(clickTargetTurnIndex(2, 0.5, 0)).toBeNull()
+  it('returns the first bar when there is nothing to measure', () => {
+    expect(nearestStopIndexFromClientY(100, [])).toBe(0)
   })
 })
 
-describe('messageNavScrub drag state machine', () => {
-  const press = (clientY: number): NavDragState | null =>
-    navDragReducer(null, { kind: 'pointerdown', pointerId: 1, clientY }).state
-
-  it('pointerdown alone records the anchor and scrolls nothing', () => {
-    const result = navDragReducer(null, { kind: 'pointerdown', pointerId: 1, clientY: 250 })
-    expect(result.state).toEqual({ pointerId: 1, startY: 250, dragging: false })
+describe('nav drag state machine (anchor-based)', () => {
+  it('pointerdown records the anchor and offset and scrolls nothing', () => {
+    // Exact shape: nothing like a startScrollTop may exist — the drag's
+    // origin is only the pressed bar's turn, never the viewport.
+    const result = navDragReducer(null, {
+      kind: 'pointerdown',
+      pointerId: 1,
+      clientY: 165,
+      anchorIndex: 3,
+      pointerOffsetY: 5,
+    })
+    expect(result.state).toEqual({
+      pointerId: 1,
+      startY: 165,
+      dragging: false,
+      anchorIndex: 3,
+      pointerOffsetY: 5,
+    })
     expect(result.outcome).toEqual({ kind: 'none' })
   })
 
-  it('a move within the 4px threshold stays a click, not a drag', () => {
-    const moved = navDragReducer(press(250), { kind: 'pointermove', clientY: 250 + NAV_DRAG_THRESHOLD_PX })
+  it('a move within the 4px threshold stays a press; release clicks the anchor turn', () => {
+    const pressed = navDragReducer(null, {
+      kind: 'pointerdown',
+      pointerId: 1,
+      clientY: stops[4].railY,
+      anchorIndex: 4,
+      pointerOffsetY: 0,
+    }).state!
+    const moved = navDragReducer(pressed, { kind: 'pointermove', clientY: stops[4].railY + NAV_DRAG_THRESHOLD_PX })
     expect(moved.outcome.kind).toBe('none')
     expect(moved.state?.dragging).toBe(false)
 
@@ -76,28 +113,88 @@ describe('messageNavScrub drag state machine', () => {
     expect(up.outcome).toEqual({ kind: 'click' })
   })
 
-  it('a move past the threshold enters dragging and emits scroll', () => {
-    const entered = navDragReducer(press(250), { kind: 'pointermove', clientY: 250 + NAV_DRAG_THRESHOLD_PX + 1 })
-    expect(entered.outcome.kind).toBe('scroll')
+  it('drag-start from the last bar anchors there even though the viewport was elsewhere', () => {
+    // Viewing turn 0 while pressing the LAST bar: the reducer records only
+    // the anchor — the receiver snaps to stops[4].scrollTop (2600), never to
+    // anything derived from the old viewport position.
+    const entered = navDragReducer(
+      navDragReducer(null, {
+        kind: 'pointerdown',
+        pointerId: 1,
+        clientY: stops[4].railY,
+        anchorIndex: 4,
+        pointerOffsetY: 0,
+      }).state!,
+      { kind: 'pointermove', clientY: stops[4].railY + NAV_DRAG_THRESHOLD_PX + 1 },
+    )
+    expect(entered.outcome).toEqual({ kind: 'drag-start' })
     expect(entered.state?.dragging).toBe(true)
+    expect(entered.state?.anchorIndex).toBe(4)
+  })
 
-    const up = navDragReducer(entered.state, { kind: 'pointerup' })
+  it('drag-start from turn 3 anchors turn 3; from turn 2 anchors turn 2', () => {
+    expect(dragStart(stops[2].railY, 2).anchorIndex).toBe(2)
+    expect(dragStart(stops[1].railY, 1).anchorIndex).toBe(1)
+  })
+
+  it('after drag-start, moving up interpolates toward the previous turn', () => {
+    const started = dragStart(stops[4].railY, 4)
+    const moved = navDragReducer(started, { kind: 'pointermove', clientY: stops[3].railY })
+    expect(moved.outcome).toEqual({ kind: 'scroll', clientY: stops[3].railY })
+    // The same math MessageList runs per 'scroll' outcome.
+    const effectiveRailY = stops[3].railY - started.pointerOffsetY
+    expect(interpolateScrollTop(effectiveRailY, stops)).toBe(1240)
+  })
+
+  it('after drag-start, moving down interpolates toward the next turn', () => {
+    const started = dragStart(stops[1].railY, 1)
+    const moved = navDragReducer(started, { kind: 'pointermove', clientY: stops[2].railY })
+    expect(moved.outcome).toEqual({ kind: 'scroll', clientY: stops[2].railY })
+    const effectiveRailY = stops[2].railY - started.pointerOffsetY
+    expect(interpolateScrollTop(effectiveRailY, stops)).toBe(900)
+  })
+
+  it('a grab below the bar center rides along without jumping', () => {
+    // Pressed 5px below turn 3's bar: offset 5. Moving back to the press
+    // point must read as turn 3's position, not shift by the offset.
+    const offsetY = 5
+    const started = dragStart(stops[3].railY + offsetY, 3, offsetY)
+    const moved = navDragReducer(started, { kind: 'pointermove', clientY: stops[3].railY + offsetY })
+    const effectiveRailY = moved.outcome.kind === 'scroll' ? moved.outcome.clientY - started.pointerOffsetY : NaN
+    expect(interpolateScrollTop(effectiveRailY, stops)).toBe(1240)
+  })
+
+  it('releasing after a drag keeps the position: no snap, no recompute', () => {
+    const started = dragStart(stops[2].railY, 2)
+    const up = navDragReducer(started, { kind: 'pointerup' })
     expect(up.state).toBeNull()
     expect(up.outcome.kind).toBe('none')
   })
 
-  it('pointercancel drops the state and never reports a click', () => {
-    const cancelled = navDragReducer(press(250), { kind: 'pointercancel' })
+  it('pointercancel clears the session and never reports a click', () => {
+    const pressed = navDragReducer(null, {
+      kind: 'pointerdown',
+      pointerId: 1,
+      clientY: stops[2].railY,
+      anchorIndex: 2,
+      pointerOffsetY: 0,
+    }).state!
+    const cancelled = navDragReducer(pressed, { kind: 'pointercancel' })
     expect(cancelled.state).toBeNull()
     expect(cancelled.outcome.kind).toBe('none')
-  })
 
-  it('an absolute scrub maps rail position onto conversation scroll instantly', () => {
-    const max = 800
-    expect(navScrubScrollOptions(0, max)).toEqual({ top: 0, behavior: 'instant' })
-    expect(navScrubScrollOptions(1, max)).toEqual({ top: 800, behavior: 'instant' })
-    expect(navScrubScrollOptions(0.25, max).top).toBe(200)
-    // No smooth behavior anywhere: scrub travel must be instant.
-    expect(navScrubScrollOptions(0.9, max).behavior).toBe('instant')
+    const dragging = dragStart(stops[2].railY, 2)
+    const cancelledMidDrag = navDragReducer(dragging, { kind: 'pointercancel' })
+    expect(cancelledMidDrag.state).toBeNull()
+    expect(cancelledMidDrag.outcome.kind).toBe('none')
+  })
+})
+
+describe('clamp01', () => {
+  it('clamps to the unit range and maps non-finite input to 0', () => {
+    expect(clamp01(-1)).toBe(0)
+    expect(clamp01(0.25)).toBe(0.25)
+    expect(clamp01(2)).toBe(1)
+    expect(clamp01(Number.NaN)).toBe(0)
   })
 })

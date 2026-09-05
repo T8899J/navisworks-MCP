@@ -20,12 +20,12 @@ import type { ChatMessage, ToolCall } from './chatTypes'
 import { displayValue } from './chatTypes'
 import { ConversationColumn } from './ConversationColumn'
 import {
-  clickTargetTurnIndex,
+  NAV_ANCHOR_OFFSET_PX,
+  interpolateScrollTop,
   navDragReducer,
-  navScrubScrollOptions,
-  nearestTurnIndex,
-  ratioFromClientY,
+  nearestStopIndexFromClientY,
   type NavDragState,
+  type NavScrubStop,
 } from './messageNavScrub'
 
 // The local models answer in markdown, but the chat renders plain text.
@@ -288,6 +288,53 @@ function buildTurnIndexByMessage(messages: ChatMessage[]): Map<string, number> {
   return turnIndexOf
 }
 
+// The scrub cursor must follow the pointer everywhere — pointer capture keeps
+// the gesture alive outside the rail — so it lives on <body>, not the rail,
+// for exactly the gesture's lifetime.
+function setNavScrubbingCursor(active: boolean): void {
+  document.body.classList.toggle('message-nav-scrubbing', active)
+}
+
+// Lightweight bar centers for hover: the client-Y center of each rendered
+// bar, DOM order = turn order. Reads only, so it can run on every hover
+// pointermove and stays current under resize or gap changes.
+function measureRailStops(nav: HTMLDivElement): Array<{ railY: number }> {
+  return Array.from(nav.querySelectorAll<HTMLElement>('.message-nav-item')).map((item) => {
+    const rect = item.getBoundingClientRect()
+    return { railY: rect.top + rect.height / 2 }
+  })
+}
+
+// Full anchor stops for a gesture, measured at pointerdown: each rail bar's
+// client-Y center plus the REAL conversation scrollTop that brings its turn's
+// anchor message to the top of the viewport (minus the same breathing gap the
+// click jump uses), clamped to the scrollable range. Turns are unevenly sized,
+// so these stops are deliberately not evenly spaced in scroll space — they are
+// what the drag interpolates between.
+function measureNavScrubStops(
+  turns: ConversationTurn[],
+  nav: HTMLDivElement,
+  scroller: HTMLDivElement,
+  maxScroll: number,
+): NavScrubStop[] {
+  const items = nav.querySelectorAll<HTMLElement>('.message-nav-item')
+  if (items.length !== turns.length) return []
+  const scrollerRect = scroller.getBoundingClientRect()
+  return turns.map((turn, index): NavScrubStop => {
+    const rect = items[index]?.getBoundingClientRect()
+    const target = scroller.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(turn.anchorId)}"]`)
+    const raw = target
+      ? scroller.scrollTop + target.getBoundingClientRect().top - scrollerRect.top - NAV_ANCHOR_OFFSET_PX
+      : 0
+    return {
+      index,
+      anchorId: turn.anchorId,
+      railY: rect ? rect.top + rect.height / 2 : 0,
+      scrollTop: Math.min(maxScroll, Math.max(0, raw)),
+    }
+  })
+}
+
 // Class for a rail bar given its distance from the hovered crest: the crest
 // swells to full length and bars fade away symmetrically on BOTH sides, so
 // the wave reads as a ridge centered under the hand. Mirrors
@@ -312,6 +359,10 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
   // Tracks the session shown last render so switching sessions (or opening
   // one for the first time) can snap to the bottom instead of animating.
   const prevSessionRef = useRef<string | undefined>(undefined)
+  // True from drag-start until the gesture ends, so unmount mid-gesture (a
+  // session switch emptying the rail, say) can still strip the scrub-only
+  // cursor class and instant-scroll flag.
+  const navScrubActiveRef = useRef(false)
   const turns = buildConversationTurns(messages)
   // Rail density: the gap between bars compresses (7 → 4 → 2px) as turns
   // pile up, so the whole ladder still fits the max-height box — the rail
@@ -334,69 +385,106 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
     const target = scroller.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
     if (!target) return
     const delta = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top
-    scroller.scrollTo({ top: Math.max(0, scroller.scrollTop + delta - 12), behavior: 'smooth' })
+    scroller.scrollTo({ top: Math.max(0, scroller.scrollTop + delta - NAV_ANCHOR_OFFSET_PX), behavior: 'smooth' })
   }
 
-  // Press anywhere inside the rail's box and drag: the pointer's vertical
-  // position maps ABSOLUTELY onto the conversation (top = oldest, bottom =
-  // newest) — never a startTop+delta projection, so content and hand move
-  // together. The gesture state machine (threshold, click vs drag, cancel)
-  // is the tested pure reducer in messageNavScrub.ts; this handler only
-  // wires it to the DOM: pointer capture so the drag survives leaving the
-  // rail, and one requestAnimationFrame that coalesces high-frequency
-  // pointermove events into a single scrollTop write per frame. A press
-  // that stays under the threshold releases as a click on the nearest turn.
+  // Crest the wave + preview on one turn, deduped so unchanged turns never
+  // re-render. railY is the bar's client-Y center; hover and drag both feed
+  // this with the SAME bar they resolved, so the two can never disagree.
+  const crestHoverTo = (anchorId: string, railY: number) => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    setNavHover((prev) => {
+      if (prev?.id === anchorId) return prev
+      return { id: anchorId, top: railY - viewport.getBoundingClientRect().top }
+    })
+  }
+
+  // Press anywhere inside the rail's box and drag. ANCHOR-BASED SCRUB: the
+  // pressed bar (or, on padding/gaps, the bar nearest the press) becomes the
+  // gesture's anchor turn, and every bar's REAL conversation scroll position
+  // is measured from the DOM at that moment. The first move past the
+  // threshold snaps the conversation straight to the anchor turn's position —
+  // where the viewport happened to be is irrelevant — and later moves
+  // interpolate piecewise between the measured stops, so bars map to turns,
+  // never to document percentages. The gesture state machine (threshold,
+  // click vs drag, cancel) is the tested pure reducer in messageNavScrub.ts;
+  // this handler only wires it to the DOM: pointer capture so the drag
+  // survives leaving the rail, one requestAnimationFrame coalescing
+  // pointermove into a single scrollTop write per frame, and smooth scroll
+  // explicitly disabled for the gesture via data-nav-scrubbing. A press that
+  // stays under the threshold releases as a smooth click jump to the anchor.
   const beginNavDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
     const scroller = scrollerRef.current
+    const nav = event.currentTarget
     if (!scroller) return
     const maxScroll = scroller.scrollHeight - scroller.clientHeight
-    if (maxScroll <= 0) return
-    const nav = event.currentTarget
-    const navRect = nav.getBoundingClientRect()
+    if (maxScroll <= 0 || turns.length === 0) return
+    const stops = measureNavScrubStops(turns, nav, scroller, maxScroll)
+    if (stops.length === 0) return
     const pressedBar = (event.target as HTMLElement).closest<HTMLElement>('.message-nav-item')
     const pressedAnchor = pressedBar?.getAttribute('data-turn-anchor') ?? null
     const pressedIndex = pressedAnchor == null
       ? null
-      : turns.findIndex((turn) => turn.anchorId === pressedAnchor)
-    const downRatio = ratioFromClientY(event.clientY, navRect.top, navRect.height)
-    let drag: NavDragState | null = { pointerId: event.pointerId, startY: event.clientY, dragging: false }
-    let pendingRatio: number | null = null
+      : stops.findIndex((stop) => stop.anchorId === pressedAnchor)
+    // A press on a bar anchors there; a press on padding or gaps anchors to
+    // the bar nearest the pointer — every rail position yields an anchor.
+    const anchorIndex = pressedIndex != null && pressedIndex >= 0
+      ? pressedIndex
+      : nearestStopIndexFromClientY(event.clientY, stops)
+    const anchorStop = stops[anchorIndex]
+    if (anchorStop == null) return
+    let drag: NavDragState | null = navDragReducer(null, {
+      kind: 'pointerdown',
+      pointerId: event.pointerId,
+      clientY: event.clientY,
+      anchorIndex,
+      pointerOffsetY: event.clientY - anchorStop.railY,
+    }).state
+    let pendingScrollTop: number | null = null
     let frame = 0
     nav.setPointerCapture(event.pointerId)
 
     const applyPending = () => {
       frame = 0
-      if (pendingRatio == null) return
-      const ratio = pendingRatio
-      pendingRatio = null
-      // Direct scrollTop assignment (not scrollTo): instantly, once per
-      // frame, and immune to the scroller's CSS smooth behavior.
-      scroller.scrollTop = navScrubScrollOptions(ratio, maxScroll).top
+      if (pendingScrollTop == null) return
+      const top = pendingScrollTop
+      pendingScrollTop = null
+      // Direct scrollTop assignment, once per frame — the data-nav-scrubbing
+      // flag set at drag-start keeps CSS smooth behavior out of the way.
+      scroller.scrollTop = top
     }
 
-    const crestTo = (ratio: number) => {
-      const index = nearestTurnIndex(ratio, turns.length)
-      const turn = turns[index]
-      if (!turn) return
-      const viewport = viewportRef.current
-      if (!viewport) return
-      const barTop = navRect.top + ((index + 0.5) / Math.max(1, turns.length)) * navRect.height
-      const top = barTop - viewport.getBoundingClientRect().top
-      setNavHover((prev) => (prev?.id === turn.anchorId ? prev : { id: turn.anchorId, top }))
+    const crestToIndex = (index: number) => {
+      const stop = stops[index]
+      if (stop) crestHoverTo(stop.anchorId, stop.railY)
     }
 
     const handleMove = (moveEvent: PointerEvent) => {
       if (drag == null) return
-      const wasDragging = drag.dragging
       const result = navDragReducer(drag, { kind: 'pointermove', clientY: moveEvent.clientY })
       drag = result.state
-      if (result.outcome.kind !== 'scroll') return
-      if (!wasDragging) setIsNavDragging(true)
-      const ratio = ratioFromClientY(moveEvent.clientY, navRect.top, navRect.height)
-      pendingRatio = ratio
+      if (result.outcome.kind === 'drag-start') {
+        // First frame past the threshold: kill smooth travel FIRST, then
+        // snap straight to the anchor turn's measured position. The old
+        // viewport spot never enters the calculation.
+        navScrubActiveRef.current = true
+        scroller.dataset.navScrubbing = 'true'
+        scroller.scrollTop = anchorStop.scrollTop
+        setIsNavDragging(true)
+        setNavScrubbingCursor(true)
+        crestToIndex(anchorIndex)
+        return
+      }
+      if (result.outcome.kind !== 'scroll' || drag == null) return
+      // Undo the press-time offset so the bar under the hand stays under the
+      // hand, then interpolate between the two neighboring turns' REAL
+      // positions — not the document's.
+      const effectiveRailY = result.outcome.clientY - drag.pointerOffsetY
+      pendingScrollTop = interpolateScrollTop(effectiveRailY, stops)
       if (frame === 0) frame = requestAnimationFrame(applyPending)
-      crestTo(ratio)
+      crestToIndex(nearestStopIndexFromClientY(effectiveRailY, stops))
     }
     const handleUp = (upEvent: PointerEvent) => {
       if (drag == null) return
@@ -406,21 +494,25 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
       const wasDragging = drag.dragging
       const result = navDragReducer(drag, { kind: 'pointerup' })
       drag = result.state
+      // A drag keeps wherever it got to: apply the last pending target, then
+      // clear the scrub-only state. No snapping, no recompute.
+      if (pendingScrollTop != null) {
+        const top = pendingScrollTop
+        pendingScrollTop = null
+        scroller.scrollTop = top
+      }
       if (frame !== 0) {
         cancelAnimationFrame(frame)
         frame = 0
       }
-      if (pendingRatio != null) {
-        const ratio = pendingRatio
-        pendingRatio = null
-        scroller.scrollTop = navScrubScrollOptions(ratio, maxScroll).top
-      }
+      delete scroller.dataset.navScrubbing
+      navScrubActiveRef.current = false
       setIsNavDragging(false)
+      setNavScrubbingCursor(false)
       const stillOnRail = upEvent.target instanceof Node && nav.contains(upEvent.target)
       if (!stillOnRail) setNavHover(null)
       if (!wasDragging && result.outcome.kind === 'click') {
-        const target = clickTargetTurnIndex(pressedIndex, downRatio, turns.length)
-        const turn = target == null ? undefined : turns[target]
+        const turn = turns[anchorIndex]
         if (turn) scrollToMessage(turn.anchorId)
       }
     }
@@ -433,8 +525,13 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
         cancelAnimationFrame(frame)
         frame = 0
       }
-      pendingRatio = null
+      // Drop everything but the conversation's position: a cancelled gesture
+      // leaves the content exactly where the last applied frame put it.
+      pendingScrollTop = null
+      delete scroller.dataset.navScrubbing
+      navScrubActiveRef.current = false
       setIsNavDragging(false)
+      setNavScrubbingCursor(false)
       setNavHover(null)
     }
     nav.addEventListener('pointermove', handleMove)
@@ -442,25 +539,18 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
     nav.addEventListener('pointercancel', handleCancel)
   }
 
-  // Continuous hover on the rail: the cursor's height is projected onto the
-  // rail's span and the NEAREST turn crests — the same midpoint-rounded
-  // ratio→turn mapping clicks and drags use (messageNavScrub), so hover,
+  // Continuous hover on the rail: the nearest REAL bar center wins — the same
+  // nearest-stop resolution clicks and drags use (messageNavScrub), so hover,
   // click and scrub can never disagree about which turn a position means.
   const handleNavPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (isNavDragging) return
-    const rect = event.currentTarget.getBoundingClientRect()
-    if (rect.height <= 0 || turns.length === 0) return
-    const ratio = ratioFromClientY(event.clientY, rect.top, rect.height)
-    const index = nearestTurnIndex(ratio, turns.length)
+    if (isNavDragging || navScrubActiveRef.current) return
+    const railStops = measureRailStops(event.currentTarget)
+    if (railStops.length === 0) return
+    const index = nearestStopIndexFromClientY(event.clientY, railStops)
     const turn = turns[index]
-    if (!turn) return
-    setNavHover((prev) => {
-      if (prev?.id === turn.anchorId) return prev
-      const viewport = viewportRef.current
-      if (!viewport) return prev
-      const barTop = rect.top + ((index + 0.5) / turns.length) * rect.height
-      return { id: turn.anchorId, top: barTop - viewport.getBoundingClientRect().top }
-    })
+    const railStop = railStops[index]
+    if (!turn || !railStop) return
+    crestHoverTo(turn.anchorId, railStop.railY)
   }
 
   // navHover.id is a turn's anchor (the user message id that opens the turn);
@@ -506,6 +596,20 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
       ro.disconnect()
     }
   }, [])
+
+  // A gesture killed by unmount can't run its own cleanup (the listeners die
+  // with the rail) — strip the scrub-only cursor class and instant-scroll
+  // flag here so neither outlives the drag.
+  useEffect(
+    () => () => {
+      if (!navScrubActiveRef.current) return
+      navScrubActiveRef.current = false
+      setNavScrubbingCursor(false)
+      const scroller = scrollerRef.current
+      if (scroller) delete scroller.dataset.navScrubbing
+    },
+    [],
+  )
 
   return (
     <section

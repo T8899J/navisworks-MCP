@@ -17,6 +17,7 @@ import {
   ContextStateToken,
   ExecutionLedgerToken,
   OperationCoordinatorToken,
+  TaskManagerToken,
   installAgentServices,
 } from './agentServices'
 import { token, type Scope } from './kernel'
@@ -56,6 +57,7 @@ export async function installApplicationServices(
     contextState: appScope.require(ContextStateToken),
     executionLedger: appScope.require(ExecutionLedgerToken),
     operationCoordinator: appScope.require(OperationCoordinatorToken),
+    taskManager: appScope.require(TaskManagerToken),
     resolveToolResult: (value) => resolveResult(paths.toolResultsDirectory, value),
   })
 

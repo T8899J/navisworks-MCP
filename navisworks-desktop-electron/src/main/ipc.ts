@@ -29,6 +29,7 @@ import type {
   DocumentChangeNotice,
 } from './agent/contextState'
 import type { AgentScopeManager } from './kernel/agentScopes'
+import type { TaskManager } from './agent/taskManager'
 import type { Scope } from './kernel/kernel'
 import { externalizeResult, isExternalizedResult, resolveResult } from './agent/toolResultStore'
 import type { SemanticMemory } from './agent/semanticMemory'
@@ -177,6 +178,7 @@ export interface DesktopIpcDependencies {
   /** Live Document Scope; observes bridge status so identity changes invalidate facts/sets. */
   contextState?: ContextState
   scopeManager?: AgentScopeManager
+  taskManager?: TaskManager
   toolApprovals: ToolApprovalRegistry
   /** P3 directory for externalized large tool results. When absent, results stay inline. */
   toolResultsDirectory?: string
@@ -274,6 +276,8 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       await chatRuns.abortAndWait(sessionId)
       await persistence.deleteSession(sessionId)
       await dependencies.scopeManager?.forgetConversation(sessionId)
+      // Tasks reference the session by id only — drop them with it.
+      await dependencies.taskManager?.deleteBySession(sessionId)
     }),
     'settings.get': routeHandler<'settings.get'>(() => persistence.getSettings()),
     'settings.update': routeHandler<'settings.update'>(async ({ settings }) => {

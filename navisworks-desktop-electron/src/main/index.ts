@@ -19,7 +19,7 @@ import {
 } from './ipc'
 import type { AgentRuntime, AgentRunEvent } from './agentRuntime'
 import { makeRootScope } from './kernel/services'
-import { AgentScopeManagerToken, ContextStateToken } from './kernel/agentServices'
+import { AgentScopeManagerToken, ContextStateToken, TaskManagerToken } from './kernel/agentServices'
 import {
   AgentRuntimeToken,
   ApprovalServiceToken,
@@ -83,6 +83,7 @@ async function startApplication(): Promise<void> {
   const modelRouter = appScope.require(ModelRouterToken)
   const contextState = appScope.require(ContextStateToken)
   const scopeManager = appScope.require(AgentScopeManagerToken)
+  const taskManager = appScope.require(TaskManagerToken)
   const toolApprovals = appScope.require(ApprovalServiceToken)
   const instanceRegistry = appScope.require(NavisworksInstanceRegistryToken)
   const instanceSelection = appScope.require(NavisworksInstanceSelectionToken)
@@ -119,6 +120,7 @@ async function startApplication(): Promise<void> {
     senderTrust,
     contextState,
     scopeManager,
+    taskManager,
     toolApprovals,
     instanceRegistry,
     instanceSelection,

@@ -64,6 +64,16 @@ import {
   CURI_CORE_PROMPT,
   NAVISWORKS_CAPABILITY_PROMPT,
 } from './agent/prompts'
+import { TaskManager, type TaskVerification } from './agent/taskManager'
+import { TaskPlanner } from './agent/taskPlanner'
+import { TaskVerifier } from './agent/taskVerifier'
+import { renderTaskContext, type TaskVerificationFeedback } from './agent/taskContext'
+import {
+  MAX_TASK_REPLANS,
+  REPLAN_LIMIT_REASON,
+  type CuriTask,
+  type TaskPauseReason,
+} from './agent/taskTypes'
 
 type AgentRequest = Omit<CompletionRequest, 'sampling'> & { sampling?: SamplingOptions }
 type CompleteResult = Awaited<ReturnType<ModelProvider['complete']>>
@@ -72,6 +82,20 @@ const DEFAULT_MODEL = 'qwen3.5:9b-q4_K_M'
 const MAX_TOOL_ROUNDS = 8
 const MAX_HISTORY_MESSAGES = 24
 const MAX_TOOL_RESULT_CHARS = 4_000
+
+// Task System v1: stateless planning/verification callers shared across runs.
+// Both talk to the SAME provider/model the user is already using (Section 三十二)
+// through their internal tool schemas — never a separate client or API key.
+const TASK_PLANNER = new TaskPlanner()
+const TASK_VERIFIER = new TaskVerifier()
+
+/** Evidence summaries stored per tool result; tasks.json keeps references, not payloads. */
+const MAX_EVIDENCE_SUMMARY_CHARS = 600
+
+/** The completion gate's return: either keep the agent loop running or stop the run now. */
+type TaskGateOutcome =
+  | { kind: 'stop'; result: AgentRunResult }
+  | { kind: 'continue' }
 
 // Automatic context compaction is decided by ContextManager.contextPressure(usage,
 // effectiveWindow) — provider-neutral (Invariant G). Both local and API providers use a
@@ -200,6 +224,11 @@ export interface AgentRuntimeOptions {
   operationCoordinator?: DocumentOperationCoordinator
   /** Resolve an externalized persisted tool result for runtime-internal recall. */
   resolveToolResult?: (value: unknown) => Promise<unknown>
+  /**
+   * Task System v1: durable task lifecycle (plan/evidence/verify). Optional —
+   * omitted in unit tests and every behavior stays exactly as before.
+   */
+  taskManager?: TaskManager
 }
 
 export { AgentRuntimeError } from './model/types'
@@ -218,6 +247,7 @@ export class AgentRuntime {
   readonly #executionLedger: ToolExecutionLedger | undefined
   readonly #operationCoordinator: DocumentOperationCoordinator | undefined
   readonly #resolveToolResult: ((value: unknown) => Promise<unknown>) | undefined
+  readonly #taskManager: TaskManager | undefined
 
   constructor(options: AgentRuntimeOptions) {
     this.#bridgeClient = options.bridgeClient
@@ -237,6 +267,7 @@ export class AgentRuntime {
     this.#executionLedger = options.executionLedger
     this.#operationCoordinator = options.operationCoordinator
     this.#resolveToolResult = options.resolveToolResult
+    this.#taskManager = options.taskManager
   }
 
   async summarizeTitle(text: string, signal?: AbortSignal): Promise<string> {
@@ -302,6 +333,22 @@ export class AgentRuntime {
         },
       },
     ]
+    // Task System v1: resume the session's latest unfinished task as Active
+    // Task Context (block order: capability → task-state → document…). A paused
+    // task never auto-executes — it re-enters running only when the model
+    // produces tool calls again during THIS run (Section 十四).
+    const taskManager = this.#taskManager
+    const sessionId = input.sessionId
+    let activeTask: CuriTask | undefined
+    if (taskManager !== undefined && sessionId !== undefined) {
+      activeTask = taskManager.getResumableTaskForSession(sessionId)
+      if (activeTask !== undefined) {
+        contextBlocks.push({
+          kind: 'task-state',
+          message: { role: 'system', content: renderTaskContext(activeTask) },
+        })
+      }
+    }
     const currentDocumentBlock = renderCurrentDocumentContext(
       input.currentDocument ?? this.#contextState?.currentDocument,
     )
@@ -371,6 +418,44 @@ export class AgentRuntime {
     let lastAssistantText = ''
     let didCompactRun = false
     let capturedSummary: string | undefined
+
+    // --- Task System v1 run-scoped state (all no-ops without a TaskManager) ---
+    const taskContextFeedback: { verification?: TaskVerificationFeedback } = {}
+    let taskDecisionMade = false
+    let verificationDisabled = false
+    const recentToolOutcomes: Array<{ toolName: string; ok: boolean; summary: string }> = []
+    const refreshTaskContext = (): void => {
+      if (activeTask === undefined) return
+      contextManager.setSingletonContextBlock('task-state', {
+        role: 'system',
+        content: renderTaskContext(activeTask, taskContextFeedback.verification),
+      })
+    }
+    // End-of-run safety: a task left running by a round limit, model error or
+    // user abort must not stay running — pause it so the next run can resume.
+    const pauseIfRunning = async (reason: TaskPauseReason): Promise<void> => {
+      if (taskManager === undefined || activeTask?.status !== 'running') return
+      try {
+        activeTask = await taskManager.pause(activeTask.id, reason)
+      } catch (pauseError) {
+        console.debug(`[task] pause failed: ${errorMessage(pauseError)}`)
+      }
+    }
+    // Verifier/planner failures must degrade, except aborts which propagate so
+    // the outer catch can record USER_ABORTED (never a fabricated verdict).
+    const verifyOrDegrade = async (): Promise<TaskVerification | null> => {
+      try {
+        return await TASK_VERIFIER.verify(provider, model, {
+          task: activeTask!,
+          agentAnswer: lastAssistantText || undefined,
+          recentToolOutcomes,
+        }, options.signal)
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        console.debug(`[task] verifier error: ${errorMessage(error)}`)
+        return null
+      }
+    }
     try {
       // Section 一/1.3: budget-check BEFORE the first model call, not just on later rounds.
       const initialTokens = contextManager.estimateRequestTokens(tools, this.#numPredict)
@@ -416,8 +501,105 @@ export class AgentRuntime {
         latestCacheHitRate = response.cacheHitRate
         lastAssistantText = response.content.trim()
 
+        const finishSuccess = (message: string = lastAssistantText): AgentRunResult => ({
+          isSuccess: true,
+          message,
+          contextTokensUsed: latestContextTokens,
+          contextWindowTokens: effectiveWindow,
+          ...(response.thinking.trim() ? { thinkingText: response.thinking } : {}),
+          ...(latestCacheHitRate === undefined ? {} : { cacheHitRate: latestCacheHitRate }),
+          ...(didCompactRun ? { compacted: true } : {}),
+          ...(capturedSummary === undefined || capturedSummary === '' ? {} : { compactSummary: capturedSummary }),
+          ...(semanticMemory === undefined ? {} : { semanticMemory }),
+        })
+
+        // The Completion Gate (Sections 二十/二十三): judge the ACTIVE task
+        // against its completion criteria — with the agent's draft answer as
+        // context only. verdict complete → complete + return; continue/replan →
+        // fold verifier feedback into the task context and loop on; blocked →
+        // block + hand the blocker to the user. A broken verifier degrades
+        // (paused VERIFIER_ERROR), it NEVER reads as complete.
+        const runCompletionGate = async (): Promise<TaskGateOutcome> => {
+          if (taskManager === undefined || activeTask === undefined) return { kind: 'continue' }
+          const verification = await verifyOrDegrade()
+          if (verification === null) {
+            verificationDisabled = true
+            await pauseIfRunning('VERIFIER_ERROR')
+            return response.toolCalls.length === 0
+              ? {
+                  kind: 'stop',
+                  result: finishSuccess(
+                    `${lastAssistantText}\n\n（任务完成状态暂时无法确认，任务已暂停；需要时让 Curi 继续该任务以完成验证。）`,
+                  ),
+                }
+              : { kind: 'continue' }
+          }
+          taskContextFeedback.verification = {
+            verdict: verification.verdict,
+            reason: verification.reason,
+            ...(verification.missingEvidence === undefined ? {} : { missingEvidence: verification.missingEvidence }),
+            ...(verification.nextAction === undefined ? {} : { nextAction: verification.nextAction }),
+          }
+          console.debug(`[task] TASK_VERIFIED verdict=${verification.verdict} task=${activeTask.id}`)
+          if (verification.verdict === 'complete') {
+            activeTask = await taskManager.complete(activeTask.id)
+            refreshTaskContext()
+            return response.toolCalls.length === 0
+              ? { kind: 'stop', result: finishSuccess() }
+              : { kind: 'continue' }
+          }
+          if (verification.verdict === 'blocked') {
+            activeTask = await taskManager.block(activeTask.id, verification.blockedReason ?? 'BLOCKED')
+            refreshTaskContext()
+            const blocker = `任务已阻塞：${verification.reason}`
+              + (verification.nextAction ? ` 下一步：${verification.nextAction}` : '')
+            return { kind: 'stop', result: finishSuccess(blocker) }
+          }
+          if (verification.verdict === 'replan') {
+            if (activeTask.replanCount >= MAX_TASK_REPLANS) {
+              activeTask = await taskManager.block(activeTask.id, REPLAN_LIMIT_REASON)
+              refreshTaskContext()
+              return {
+                kind: 'stop',
+                result: finishSuccess(`任务已阻塞（重规划次数已达上限）：${verification.reason}`),
+              }
+            }
+            const replan = await TASK_PLANNER.replan(provider, model, {
+              task: activeTask,
+              failureReason: verification.reason,
+              ...(verification.missingEvidence === undefined ? {} : { missingEvidence: verification.missingEvidence }),
+            }, options.signal).catch((error) => {
+              if (options.signal?.aborted) throw error
+              console.debug(`[task] replanner error: ${errorMessage(error)}`)
+              return null
+            })
+            if (replan === null) {
+              verificationDisabled = true
+              await pauseIfRunning('REPLAN_FAILED')
+              return response.toolCalls.length === 0
+                ? {
+                    kind: 'stop',
+                    result: finishSuccess(
+                      `${lastAssistantText}\n\n（重新规划暂时失败，任务已暂停；需要时让 Curi 继续该任务。）`,
+                    ),
+                  }
+                : { kind: 'continue' }
+            }
+            console.debug(`[task] TASK_REPLAN task=${activeTask.id} planVersion=${activeTask.planVersion + 1}`)
+            activeTask = await taskManager.replacePlan(activeTask.id, replan)
+            refreshTaskContext()
+            return { kind: 'continue' }
+          }
+          // verdict = continue: task state + verifier feedback are now in the
+          // task context; the next round keeps calling the tools it needs.
+          activeTask = await taskManager.applyVerification(activeTask.id, verification)
+          refreshTaskContext()
+          return { kind: 'continue' }
+        }
+
         if (response.toolCalls.length === 0) {
           if (!lastAssistantText) {
+            await pauseIfRunning('MODEL_ERROR')
             return {
               isSuccess: false,
               message: '模型没有返回文本或工具调用，请重试或更换模型。',
@@ -426,17 +608,52 @@ export class AgentRuntime {
               errorCode: 'MODEL_EMPTY_RESPONSE',
             }
           }
-          return {
-            isSuccess: true,
-            message: lastAssistantText,
-            contextTokensUsed: latestContextTokens,
-            contextWindowTokens: effectiveWindow,
-            ...(response.thinking.trim() ? { thinkingText: response.thinking } : {}),
-            ...(latestCacheHitRate === undefined ? {} : { cacheHitRate: latestCacheHitRate }),
-            ...(didCompactRun ? { compacted: true } : {}),
-            ...(capturedSummary === undefined || capturedSummary === '' ? {} : { compactSummary: capturedSummary }),
-            ...(semanticMemory === undefined ? {} : { semanticMemory }),
+          if (activeTask !== undefined && activeTask.status === 'running' && !verificationDisabled) {
+            const gate = await runCompletionGate()
+            if (gate.kind === 'stop') return gate.result
+            // Verdict continue/replan: the refreshed task context now guides
+            // the next model round — skip tool processing for THIS response.
+            continue
+          } else {
+            return finishSuccess()
           }
+        }
+
+        // Task creation trigger (Section 十三): exactly once per run, on the
+        // first tool-call round, before anything executes. Plain chats and
+        // session-less unit tests never reach here with a TaskManager.
+        if (taskManager !== undefined && sessionId !== undefined
+          && !taskDecisionMade && activeTask === undefined) {
+          taskDecisionMade = true
+          const decision = await TASK_PLANNER.plan(provider, model, {
+            userGoal: trimmedInput,
+            constraints: semanticMemory?.constraints ?? [],
+            ...(currentDocumentBlock ? { documentSummary: clip(currentDocumentBlock, 300) } : {}),
+            proposedToolCalls: response.toolCalls.map((call) => ({
+              name: call.name,
+              arguments: call.arguments,
+            })),
+          }, options.signal).catch((error) => {
+            if (options.signal?.aborted) throw error
+            console.debug(`[task] planner error: ${errorMessage(error)}`)
+            return null
+          })
+          if (decision?.needsTask === true && decision.task !== undefined) {
+            activeTask = await taskManager.createTask({
+              sessionId,
+              ...decision.task,
+            })
+            console.debug(`[task] TASK_CREATED task=${activeTask.id} steps=${activeTask.steps.length}`)
+            refreshTaskContext()
+          }
+        }
+        // A resumable paused/planning task re-enters running only because the
+        // model is actually executing tools again this round — never on talk.
+        if (taskManager !== undefined && activeTask !== undefined && activeTask.status !== 'running') {
+          activeTask = await taskManager.markRunning(activeTask.id)
+          taskContextFeedback.verification = undefined
+          refreshTaskContext()
+          console.debug(`[task] TASK_RUNNING task=${activeTask.id}`)
         }
 
         const assistantToolMessage: ChatMessage = {
@@ -449,6 +666,7 @@ export class AgentRuntime {
           })),
         }
         const toolResultMessages: ChatMessage[] = []
+        let roundHadToolFailure = false
 
         for (const toolCall of response.toolCalls) {
           throwIfAborted(options.signal)
@@ -497,10 +715,45 @@ export class AgentRuntime {
               input.sessionId,
             )
           }
+
+          // Task evidence (Section 十八/十九): summary + reference only. Raw
+          // payloads stay with the session's persisted tool results; tasks.json
+          // never grows a second raw-result store.
+          if (activeTask !== undefined && taskManager !== undefined) {
+            const toolError = toolResult.error
+            const toolOk = toolError === undefined
+            const evidenceSummary = toolOk
+              ? summarizeToolSuccess(toolCall.name, payloadIsRecord(toolResult.result) ? toolResult.result : undefined)
+              : `失败 ${toolError.code}：${toolError.message}`
+            recentToolOutcomes.push({ toolName: toolCall.name, ok: toolOk, summary: clip(evidenceSummary, 400) })
+            await taskManager.recordToolEvidence(activeTask.id, {
+              toolCallId: toolCall.id,
+              toolName: toolCall.name,
+              status: toolOk
+                ? 'supporting'
+                : toolError.ambiguousOutcome === true ? 'unknown' : 'contradicting',
+              summary: clip(evidenceSummary, MAX_EVIDENCE_SUMMARY_CHARS),
+            })
+            if (!toolOk) roundHadToolFailure = true
+          }
         }
         contextManager.addToolExchange(assistantToolMessage, toolResultMessages)
+        if (activeTask !== undefined) refreshTaskContext()
+
+        // Verifier situation A (Section 二十二): a failed/ambiguous tool round
+        // inside an active task gets judged (continue/replan/blocked) before
+        // the loop continues — complete is handled the same way it is at the
+        // answer-time gate.
+        if (roundHadToolFailure && activeTask !== undefined
+          && activeTask.status === 'running' && !verificationDisabled) {
+          const gate = await runCompletionGate()
+          if (gate.kind === 'stop') return gate.result
+        }
       }
 
+      // Section 二十八: the run ended without finishing the task — never leave
+      // it running; pause with the reason so the next run can resume it.
+      await pauseIfRunning('TOOL_ROUND_LIMIT')
       return {
         isSuccess: false,
         message: `工具调用超过 ${this.#maxToolRounds} 轮，已停止以避免循环。请缩小指令范围后重试。`,
@@ -512,9 +765,11 @@ export class AgentRuntime {
       }
     } catch (error) {
       if (options.signal?.aborted) {
+        await pauseIfRunning('USER_ABORTED')
         throw createAbortError(options.signal.reason)
       }
       if (error instanceof AgentRuntimeError) {
+        await pauseIfRunning('MODEL_ERROR')
         return {
           isSuccess: false,
           message: error.message,
@@ -524,6 +779,7 @@ export class AgentRuntime {
         }
       }
       if (error instanceof NavisworksTargetError) {
+        await pauseIfRunning('MODEL_ERROR')
         return {
           isSuccess: false,
           message: error.message,
@@ -532,6 +788,7 @@ export class AgentRuntime {
           errorCode: error.code,
         }
       }
+      await pauseIfRunning('MODEL_ERROR')
       return {
         isSuccess: false,
         message: `模型调用失败：${errorMessage(error)}`,
