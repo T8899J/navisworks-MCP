@@ -3,6 +3,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   useCallback,
+  useEffect,
   useRef,
   useState
 } from 'react'
@@ -17,6 +18,8 @@ interface EffortSliderProps {
   onChange(value: number): void
   /** Accessible name for the slider; rendered as `aria-label`. */
   ariaLabel?: string
+  /** Human-readable business tier announced by assistive technology. */
+  ariaValueText?: string
 }
 
 interface Particle {
@@ -31,8 +34,8 @@ interface Particle {
   opacity: number
 }
 
-  // Monotonic id is fine because particles are filtered out on `onAnimationEnd`.
-  let particleId = 0
+// Monotonic id is fine because particles are filtered out on `onAnimationEnd`.
+let particleId = 0
 
 /**
  * Particle palette follows the same aurora cyan→fuchsia ramp as the fill so
@@ -42,22 +45,87 @@ const PARTICLE_COLORS = ['#67e8f9', '#7dd3fc', '#a5b4fc', '#e879f9', '#fdf4ff']
 
 /** Cap on simultaneously-live particles; dragging always feels alive without
  *  risking layout thrash on rapid gestures. */
-const MAX_PARTICLES = 140
+const MAX_PARTICLES = 64
 
 /** One burst per animation frame, max — pointermove fires far faster than
  *  the display refreshes on high-polling mice. */
-const SPAWN_INTERVAL_MS = 16
+const SPAWN_INTERVAL_MS = 30
 
-function intensityLevel(value: number, max: number): number {
-  if (max <= 0) return 0
-  return Math.max(0, Math.min(1, value / max))
+function safeMax(max: number): number {
+  return Number.isFinite(max) ? Math.max(0, Math.floor(max)) : 0
 }
+
+function clampSemanticIndex(value: number, max: number): number {
+  const upper = safeMax(max)
+  if (upper === 0 || !Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(upper, Math.round(value)))
+}
+
+export function visualPctForValue(value: number, max: number): number {
+  const upper = safeMax(max)
+  return upper === 0 ? 0 : (clampSemanticIndex(value, upper) / upper) * 100
+}
+
+export function visualPctForExternalValue(
+  currentVisualPct: number,
+  value: number,
+  max: number,
+  isScrubbing: boolean,
+): number {
+  if (safeMax(max) === 0) return 0
+  if (isScrubbing) return Math.max(0, Math.min(100, currentVisualPct))
+  return visualPctForValue(value, max)
+}
+
+export interface SliderPointerPosition {
+  visualPct: number
+  semanticIndex: number
+  semanticChanged: boolean
+}
+
+export function sliderPositionFromClientX(
+  clientX: number,
+  trackLeft: number,
+  trackWidth: number,
+  max: number,
+  currentSemanticIndex: number,
+): SliderPointerPosition {
+  const upper = safeMax(max)
+  if (upper === 0 || !Number.isFinite(trackWidth) || trackWidth <= 0) {
+    return { visualPct: 0, semanticIndex: 0, semanticChanged: currentSemanticIndex !== 0 }
+  }
+  const rawProgress = (clientX - trackLeft) / trackWidth
+  const progress = Number.isFinite(rawProgress)
+    ? Math.max(0, Math.min(1, rawProgress))
+    : 0
+  const semanticIndex = Math.round(progress * upper)
+  return {
+    visualPct: progress * 100,
+    semanticIndex,
+    semanticChanged: semanticIndex !== currentSemanticIndex,
+  }
+}
+
+export function semanticIndexForKey(
+  key: string,
+  value: number,
+  max: number,
+): number | undefined {
+  const upper = safeMax(max)
+  const current = clampSemanticIndex(value, upper)
+  if (key === 'ArrowLeft') return Math.max(0, current - 1)
+  if (key === 'ArrowRight') return Math.min(upper, current + 1)
+  if (key === 'Home') return 0
+  if (key === 'End') return upper
+  return undefined
+}
+
+const SNAP_POINTS = [0, 25, 50, 75, 100] as const
 
 /**
  * A rectangular aurora-lit bar that hosts the underlying value track, a
  * square handle, and a soft matching particle burst at the handle while
- * dragging. No on-bar tick markers — the user reads effort from the fill
- * width plus the handle position.
+ * dragging. Five near-invisible snap hints appear only on hover or drag.
  *
  * The bar itself owns the drag gesture so any press anywhere on it updates
  * the value; the model/mode label lives in a separate row above this slider
@@ -67,7 +135,8 @@ export function EffortSlider({
   value,
   max,
   onChange,
-  ariaLabel
+  ariaLabel,
+  ariaValueText,
 }: EffortSliderProps) {
   const trackRef = useRef<HTMLDivElement>(null)
   // Captured pointer id gates moves/up; null means we're not dragging.
@@ -75,14 +144,25 @@ export function EffortSlider({
   // Timestamp of the last particle burst (one per frame, see SPAWN_INTERVAL_MS).
   const lastSpawn = useRef(-Infinity)
   const reducedMotion = useRef(
-    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    typeof window !== 'undefined'
+      && (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false)
   )
+  const initialSemanticIndex = clampSemanticIndex(value, max)
+  const semanticIndexRef = useRef(initialSemanticIndex)
+  const [visualPct, setVisualPctState] = useState(() => visualPctForValue(value, max))
+  const visualPctRef = useRef(visualPct)
   const [particles, setParticles] = useState<Particle[]>([])
   /** Shader flow-energy bump: 1 while dragging, ramps back to 0 on release. */
   const [scrubEnergy, setScrubEnergy] = useState(0)
   /** WebGL2 linked: the canvas is drawing, so the CSS fill becomes fallback. */
   const [flowReady, setFlowReady] = useState(false)
   const flowReadyRef = useRef(false)
+
+  const setVisualPct = useCallback((next: number) => {
+    const bounded = Number.isFinite(next) ? Math.max(0, Math.min(100, next)) : 0
+    visualPctRef.current = bounded
+    setVisualPctState(bounded)
+  }, [])
 
   const markFlowReady = useCallback(() => {
     if (!flowReadyRef.current) {
@@ -99,14 +179,24 @@ export function EffortSlider({
     }
   }, [])
 
-  const boundedValue = Math.max(0, Math.min(max, value))
-  const pct = max <= 0
-    ? 0
-    : Math.max(0, Math.min(100, (boundedValue / max) * 100))
+  const boundedValue = clampSemanticIndex(value, max)
+  const isScrubbing = scrubEnergy > 0 || activePointer.current !== null
+
+  useEffect(() => {
+    const dragging = activePointer.current !== null
+    if (!dragging) semanticIndexRef.current = boundedValue
+    setVisualPct(visualPctForExternalValue(
+      visualPctRef.current,
+      boundedValue,
+      max,
+      dragging,
+    ))
+  }, [boundedValue, max, setVisualPct])
+
   // Moving the thumb left by the same percentage of its own width makes its
   // left edge travel exactly through trackWidth - thumbWidth: 0 stays flush
   // left and 100 stays flush right without measuring the rendered track.
-  const thumbTransform = `translate(${-pct}%, -50%)`
+  const thumbTransform = `translate(${-visualPct}%, -50%)`
 
   const spawn = useCallback((x: number, y: number, level: number, now: number) => {
     // Reduced motion: the CSS kill-switch flattens the burst to an instant
@@ -156,15 +246,29 @@ export function EffortSlider({
     })
   }, [])
 
-  const setIndexFromClientX = useCallback((clientX: number) => {
+  const updateFromClientX = useCallback((clientX: number) => {
     const el = trackRef.current
-    if (!el) return
+    if (!el) return undefined
     const rect = el.getBoundingClientRect()
-    if (rect.width <= 0) return
-    const x = Math.max(0, Math.min(rect.width, clientX - rect.left))
-    const next = Math.round((x / rect.width) * max)
-    if (next !== boundedValue) onChange(next)
-  }, [boundedValue, max, onChange])
+    if (rect.width <= 0) return undefined
+    const position = sliderPositionFromClientX(
+      clientX,
+      rect.left,
+      rect.width,
+      max,
+      semanticIndexRef.current,
+    )
+    setVisualPct(position.visualPct)
+    if (position.semanticChanged) {
+      semanticIndexRef.current = position.semanticIndex
+      onChange(position.semanticIndex)
+    }
+    return {
+      x: (position.visualPct / 100) * rect.width,
+      y: rect.height / 2,
+      progress: position.visualPct / 100,
+    }
+  }, [max, onChange, setVisualPct])
 
   const handlePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (max <= 0 || event.button !== 0) return
@@ -172,33 +276,26 @@ export function EffortSlider({
     if (!el) return
     el.setPointerCapture(event.pointerId)
     activePointer.current = event.pointerId
+    semanticIndexRef.current = boundedValue
     setScrubEnergy(1)
-    setIndexFromClientX(event.clientX)
-    const rect = el.getBoundingClientRect()
-    const localX = event.clientX - rect.left
-    const localY = rect.height / 2
-    const snapped = Math.max(0, Math.min(rect.width, localX))
-    const level = intensityLevel(Math.round((snapped / rect.width) * max), max)
-    spawn(snapped, localY, level, event.timeStamp)
-  }, [max, setIndexFromClientX, spawn])
+    const position = updateFromClientX(event.clientX)
+    if (position) spawn(position.x, position.y, position.progress, event.timeStamp)
+  }, [boundedValue, max, spawn, updateFromClientX])
 
   const handlePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (activePointer.current !== event.pointerId) return
-    const el = trackRef.current
-    if (!el) return
-    const rect = el.getBoundingClientRect()
-    const localX = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
-    setIndexFromClientX(event.clientX)
-    const level = intensityLevel(Math.round((localX / rect.width) * max), max)
-    spawn(localX, rect.height / 2, level, event.timeStamp)
-  }, [max, setIndexFromClientX, spawn])
+    const position = updateFromClientX(event.clientX)
+    if (position) spawn(position.x, position.y, position.progress, event.timeStamp)
+  }, [spawn, updateFromClientX])
 
-  const releasePointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+  const finishPointer = useCallback((event: ReactPointerEvent<HTMLDivElement>, updatePosition: boolean) => {
     if (activePointer.current !== event.pointerId) return
+    if (updatePosition) updateFromClientX(event.clientX)
     activePointer.current = null
     setScrubEnergy(0)
+    setVisualPct(visualPctForValue(semanticIndexRef.current, max))
     trackRef.current?.releasePointerCapture(event.pointerId)
-  }, [])
+  }, [max, setVisualPct, updateFromClientX])
 
   const removeParticle = useCallback((id: number) => {
     setParticles((prev) => prev.filter((p) => p.id !== id))
@@ -206,16 +303,13 @@ export function EffortSlider({
 
   // Keyboard parity with the native range input it replaces.
   const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight'
-        && event.key !== 'Home' && event.key !== 'End') return
+    const next = semanticIndexForKey(event.key, boundedValue, max)
+    if (next === undefined) return
     event.preventDefault()
-    let next = boundedValue
-    if (event.key === 'ArrowLeft') next = Math.max(0, boundedValue - 1)
-    else if (event.key === 'ArrowRight') next = Math.min(max, boundedValue + 1)
-    else if (event.key === 'Home') next = 0
-    else if (event.key === 'End') next = max
+    semanticIndexRef.current = next
+    setVisualPct(visualPctForValue(next, max))
     if (next !== boundedValue) onChange(next)
-  }, [boundedValue, max, onChange])
+  }, [boundedValue, max, onChange, setVisualPct])
 
   return (
     <div
@@ -224,24 +318,23 @@ export function EffortSlider({
       /* Bucketed 0…4 so CSS can pick a per-tier aurora colour for the fill;
          the bar itself carries no background of its own. */
       data-level={max > 0 ? Math.round((boundedValue / max) * 4) : 0}
-      data-scrubbing={scrubEnergy > 0 || activePointer.current !== null}
+      data-scrubbing={isScrubbing}
       role="slider"
       aria-valuemin={0}
       aria-valuemax={max}
       aria-valuenow={boundedValue}
+      aria-valuetext={ariaValueText}
       aria-label={ariaLabel}
       tabIndex={0}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
-      onPointerUp={releasePointer}
-      onPointerCancel={releasePointer}
+      onPointerUp={(event) => finishPointer(event, true)}
+      onPointerCancel={(event) => finishPointer(event, false)}
       onKeyDown={handleKeyDown}
     >
       <FlowLightCanvas
-        progress={pct / 100}
-        /* Guarded like data-level below: level is NaN when max is 0, which
-           used to crash flowTierColors inside the render loop every frame. */
-        level={max > 0 ? Math.round((boundedValue / max) * 4) : 0}
+        progress={visualPct / 100}
+        level={(visualPct / 100) * 4}
         scrub={scrubEnergy}
         onReady={markFlowReady}
         onLost={markFlowLost}
@@ -250,13 +343,24 @@ export function EffortSlider({
           Unmounted once the WebGL2 program links (`onReady`); until then it
           keeps the bar readable and stands in for the shader below. */}
       {!flowReady && (
-        <div className="composer-pill-fill" aria-hidden="true" style={{ width: `${pct}%` }} />
+        <div className="composer-pill-fill" aria-hidden="true" style={{ width: `${visualPct}%` }} />
       )}
+      <div className="composer-pill-snap-points" aria-hidden="true">
+        {SNAP_POINTS.map((point) => (
+          <span
+            key={point}
+            className="composer-pill-snap-point"
+            style={{ left: `${point}%`, transform: `translateX(${-point}%)` }}
+          />
+        ))}
+      </div>
       <div
         className="composer-pill-handle"
         aria-hidden="true"
-        style={{ left: `${pct}%`, transform: thumbTransform }}
-      />
+        style={{ left: `${visualPct}%`, transform: thumbTransform }}
+      >
+        <span className="composer-pill-handle-core" />
+      </div>
       <div className="composer-pill-particles" aria-hidden="true">
         {particles.map((p) => (
           <span

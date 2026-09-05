@@ -21,7 +21,9 @@ import {
   type NavisworksStatus,
   type SessionSummary,
   type ToolApprovalRequest,
-  createId
+  createId,
+  navisworksInstanceDisplay,
+  navisworksStatusBadge
 } from './chatTypes'
 import { Composer } from './Composer'
 import { appearanceGateway, applyAppearance, applyFontScale } from './appearance'
@@ -74,7 +76,7 @@ function statusFromConnection(state: NavisworksConnectionState): NavisworksStatu
   if (selected === undefined) return DEFAULT_NAVISWORKS_STATUS
   return {
     connected: selected.connected,
-    status: selected.connected ? selected.documentName ?? '已连接' : '当前 Navisworks 已断开',
+    status: selected.connected ? selected.documentName ?? '已连接' : '当前选择的 Navisworks 已断开',
     ...(selected.documentName === undefined ? {} : { documentName: selected.documentName }),
   }
 }
@@ -988,6 +990,21 @@ export default function App() {
     void sendText(lastUser.content)
   }
 
+  const navisworksBadge = navisworksStatusBadge(navisworks)
+  // The header carries the selected instance as one quiet line: PID, version
+  // and the raw filename belong in the hover title, not on the chip.
+  const selectedInstance = navisworksConnection.instances.find(
+    (instance) => instance.instanceId === navisworksConnection.selectedInstanceId
+  )
+  const navisworksChipTitle = selectedInstance === undefined
+    ? navisworksBadge.title
+    : [
+        selectedInstance.documentName ?? '未命名文档',
+        `Navisworks ${selectedInstance.hostVersion}`,
+        `PID ${selectedInstance.processId}`,
+        selectedInstance.connected ? null : '已断开',
+      ].filter(Boolean).join('\n')
+
   return (
     <div className="app-root">
       <TitleBar sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((current) => !current)} />
@@ -1054,7 +1071,7 @@ export default function App() {
             </div>
           )}
           <div className="header-actions">
-            <div className="navisworks-status" data-connected={navisworks.connected} role="status">
+            <div className="navisworks-status" data-connected={navisworks.connected} role="status" title={navisworksChipTitle}>
               <span className="status-dot" />
               <Box aria-hidden="true" size={14} />
               <span className="status-copy">
@@ -1067,37 +1084,19 @@ export default function App() {
                     aria-expanded={navisworksMenuOpen}
                     onClick={() => setNavisworksMenuOpen((current) => !current)}>
                     <strong>
-                      {(() => {
-                        const selected = navisworksConnection.instances.find(
-                          (instance) => instance.instanceId === navisworksConnection.selectedInstanceId
-                        )
-                        return selected
-                          ? `${selected.documentName ?? '未命名文档'} · ${selected.connected ? `PID ${selected.processId}` : '已断开'}`
-                          : 'Navisworks'
-                      })()}
+                      {selectedInstance === undefined
+                        ? 'Navisworks'
+                        : navisworksInstanceDisplay(selectedInstance, navisworksConnection.instances).label}
                     </strong>
                     <ChevronDown aria-hidden="true" size={12} />
                   </button>
                 ) : (
-                  <strong>{navisworks.documentName ?? (navisworks.connected ? 'Navisworks 已连接' : 'Navisworks 未连接')}</strong>
+                  <strong>{navisworksBadge.label}</strong>
                 )}
-                {(() => {
-                  const selected = navisworksConnection.instances.find(
-                    (instance) => instance.instanceId === navisworksConnection.selectedInstanceId
-                  )
-                  if (!selected) return null
-                  return (
-                    <small>
-                      {navisworksConnection.runningInstanceId === selected.instanceId
-                        ? '正在使用'
-                        : `Navisworks ${selected.hostVersion} · PID ${selected.processId}`}
-                    </small>
-                  )
-                })()}
               </span>
 
               {canChooseNavisworksInstance && navisworksMenuOpen ? (
-                <div className="navisworks-instance-menu">
+                <div className="navisworks-instance-menu" role="menu">
                   {navisworksConnection.instances.map((instance) => {
                     const isSelected = instance.instanceId === navisworksConnection.selectedInstanceId
                     const isDisconnected = !instance.connected
@@ -1106,31 +1105,35 @@ export default function App() {
                     const isReplacementCandidate = !isDisconnected && !isSelected
                       && (navisworksRebindState.kind === 'single-replacement'
                         || navisworksRebindState.kind === 'multiple-replacements')
+                    const display = navisworksInstanceDisplay(instance, navisworksConnection.instances)
                     return (
                       <button
                         key={instance.instanceId}
                         type="button"
+                        role="menuitemradio"
+                        aria-checked={isSelected && !isDisconnected}
                         className="instance-menu-item"
                         data-selected={isSelected}
                         data-disconnected={isDisconnected}
                         disabled={isDisconnected || busy || navisworksConnection.runningInstanceId !== undefined}
-                        title={isDisconnected ? '已断开连接，无法切换' : undefined}
+                        title={[
+                          instance.documentName ?? '未命名文档',
+                          `Navisworks ${instance.hostVersion}`,
+                          `PID ${instance.processId}`,
+                          isDisconnected ? '已断开连接，无法切换' : null,
+                        ].filter(Boolean).join('\n')}
                         onClick={() => {
                           if (!isDisconnected) {
                             void selectNavisworksInstance(instance.instanceId)
                             setNavisworksMenuOpen(false)
                           }
                         }}>
-                        <span className="instance-menu-item-title">
-                          {instance.documentName ?? '未命名文档'}
-                        </span>
-                        <span className="instance-menu-item-meta">
-                          {isSelected && isDisconnected
-                            ? '当前目标 · 已断开'
-                            : isReplacementCandidate
-                              ? `可用 · ${instance.documentName ?? '未命名文档'}`
-                              : `PID ${instance.processId}${isDisconnected ? ' · 已断开' : ''}`}
-                        </span>
+                        <span className="instance-menu-item-title">{display.label}</span>
+                        {isDisconnected ? (
+                          <span className="instance-menu-state">{isSelected ? '当前目标 · 已断开' : '已断开'}</span>
+                        ) : isReplacementCandidate ? (
+                          <span className="instance-menu-state">可用</span>
+                        ) : null}
                         {isSelected && !isDisconnected ? <Check aria-hidden="true" size={14} /> : null}
                       </button>
                     )
@@ -1144,7 +1147,7 @@ export default function App() {
                       setNavisworksMenuOpen(false)
                     }}>
                     <RefreshCw aria-hidden="true" size={14} className={busy ? 'running' : undefined} />
-                    刷新实例列表
+                    刷新
                   </button>
                 </div>
               ) : null}

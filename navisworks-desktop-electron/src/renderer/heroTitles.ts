@@ -2,18 +2,22 @@
  * Greeting lines for the new-conversation hero. One is drawn at random each
  * time the composer enters the hero variant (i.e. per fresh conversation),
  * so repeat visits do not read like a static banner.
+ *
+ * The hero is Curi's generic front door: no Navisworks vocabulary, no
+ * capability lists, no self-introduction — connectivity is already shown
+ * by the header chip. New lines must keep to that rule (enforced by test).
  */
 export const HERO_TITLES = [
   '今天想做点什么？',
-  '这次想在模型里解决什么？',
-  '把任务交给我，剩下的我来。',
-  '从哪一个视点开始检查？',
-  '准备开工了，说说你的计划。',
-  '有什么想问当前文档的？',
-  '查属性、找构件、切视点，随时开口。',
-  '说说看，这单工作要做到哪一步？',
-  'Navisworks 已就位，等你指令。',
-  '聊聊你的想法，我帮你落地。'
+  '从哪里开始？',
+  '说说你的想法。',
+  '有什么想解决的？',
+  '我们从问题开始。',
+  '这次想做到哪一步？',
+  '有件事想一起弄明白吗？',
+  '想到什么就说。',
+  '准备好了。',
+  '开始吧。'
 ] as const
 
 /** Draws one greeting line at random. */

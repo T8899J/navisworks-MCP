@@ -372,7 +372,10 @@ export function Composer({
                       onClick={() => setPickerMode('model')}>
                       <span className="composer-picker-chip-name">{activeModel}</span>
                       <span className="composer-picker-chip-sep" aria-hidden="true">·</span>
-                      <span className="composer-picker-chip-mode" data-effort={activeEffort}>
+                      <span
+                        key={activeEffort}
+                        className="composer-picker-chip-mode"
+                        data-effort={activeEffort}>
                         {REASONING_EFFORT_LABEL[activeEffort]}
                       </span>
                       <ChevronRight aria-hidden="true" size={12} className="composer-picker-chip-chev" />
@@ -381,6 +384,7 @@ export function Composer({
                       value={effortIndex}
                       max={Math.max(0, effortTicks.length - 1)}
                       ariaLabel="推理强度"
+                      ariaValueText={REASONING_EFFORT_LABEL[activeEffort]}
                       onChange={(next) => {
                         const effort = effortTicks[next]
                         if (effort !== undefined) pickEffort(effort)

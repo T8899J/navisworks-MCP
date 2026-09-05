@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Minus, PanelLeft, Square, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, PanelLeft, X } from 'lucide-react'
 import { desktopGateway } from './desktop'
 
 interface TitleBarProps {
@@ -12,6 +12,11 @@ interface TitleBarProps {
  * back/forward, and the 文件/编辑/视图/帮助 menus share one pill-hover style;
  * window controls dock right. The left strip takes the sidebar color up to
  * the window buttons, the closing strip matches the content background.
+ *
+ * Minimize/maximize glyphs are pure CSS (a solid bar and an outlined square)
+ * instead of stroked icon-font shapes: at caption-button size the stroked
+ * icons read as faint smudges, while solid geometry keeps the Windows
+ * caption-button shape legible in both themes.
  */
 export function TitleBar({ sidebarOpen = true, onToggleSidebar }: TitleBarProps) {
   return (
@@ -43,21 +48,21 @@ export function TitleBar({ sidebarOpen = true, onToggleSidebar }: TitleBarProps)
           type="button"
           aria-label="最小化"
           onClick={() => void desktopGateway.windowControl('minimize')}>
-          <Minus aria-hidden="true" size={14} />
+          <span className="glyph-minimize" aria-hidden="true" />
         </button>
         <button
           className="title-bar-button"
           type="button"
           aria-label="最大化/还原"
           onClick={() => void desktopGateway.windowControl('toggle-maximize')}>
-          <Square aria-hidden="true" size={11} />
+          <span className="glyph-maximize" aria-hidden="true" />
         </button>
         <button
           className="title-bar-button title-bar-close"
           type="button"
           aria-label="关闭窗口"
           onClick={() => void desktopGateway.windowControl('close')}>
-          <X aria-hidden="true" size={14} />
+          <X aria-hidden="true" size={14} strokeWidth={2.2} />
         </button>
       </div>
     </div>

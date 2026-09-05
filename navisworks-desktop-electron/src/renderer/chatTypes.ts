@@ -1,4 +1,10 @@
-import { toolNameSchema, type ApiProfile, type ToolApprovalRequest, type ToolName } from '../shared/ipc'
+import {
+  toolNameSchema,
+  type ApiProfile,
+  type NavisworksInstanceSummary,
+  type ToolApprovalRequest,
+  type ToolName,
+} from '../shared/ipc'
 import { normalizeReasoningEffort, type ReasoningEffort } from '../shared/reasoning'
 
 export type { ApiProfile, ToolApprovalRequest }
@@ -65,6 +71,48 @@ export interface NavisworksStatus {
   status: string
   documentName?: string
   selectionCount?: number
+}
+
+/**
+ * Header chip texts for the Navisworks status. While disconnected the chip
+ * de-emphasizes to the bare product name — Curi's front page should lead with
+ * Curi, and "Navisworks 未连接" is a third-layer detail that belongs in the
+ * hover title. Connected states keep the current prominence.
+ */
+export function navisworksStatusBadge(status: NavisworksStatus): { label: string; title: string } {
+  if (status.documentName) {
+    return { label: status.documentName, title: status.documentName }
+  }
+  return status.connected
+    ? { label: 'Navisworks 已连接', title: 'Navisworks 已连接' }
+    : { label: 'Navisworks', title: 'Navisworks 未连接' }
+}
+
+/**
+ * Display name for an instance's document: basename only, the last known
+ * Navisworks extension stripped (case-insensitive). Rendering-only — never
+ * feeds selection or safety logic. Missing names read as 未命名文档.
+ */
+export function formatNavisworksDocumentName(documentName: string | undefined): string {
+  const base = (documentName ?? '').split(/[\\/]/).pop() ?? ''
+  return base.replace(/\.(nwd|nwf|nwc)$/i, '') || '未命名文档'
+}
+
+/**
+ * Single-line label for one instance row, with PID added only when another
+ * connected instance shares the same display name (so name collisions stay
+ * distinguishable while quiet rows stay quiet).
+ */
+export function navisworksInstanceDisplay(
+  instance: NavisworksInstanceSummary,
+  instances: readonly NavisworksInstanceSummary[],
+): { name: string; label: string } {
+  const name = formatNavisworksDocumentName(instance.documentName)
+  const colliding = instances.filter(
+    (candidate) => candidate.connected
+      && formatNavisworksDocumentName(candidate.documentName) === name,
+  ).length > 1
+  return { name, label: colliding ? `${name} · ${instance.processId}` : name }
 }
 
 export interface ChatStreamEvent {

@@ -6,9 +6,9 @@
   --sidebar: #1d1d1d;
   --surface: #202020;
   --surface-elevated: #282828;
-  --surface-hover: #303030;
+  --surface-hover: #3f3f3f;
   --surface-control: #2d2d2d;
-  --surface-active: #252525;
+  --surface-active: #3a3a3a;
   --surface-input: #222;
   --border: #363636;
   --border-strong: #454545;
@@ -59,9 +59,9 @@
   --sidebar: #eaeaea;
   --surface: #ffffff;
   --surface-elevated: #ffffff;
-  --surface-hover: #e8e8e8;
+  --surface-hover: #dcdcdc;
   --surface-control: #ececec;
-  --surface-active: #e5e5e5;
+  --surface-active: #d8d8d8;
   --surface-input: #ffffff;
   --border: #d6d6d6;
   --border-strong: #b8b8b8;
@@ -97,9 +97,9 @@
     --sidebar: #eaeaea;
     --surface: #ffffff;
     --surface-elevated: #ffffff;
-    --surface-hover: #e8e8e8;
+    --surface-hover: #dcdcdc;
     --surface-control: #ececec;
-    --surface-active: #e5e5e5;
+    --surface-active: #d8d8d8;
     --surface-input: #ffffff;
     --border: #d6d6d6;
     --border-strong: #b8b8b8;
@@ -287,6 +287,9 @@ summary:focus-visible,
   cursor: pointer;
 }
 
+/* Same fill as the strip; the hover itself does the revealing: a mid-gray
+   chip with a border step and a soft shadow, matching the menu items' raise
+   (but full-cell, Windows-caption style). */
 .title-bar-button:hover {
   color: var(--text);
   background: var(--surface-hover);
@@ -295,6 +298,21 @@ summary:focus-visible,
 .title-bar-close:hover {
   color: #fff;
   background: #e81123;
+}
+
+/* Caption glyphs as solid CSS geometry (Windows caption style): a 10×1 bar
+   for minimize, a 10×10 outlined square for maximize. currentColor keeps
+   them in step with the button's text color on hover. */
+.glyph-minimize {
+  width: 10px;
+  height: 1px;
+  background: currentColor;
+}
+
+.glyph-maximize {
+  width: 9px;
+  height: 9px;
+  border: 1px solid currentColor;
 }
 
 .app-shell {
@@ -400,24 +418,25 @@ summary:focus-visible,
 .new-session-button {
   display: flex;
   width: 100%;
-  /* Same visual weight as a session row (~34px tall at default scale). */
-  min-height: 34px;
+  /* A nav entry, not a CTA: same left-aligned, borderless reading as a
+     session row; the full row stays the hover hit area. */
+  min-height: 36px;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
-  padding: 0 14px;
+  padding: 0 12px;
   color: var(--text);
   font-size: var(--text-label);
   font-weight: 600;
-  background: var(--surface-elevated);
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 9px;
   cursor: pointer;
 }
 
 .new-session-button:hover {
   background: var(--surface-hover);
-  border-color: var(--border-strong);
+  border-color: transparent;
 }
 
 .new-session-button:disabled {
@@ -491,13 +510,15 @@ summary:focus-visible,
   text-align: center;
 }
 
-/* Date separators (置顶/今天/昨天/最近) between the session strips. */
+/* Date separators (置顶/今天/昨天/最近) between the session strips. Just a
+   date marker, not a column heading: no tracking (it fights Chinese glyph
+   spacing) and a lighter weight than the session titles below it. */
 .session-group-label {
   padding: 10px 11px 3px;
   color: var(--text-faint);
   font-size: var(--text-caption);
-  font-weight: 650;
-  letter-spacing: 0.08em;
+  font-weight: 550;
+  letter-spacing: 0;
 }
 
 .session-row {
@@ -541,9 +562,16 @@ summary:focus-visible,
   min-width: 0;
   flex: 1;
   overflow: hidden;
-  font-weight: 590;
+  font-weight: 540;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The active conversation is the one item allowed to push forward: darker
+   text and a heavier weight on top of the row's --surface-active fill. */
+.session-row[data-active="true"] .session-title {
+  color: var(--text);
+  font-weight: 630;
 }
 
 .session-actions {
@@ -582,6 +610,10 @@ summary:focus-visible,
   min-height: 0;
   grid-template-rows: 54px minmax(0, 1fr);
   background: var(--background);
+  /* A whisper-quiet outline around the floating pane: a regular border
+     follows the top-left radius automatically (no seams like an inset
+     pseudo-element). 7% text mix keeps it just this side of invisible. */
+  border: 1px solid color-mix(in srgb, var(--text) 7%, transparent);
   /* Rounded where the pane meets the title bar's sidebar strip: the content
      area reads as a floating card instead of running edge to edge. overflow
      clips the header's own background so the radius stays visible. */
@@ -623,6 +655,14 @@ summary:focus-visible,
   bottom: 0;
   height: 1px;
   background: var(--border-subtle);
+  transition: opacity 160ms ease;
+}
+
+/* The hero is a nearly empty canvas; a hard rule under the header would cut
+   it for no reason. Hidden via the chat-stage's data-hero marker (already
+   maintained for the composer variant), restored on the first real turn. */
+.chat-pane:has(.chat-stage[data-hero="true"]) .chat-header::after {
+  opacity: 0;
 }
 
 .chat-title {
@@ -682,6 +722,24 @@ summary:focus-visible,
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 14%, transparent);
 }
 
+/* Disconnected means only "this capability exists" — a third-layer fact, so
+   the chip fades to an outline. Once a session is actually live the weight
+   comes back (the [data-connected="true"] rules above). */
+.navisworks-status[data-connected="false"] {
+  color: var(--text-muted);
+  background: transparent;
+  border-color: color-mix(in srgb, var(--border) 65%, transparent);
+  box-shadow: none;
+}
+
+.navisworks-status[data-connected="false"] .status-dot {
+  opacity: 0.45;
+}
+
+.navisworks-status[data-connected="false"] svg {
+  opacity: 0.65;
+}
+
 .status-copy {
   display: flex;
   min-width: 0;
@@ -737,6 +795,19 @@ summary:focus-visible,
   cursor: default;
 }
 
+/* Shared pop-over language: the Navisworks instance menu and the composer
+   model panel are one component family — same surface, border, radius,
+   padding, shadow and enter motion. Positioning stays per-menu below, since
+   one hangs from the header and the other rides the composer dock. */
+.composer-menu-panel,
+.navisworks-instance-menu {
+  padding: 6px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px var(--shadow-color);
+}
+
 /* Instance menu: positioned relative to .navisworks-status. Floats above
    everything (z-index 40) so the backdrop sits cleanly between chat content
    and the menu itself. Min-width ensures long document names never collapse
@@ -747,15 +818,11 @@ summary:focus-visible,
   right: 0;
   z-index: 41;
   display: flex;
-  min-width: 240px;
-  max-width: 360px;
+  /* Same fixed width as the composer model panel — one family, no second
+     sizing system; long names ellipsize like model options do. */
+  width: 272px;
   flex-direction: column;
-  padding: 4px;
-  background: var(--surface-elevated);
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px var(--shadow-color);
-  animation: navisworks-menu-enter 120ms ease;
+  animation: navisworks-menu-enter 150ms ease;
 }
 
 @keyframes navisworks-menu-enter {
@@ -765,14 +832,16 @@ summary:focus-visible,
   }
 }
 
+/* One row per instance, mirroring the composer model options: name left,
+   state/check right. PID and version live in the row's hover title. */
 .instance-menu-item {
-  display: grid;
+  display: flex;
   min-width: 0;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: auto auto;
-  gap: 2px 8px;
-  padding: 7px 10px;
-  color: var(--text);
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  color: var(--text-secondary);
+  font-size: var(--text-label);
   text-align: left;
   background: transparent;
   border: 0;
@@ -783,6 +852,7 @@ summary:focus-visible,
 }
 
 .instance-menu-item:hover:not(:disabled) {
+  color: var(--text);
   background: var(--surface-hover);
 }
 
@@ -794,33 +864,28 @@ summary:focus-visible,
 .instance-menu-item[data-disconnected="true"] {
   color: var(--text-muted);
   cursor: not-allowed;
-  opacity: 0.6;
+  opacity: 0.5;
 }
 
 .instance-menu-item-title {
-  grid-column: 1;
-  grid-row: 1;
+  flex: 1;
   overflow: hidden;
-  font-size: var(--text-body);
-  font-weight: 590;
+  min-width: 0;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.instance-menu-item-meta {
-  grid-column: 1;
-  grid-row: 2;
-  overflow: hidden;
+/* Right-hand state text: 已断开 / 可用. Selected rows carry a Check icon
+   instead; the row itself is never painted with a big "active" fill. */
+.instance-menu-state {
+  flex: 0 0 auto;
   color: var(--text-muted);
   font-size: var(--text-caption);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .instance-menu-item > svg {
-  grid-column: 2;
-  grid-row: 1 / span 2;
-  align-self: center;
+  flex: 0 0 auto;
   color: var(--text-secondary);
 }
 
@@ -830,21 +895,20 @@ summary:focus-visible,
   align-items: center;
   gap: 7px;
   margin-top: 2px;
-  padding: 7px 10px;
+  padding: 6px 8px;
   color: var(--text-secondary);
-  font-size: var(--text-body);
-  font-weight: 590;
+  font-size: var(--text-label);
   text-align: left;
   background: transparent;
   border: 0;
-  border-top: 1px solid var(--border);
-  border-radius: 0 0 6px 6px;
+  border-radius: 6px;
   outline: 0;
   transition: background 100ms ease;
   cursor: pointer;
 }
 
 .instance-menu-action:hover:not(:disabled) {
+  color: var(--text);
   background: var(--surface-hover);
 }
 
@@ -854,7 +918,7 @@ summary:focus-visible,
 }
 
 .instance-menu-action:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: default;
 }
 
@@ -868,23 +932,15 @@ summary:focus-visible,
   cursor: default;
 }
 
-.status-copy strong,
-.status-copy small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+/* The chip is a single line now (details moved to the hover title), so the
+   strong text carries the truncation itself. */
 .status-copy strong {
+  overflow: hidden;
   color: var(--text-secondary);
   font-size: var(--text-secondary-size);
   font-weight: 590;
-}
-
-.status-copy small {
-  margin-top: 1px;
-  color: var(--text-muted);
-  font-size: var(--text-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-stage {
@@ -980,10 +1036,12 @@ summary:focus-visible,
 
 .composer-hero-heading h2 {
   margin: 0;
+  /* Quiet greeting, not a marketing headline: medium weight and tight
+     tracking now that the line is a plain question, not a tagline. */
   font-size: calc(21px * var(--font-scale));
-  font-weight: 600;
-  /* Open tracking keeps the random greeting lines from reading cramped. */
-  letter-spacing: 0.06em;
+  font-weight: 640;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
 }
 
 .message-row {
@@ -1311,30 +1369,37 @@ summary:focus-visible,
   max-height: min(64%, 520px);
   flex-direction: column;
   align-items: flex-start;
-  gap: 7px;
-  /* Wider horizontal padding = a generous hover/drag hit area. At rest the
-     hit band already spans the full crest width (32px) so the cursor trips
-     the wave by entering that range, not only by landing on the 9px bar. */
+  /* Density: the rail compresses its gap (7 → 4 → 2px) as turns pile up,
+     inline from React, instead of growing a second scrollbar. */
+  gap: var(--nav-gap, 7px);
+  /* Wider horizontal padding = a generous hover/drag hit area. The whole
+     box is interactive (clicks resolve to the nearest bar), so the hit band
+     spans well past the crest width — no second scroll context here: the
+     rail is a scrubber, its overflow is hidden and bars compress to fit. */
   padding: 6px 14px;
-  /* Break the widen-after-hover deadlock: at rest the box is only ~37px wide,
-     but the crest reaches 54px (and overshoots past 32 mid-animation), so the
-     far sliver could never trip hover. A 48px content floor makes the resting
-     hit band comfortably exceed the full crest reach on both counts. */
-  min-width: 48px;
-  overflow-y: auto;
+  /* A 52px content floor makes the resting hit band comfortably exceed the
+     full crest reach (32px + overshoot) on both counts. */
+  min-width: 52px;
+  overflow: hidden;
   cursor: pointer;
   user-select: none;
   transform: translateY(-50%);
 }
 
-.message-nav::-webkit-scrollbar {
-  width: 0;
+/* While scrubbing the pointer owns the whole conversation's scroll axis —
+   say so under the cursor. */
+.message-nav.is-dragging {
+  cursor: ns-resize;
 }
 
 .message-nav-item {
-  flex: none;
+  /* Shrinkable so long conversations compress inside the rail's max height
+     instead of needing their own scrollbar (the bar's 3px height is its
+     minimum; past that the rail simply can't hold more). */
+  flex: 0 1 auto;
   width: 9px;
   height: 3px;
+  min-height: 3px;
   padding: 0;
   background: var(--text-muted);
   border: 0;
@@ -1481,6 +1546,15 @@ summary:focus-visible,
   padding-top: 0;
   padding-bottom: 0;
   background: none;
+}
+
+/* The hero is Curi's front door, not a reading surface: narrower than the
+   920px conversation column, and lifted off the exact geometric center to
+   the optical one. The docked mode keeps the full width; the composer panel
+   is position:absolute, so the shift never clips its menus. */
+.composer-dock--hero .composer-column {
+  max-width: 840px;
+  transform: translateY(-44px);
 }
 
 .composer-column {
@@ -1913,13 +1987,8 @@ summary:focus-visible,
   width: max-content;
   min-width: 236px;
   max-width: 320px;
-  padding: 6px;
   visibility: hidden;
   opacity: 0;
-  background: var(--surface-elevated);
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  box-shadow: 0 14px 36px var(--shadow-color);
   transform: translateY(6px);
   transition: opacity 150ms ease, transform 150ms ease, visibility 150ms;
   pointer-events: none;
@@ -2027,8 +2096,12 @@ summary:focus-visible,
   border-radius: 4px;
   background: var(--bar-gradient);
   box-shadow: 0 0 10px var(--bar-glow);
-  transition: width 90ms ease-out;
+  transition: width 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
   pointer-events: none;
+}
+
+.composer-pill[data-scrubbing="true"] .composer-pill-fill {
+  transition: none;
 }
 
 /* Light theme: square LEDs stay ink-dark but very faint so the bar still reads as a
@@ -2050,8 +2123,34 @@ summary:focus-visible,
   }
 }
 
-/* (Tick markers were intentionally removed: the fill width and the handle
-   position are the only effort cues on the bar now.) */
+/* Five low-contrast snap hints reveal the discrete business tiers without
+   turning the compact bar into a settings-page ruler. */
+.composer-pill-snap-points {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.composer-pill-snap-point {
+  position: absolute;
+  top: calc(50% - 1.5px);
+  width: 3px;
+  height: 3px;
+  background: color-mix(in srgb, var(--text) 38%, transparent);
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 180ms ease-out;
+}
+
+.composer-pill:hover .composer-pill-snap-point,
+.composer-pill:focus-visible .composer-pill-snap-point {
+  opacity: 0.10;
+}
+
+.composer-pill[data-scrubbing="true"] .composer-pill-snap-point {
+  opacity: 0.22;
+}
 
 /* Cumulative per-tier aurora. Each `data-level` keeps every earlier stop and
    adds one new colour, reaching the full cyan-to-deep-violet chain at Max.
@@ -2101,20 +2200,34 @@ summary:focus-visible,
   top: 50%;
   width: 20px;
   height: 20px;
-  border-radius: 5px;
-  background: color-mix(in srgb, #ffffff 84%, var(--bar-to) 16%);
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.20),
-    0 0 5px color-mix(in srgb, var(--bar-glow) 70%, transparent);
   pointer-events: none;
-  /* 90ms ease only shapes discrete jumps (keyboard etc.). While dragging the
-     handle must track the pointer instantly: the flow light already does, so
-     any handle lag reads as the light outrunning the slider. */
-  transition: left 90ms ease-out, transform 90ms ease-out;
+  transition:
+    left 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .composer-pill[data-scrubbing="true"] .composer-pill-handle {
   transition: none;
+}
+
+.composer-pill-handle-core {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: color-mix(in srgb, #ffffff 84%, var(--bar-to) 16%);
+  border-radius: 5px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.20),
+    0 0 5px color-mix(in srgb, var(--bar-glow) 70%, transparent);
+  transform: scale(1);
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+}
+
+.composer-pill[data-scrubbing="true"] .composer-pill-handle-core {
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.24),
+    0 0 7px color-mix(in srgb, var(--bar-glow) 82%, transparent);
+  transform: scale(0.96);
 }
 
 /* Particle burst layer — soft tier-coloured sparks emitted at the handle on every
@@ -2211,10 +2324,25 @@ summary:focus-visible,
   flex: 0 0 auto;
   color: var(--text);
   font-weight: 650;
+  animation: effort-label-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .composer-picker-chip-mode[data-effort="max"] {
   color: #a78bfa;
+  animation-duration: 200ms;
+}
+
+@keyframes effort-label-in {
+  from {
+    opacity: 0;
+    filter: blur(1.5px);
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0);
+  }
 }
 
 .composer-picker-chip-chev {
@@ -3420,6 +3548,22 @@ select:focus-visible,
   }
 }
 
+/* Hero optical-center lift: shrink it on short screens and drop it entirely
+   on very short ones so the heading never crowds the header. The 840px cap
+   itself needs no narrow-screen rule — the column is fluid and clamps to the
+   pane before the cap ever binds. */
+@media (max-height: 760px) {
+  .composer-dock--hero .composer-column {
+    transform: translateY(-24px);
+  }
+}
+
+@media (max-height: 620px) {
+  .composer-dock--hero .composer-column {
+    transform: translateY(0);
+  }
+}
+
 @media (max-width: 620px) {
   :root {
     --conversation-side-space: 22px;
@@ -3434,8 +3578,7 @@ select:focus-visible,
     padding: 6px 8px;
   }
 
-  .navisworks-status > svg,
-  .status-copy small {
+  .navisworks-status > svg {
     display: none;
   }
 
