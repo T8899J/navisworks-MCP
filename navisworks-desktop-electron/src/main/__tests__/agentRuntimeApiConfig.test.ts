@@ -306,7 +306,7 @@ function ndjsonResponse(chunks: Array<Record<string, unknown>>): Response {
 }
 
 import { resolveApiContextWindow } from '../agentRuntime'
-import { chatEventSchema } from '../../shared/ipc/schemas'
+import { eventSchemas } from '../../shared/ipc/schemas'
 
 describe('context window source resolution (Cases 1–4)', () => {
   it('Case 1: profile 128000 wins over unknown capability → profile', () => {
@@ -405,8 +405,10 @@ describe('context window source resolution (Cases 1–4)', () => {
     expect(auto.contextWindowTokens).toBe(32_768)
   })
 
-  it('Case 5: chat.done carries contextWindowTokens AND contextWindowSource to the renderer', () => {
-    const parsed = chatEventSchema.parse({
+  it('Case 5: the REAL IPC schema (eventSchemas[chat.done]) carries window + source', () => {
+    // The Electron wire validates against eventSchemas['chat.done'] — testing
+    // any other done definition is what let the schema drift ship.
+    const parsed = eventSchemas['chat.done'].parse({
       kind: 'done',
       runId: 'run-1',
       sessionId: 'session-1',
@@ -418,8 +420,27 @@ describe('context window source resolution (Cases 1–4)', () => {
       contextWindowSource: 'profile',
     })
     expect(parsed).toMatchObject({ contextWindowTokens: 128_000, contextWindowSource: 'profile' })
-    // Old events without the field stay valid (compat: no migration required).
-    const legacy = chatEventSchema.parse({
+  })
+
+  it.each(['local', 'profile', 'provider', 'fallback'] as const)(
+    'Cases A–D: eventSchemas[chat.done] accepts contextWindowSource=%s',
+    (source) => {
+      const parsed = eventSchemas['chat.done'].parse({
+        kind: 'done',
+        runId: 'run-1',
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        messageId: 'message-1',
+        content: '完成。',
+        contextWindowTokens: 32_768,
+        contextWindowSource: source,
+      })
+      expect(parsed).toMatchObject({ contextWindowSource: source })
+    },
+  )
+
+  it('Case E: a legacy done without contextWindowSource stays valid (no migration)', () => {
+    const parsed = eventSchemas['chat.done'].parse({
       kind: 'done',
       runId: 'run-1',
       sessionId: 'session-1',
@@ -428,7 +449,7 @@ describe('context window source resolution (Cases 1–4)', () => {
       content: '完成。',
       contextWindowTokens: 32_768,
     })
-    expect(legacy).toMatchObject({ contextWindowTokens: 32_768 })
-    expect('contextWindowSource' in legacy).toBe(false)
+    expect(parsed).toMatchObject({ contextWindowTokens: 32_768 })
+    expect('contextWindowSource' in parsed).toBe(false)
   })
 })

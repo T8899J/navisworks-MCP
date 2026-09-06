@@ -610,15 +610,27 @@ export class ChatRunRegistry {
     let terminalEmitted = false
     const emitDone = (payload: Omit<EventPayload<'chat.done'>, 'runId' | 'sessionId' | 'turnId' | 'messageId'> & { messageId: string }): void => {
       if (terminalEmitted) return
+      console.debug(`[chat-run] DONE_EMIT_ATTEMPT run=${runId} session=${input.sessionId}`)
+      const delivered = emitTo(sender, 'chat.done', { ...base, ...payload })
+      if (!delivered) {
+        console.error(`[chat-run] DONE_DELIVERY_FAILED run=${runId} session=${input.sessionId}`)
+        return
+      }
+      // The exactly-once latch counts DELIVERED terminals only — a schema
+      // rejection must not pretend the renderer was told the run is over.
       terminalEmitted = true
-      console.debug(`[chat-run] DONE_EMIT run=${runId} session=${input.sessionId}`)
-      emitTo(sender, 'chat.done', { ...base, ...payload })
+      console.debug(`[chat-run] DONE_DELIVERED run=${runId} session=${input.sessionId}`)
     }
     const emitError = (error: { code: string; message: string }): void => {
       if (terminalEmitted) return
+      console.debug(`[chat-run] ERROR_EMIT_ATTEMPT run=${runId} session=${input.sessionId} code=${error.code}`)
+      const delivered = emitTo(sender, 'chat.error', { ...base, kind: 'error' as const, error })
+      if (!delivered) {
+        console.error(`[chat-run] ERROR_DELIVERY_FAILED run=${runId} session=${input.sessionId}`)
+        return
+      }
       terminalEmitted = true
-      console.debug(`[chat-run] ERROR_EMIT run=${runId} session=${input.sessionId} code=${error.code}`)
-      emitTo(sender, 'chat.error', { ...base, kind: 'error' as const, error })
+      console.debug(`[chat-run] ERROR_DELIVERED run=${runId} session=${input.sessionId}`)
     }
     console.debug(`[chat-run] START run=${runId} session=${input.sessionId}`)
     let runScope: Scope | undefined
@@ -1288,14 +1300,15 @@ function emitTo<E extends DesktopEventName>(
   sender: WebContents,
   event: E,
   payload: EventPayload<E>
-): void {
-  if (sender.isDestroyed()) return
+): boolean {
+  if (sender.isDestroyed()) return false
   const parsed = eventSchemas[event].safeParse(payload)
   if (!parsed.success) {
     console.error(`[IPC] Dropped invalid ${event} event`, parsed.error)
-    return
+    return false
   }
   sender.send(IPC_EVENT_CHANNEL, event, parsed.data)
+  return true
 }
 
 async function readNavisworksStatus(bridge: NavisworksBridgeClient): Promise<NavisworksStatus> {

@@ -965,12 +965,12 @@ summary:focus-visible,
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  /* Reserve the measured Composer height plus a safety gap so the newest
-     message rests clear of the floating Composer and its surrounding controls,
-     not flush against them. Older content may scroll behind the dock, where
-     the dock scrim fades it into the page background before it reaches the
-     Composer's rounded corners. */
-  padding: 22px var(--scroll-rail) calc(var(--composer-height, 176px) + 36px) 0;
+  /* Composer clearance lives in a REAL in-flow spacer at the end of the
+     message column (.message-bottom-spacer, height = composer clearance +
+     safety gap), NOT in padding here: scrollHeight must contain the clearance
+     as content geometry, so anchoring to the true bottom provably leaves the
+     last message above the Composer. Keep only ordinary visual padding. */
+  padding: 22px var(--scroll-rail) 0 0;
   scroll-behavior: smooth;
 }
 
@@ -1020,6 +1020,17 @@ summary:focus-visible,
 .settings-page::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
   background-clip: content-box;
+}
+
+/* In-flow clearance for the floating Composer: real layout, real
+   scrollHeight. The content-end marker is the last genuine content pixel and
+   feeds the bottom-invariant diagnostics. */
+.message-content-end {
+  height: 0;
+}
+
+.message-bottom-spacer {
+  flex-shrink: 0;
 }
 
 .conversation-column {

@@ -1350,3 +1350,37 @@ describe('ChatRunRegistry — terminal event guarantees', () => {
     expect(terminalEvents[0]?.[1]).toBe('chat.error')
   })
 })
+
+describe('ChatRunRegistry — chat.done payload survives the IPC schema', () => {
+  it('Case F: a fallback-source result reaches the sender as chat.done exactly once', async () => {
+    // The exact shape a real local run produces: fallback window + source.
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run() {
+        return {
+          content: '回答完成。',
+          contextTokensUsed: 1820,
+          contextWindowTokens: 32_768,
+          contextWindowSource: 'fallback' as const,
+        }
+      },
+    }
+    const registry = new ChatRunRegistry(agent, createFacade(createSessionStore()))
+    const sender = fakeSender()
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+
+    registry.start(chatStartInput(), sender)
+    // emitTo drops schema-invalid payloads BEFORE sender.send, so a send event
+    // is itself the proof that the done payload passed the real wire schema.
+    await vi.waitFor(() => {
+      const doneCalls = send.mock.calls.filter((call) => call[1] === 'chat.done')
+      expect(doneCalls).toHaveLength(1)
+    })
+    const donePayload = send.mock.calls.find((call) => call[1] === 'chat.done')?.[2] as Record<string, unknown>
+    expect(donePayload).toMatchObject({
+      contextWindowTokens: 32_768,
+      contextWindowSource: 'fallback',
+    })
+    expect(send.mock.calls.some((call) => call[1] === 'chat.error')).toBe(false)
+  })
+})

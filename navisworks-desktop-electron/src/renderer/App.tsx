@@ -1262,6 +1262,7 @@ export default function App() {
             </div>
           ) : showHero ? null : (
             <MessageList
+              sessionId={session?.id}
               messages={session?.messages ?? []}
               sessionTitle={session?.title}
               composerClearance={composerClearance}

@@ -405,6 +405,18 @@ const chatEventBase = {
   messageId: nonEmptyString
 }
 
+const chatDoneEventSchema = z.strictObject({
+  ...chatEventBase,
+  kind: z.literal('done'),
+  content: z.string(),
+  thinkingText: z.string().optional(),
+  contextTokensUsed: z.number().optional(),
+  cacheHitRate: z.number().optional(),
+  contextWindowTokens: z.number().optional(),
+  contextWindowSource: contextWindowSourceSchema.optional(),
+  compacted: z.boolean().optional()
+})
+
 export const chatEventSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...chatEventBase, kind: z.literal('thinking'), delta: z.string() }),
   z.strictObject({ ...chatEventBase, kind: z.literal('text'), delta: z.string() }),
@@ -424,17 +436,10 @@ export const chatEventSchema = z.discriminatedUnion('kind', [
     result: z.unknown(),
     error: z.strictObject({ code: z.string(), message: z.string() }).optional()
   }),
-  z.strictObject({
-    ...chatEventBase,
-    kind: z.literal('done'),
-    content: z.string(),
-    thinkingText: z.string().optional(),
-    contextTokensUsed: z.number().optional(),
-    cacheHitRate: z.number().optional(),
-    contextWindowTokens: z.number().optional(),
-    contextWindowSource: contextWindowSourceSchema.optional(),
-    compacted: z.boolean().optional()
-  }),
+  // Single source of truth: the standalone chat.done schema below is reused
+  // here so the two done definitions can never drift again (a drifted copy
+  // made the real IPC emit drop every chat.done with contextWindowSource).
+  chatDoneEventSchema,
   z.strictObject({
     ...chatEventBase,
     kind: z.literal('error'),
@@ -463,17 +468,6 @@ const chatChunkEventSchema = z.discriminatedUnion('kind', [
     error: z.strictObject({ code: z.string(), message: z.string() }).optional()
   })
 ])
-
-const chatDoneEventSchema = z.strictObject({
-  ...chatEventBase,
-  kind: z.literal('done'),
-  content: z.string(),
-  thinkingText: z.string().optional(),
-  contextTokensUsed: z.number().optional(),
-  cacheHitRate: z.number().optional(),
-  contextWindowTokens: z.number().optional(),
-  compacted: z.boolean().optional()
-})
 
 const chatErrorEventSchema = z.strictObject({
   ...chatEventBase,

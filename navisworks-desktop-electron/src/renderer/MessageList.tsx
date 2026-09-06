@@ -19,7 +19,13 @@ import {
 } from 'react'
 import type { ChatMessage, ToolCall } from './chatTypes'
 import { displayValue } from './chatTypes'
-import { BottomFollowController } from './bottomFollow'
+import {
+  ACTUAL_BOTTOM_EPSILON_PX,
+  BOTTOM_INVARIANT_FAILED_HINT,
+  BottomFollowController,
+  checkBottomInvariant,
+  distanceFromBottom,
+} from './bottomFollow'
 import { ConversationColumn } from './ConversationColumn'
 import {
   NAV_ANCHOR_OFFSET_PX,
@@ -50,6 +56,8 @@ function renderInlineMarkdown(text: string): ReactNode {
 
 interface MessageListProps {
   messages: ChatMessage[]
+  /** Stable session identity — NEVER the title (titles are not unique keys). */
+  sessionId?: string
   sessionTitle?: string
   composerClearance: number
   onRetryLast?(): void
@@ -349,7 +357,7 @@ function navItemStepClass(hoveredIndex: number | null, index: number): string {
   return ''
 }
 
-export function MessageList({ messages, sessionTitle, composerClearance, onRetryLast }: MessageListProps) {
+export function MessageList({ messages, sessionId, sessionTitle, composerClearance, onRetryLast }: MessageListProps) {
   const scrollerRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<HTMLElement>(null)
   const navRef = useRef<HTMLDivElement>(null)
@@ -365,7 +373,9 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
   const [railHidden, setRailHidden] = useState(false)
   // Tracks the session shown last render so switching sessions (or opening
   // one for the first time) can snap to the bottom instead of animating.
-  const prevSessionRef = useRef<string | undefined>(undefined)
+  // Session identity for switch detection: ids, never titles.
+  const prevSessionIdRef = useRef<string | undefined>(undefined)
+  const contentEndRef = useRef<HTMLDivElement>(null)
   // True from drag-start until the gesture ends, so unmount mid-gesture (a
   // session switch emptying the rail, say) can still strip the scrub-only
   // cursor class and instant-scroll flag.
@@ -379,11 +389,38 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
   // Streaming / composer auto-follow is ALWAYS instant: a smooth anchor is
   // exactly what created the lost-follow race (its intermediate scroll events
   // fired before reaching the bottom and were read as "the user left").
+  // Streaming / composer auto-follow is ALWAYS instant, and the anchor target
+  // is exact DOM geometry: scrollHeight - clientHeight, i.e. distanceFromBottom
+  // == 0. With the real bottom spacer in flow, that position leaves the last
+  // message above the Composer by construction.
   const anchorToBottomInstant = () => {
     const scroller = scrollerRef.current
     if (!scroller) return
-    scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'instant' })
+    const top = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+    scroller.scrollTo({ top, behavior: 'instant' })
     follow.recordInstantAnchor(scroller.scrollTop)
+  }
+
+  // The core invariant: while following and the layout has settled, the
+  // distance to the true bottom must be within epsilon. A failure means the
+  // scroll geometry diverged from the Composer overlay — log it (no user
+  // content) instead of silently hiding lines behind the Composer.
+  const verifyBottomInvariant = () => {
+    const scroller = scrollerRef.current
+    if (!scroller || !follow.following) return
+    const check = checkBottomInvariant(scroller, ACTUAL_BOTTOM_EPSILON_PX)
+    if (!check.ok) {
+      const contentEnd = contentEndRef.current
+      const contentEndBottom = contentEnd
+        ? Math.round(contentEnd.getBoundingClientRect().bottom)
+        : -1
+      console.warn(
+        `[chat-scroll] ${BOTTOM_INVARIANT_FAILED_HINT} session=${sessionId ?? 'draft'} `
+        + `distance=${check.distance} composer=${composerClearance} `
+        + `scrollTop=${Math.round(scroller.scrollTop)} scrollHeight=${scroller.scrollHeight} `
+        + `clientHeight=${scroller.clientHeight} contentEndBottom=${contentEndBottom}`,
+      )
+    }
   }
 
   // Explicit "回到底部" click: smooth on purpose. The follow latch tolerates
@@ -591,8 +628,8 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
   useLayoutEffect(() => {
     const scroller = scrollerRef.current
     if (!scroller) return
-    const switched = prevSessionRef.current !== sessionTitle
-    prevSessionRef.current = sessionTitle
+    const switched = prevSessionIdRef.current !== sessionId
+    prevSessionIdRef.current = sessionId
     if (switched) {
       // Snapping into a session (first open or switch) always lands at the
       // latest message instantly and re-engages follow, whatever the user was
@@ -604,7 +641,7 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
     }
     if (!follow.following) return
     anchorToBottomInstant()
-  }, [messages, composerClearance, sessionTitle])
+  }, [messages, composerClearance, sessionId])
 
   // Content height changes that don't ride on a messages-array update — tool
   // details expanding, thinking blocks growing, font reflow — must also keep
@@ -616,16 +653,23 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
     if (!scroller || !column) return
     let frame = 0
     const observer = new ResizeObserver(() => {
+      // Follow intent was decided BEFORE this growth: a layout increase must
+      // never be able to silently un-follow (the controller treats in-flight
+      // anchor echoes as ours, not as user scrolls).
       if (!follow.following || frame !== 0) return
       frame = requestAnimationFrame(() => {
         frame = 0
         const current = scrollerRef.current
         if (!current || !follow.following) return
-        current.scrollTo({ top: current.scrollHeight, behavior: 'instant' })
+        const top = Math.max(0, current.scrollHeight - current.clientHeight)
+        current.scrollTo({ top, behavior: 'instant' })
         follow.recordInstantAnchor(current.scrollTop)
+        verifyBottomInvariant()
       })
     })
     observer.observe(column)
+    const contentEnd = scroller.querySelector<HTMLElement>('.message-content-end')
+    if (contentEnd) observer.observe(contentEnd)
     return () => {
       observer.disconnect()
       if (frame !== 0) cancelAnimationFrame(frame)
@@ -707,6 +751,18 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
               />
             ))}
           </div>
+          {/* Content end marker: the last REAL content pixel — diagnostics
+              measure against it to prove nothing hides behind the Composer. */}
+          <div ref={contentEndRef} className="message-content-end" aria-hidden="true" />
+          {/* REAL bottom spacer in normal flow: the Composer overlay's height
+              (+safety gap) is part of scrollHeight, so "anchored to the true
+              bottom" and "last message above the Composer" are the SAME
+              position. This replaces the old padding-bottom compensation. */}
+          <div
+            className="message-bottom-spacer"
+            style={{ height: `${composerClearance + 36}px` }}
+            aria-hidden="true"
+          />
         </ConversationColumn>
       </div>
 
