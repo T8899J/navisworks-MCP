@@ -296,3 +296,139 @@ describe('compaction trigger ratio is run-configurable', () => {
     expect(ContextManager.contextPressure(9_700, 10_000, 0.99)).toBe('soft')
   })
 })
+
+// Ollama ndjson helper for the local-window case.
+function ndjsonResponse(chunks: Array<Record<string, unknown>>): Response {
+  return new Response(chunks.map((chunk) => `${JSON.stringify(chunk)}\n`).join(''), {
+    status: 200,
+    headers: { 'content-type': 'application/x-ndjson' },
+  })
+}
+
+import { resolveApiContextWindow } from '../agentRuntime'
+import { chatEventSchema } from '../../shared/ipc/schemas'
+
+describe('context window source resolution (Cases 1–4)', () => {
+  it('Case 1: profile 128000 wins over unknown capability → profile', () => {
+    const resolved = resolveApiContextWindow(128_000, {}, 32_768)
+    expect(resolved).toEqual({ window: 128_000, source: 'profile' })
+  })
+
+  it('Case 2: profile Auto + provider-reported 200000 → provider', () => {
+    expect(resolveApiContextWindow(
+      null,
+      { maxContextWindow: 200_000, defaultContextWindow: 200_000 },
+      32_768,
+    )).toEqual({ window: 200_000, source: 'provider' })
+    // defaultContextWindow alone still counts as provider knowledge.
+    expect(resolveApiContextWindow(null, { defaultContextWindow: 65_536 }, 32_768))
+      .toEqual({ window: 65_536, source: 'provider' })
+  })
+
+  it('Case 3: profile Auto + no capability → the configured safety fallback', () => {
+    const resolved = resolveApiContextWindow(null, {}, 32_768)
+    expect(resolved).toEqual({ window: 32_768, source: 'fallback' })
+  })
+
+  it('run() end-to-end: profile source on the result (128K stays 128K)', async () => {
+    const harness = makeHarness([() => textTurn('完成。')])
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl: harness.fetchImpl })
+    const result = await runtime.run({
+      text: '你好',
+      api: {
+        baseUrl: API_BASE,
+        model: 'qwen-max',
+        advanced: { ...autoAdvanced(), contextWindowTokens: 131_072 },
+      },
+    })
+    expect(result.contextWindowTokens).toBe(131_072)
+    expect(result.contextWindowSource).toBe('profile')
+  })
+
+  it('run() end-to-end: fallback source when nothing is known', async () => {
+    const harness = makeHarness([() => textTurn('完成。')])
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl: harness.fetchImpl })
+    const result = await runtime.run({
+      text: '你好',
+      api: { baseUrl: API_BASE, model: 'qwen-max', advanced: autoAdvanced() },
+    })
+    expect(result.contextWindowTokens).toBe(32_768)
+    expect(result.contextWindowSource).toBe('fallback')
+  })
+
+  it('Case 4: a local Ollama run reports the local source (clamp intact)', async () => {
+    const responses = [
+      () => ndjsonResponse([{ message: { role: 'assistant', content: '本地回答。' }, prompt_eval_count: 20, eval_count: 1 }]),
+    ]
+    const bodies: Array<Record<string, unknown>> = []
+    const urls: string[] = []
+    let index = 0
+    const fetchImpl = vi.fn(async (url: unknown, init?: { body?: string }) => {
+      urls.push(String(url))
+      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      const make = responses[Math.min(index, responses.length - 1)]
+      index += 1
+      if (make === undefined) throw new Error('no stub response configured')
+      return make()
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl, contextWindow: 16384 })
+    const result = await runtime.run({ text: '本地问题' })
+    expect(result.isSuccess).toBe(true)
+    expect(result.contextWindowSource).toBe('local')
+    // Local clamp: the configured 16384 stays 16384 (no 32K inflation), and
+    // num_predict is still sent locally (outputReserve = numPredict).
+    expect(result.contextWindowTokens).toBe(16_384)
+    expect(urls[0]?.startsWith('http://localhost:11434')).toBe(true)
+  })
+
+  it('Cases 7–8: flipping the profile between fixed and Auto re-resolves on the NEXT run, no restart', async () => {
+    const harness = makeHarness([() => textTurn('完成。'), () => textTurn('完成。')])
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl: harness.fetchImpl })
+    // First run: the profile pins 128000 → profile source.
+    const fixed = await runtime.run({
+      text: '第一轮',
+      api: {
+        baseUrl: API_BASE,
+        model: 'qwen-max',
+        advanced: { ...autoAdvanced(), contextWindowTokens: 128_000 },
+      },
+    })
+    expect(fixed.contextWindowSource).toBe('profile')
+    expect(fixed.contextWindowTokens).toBe(128_000)
+    // The user flips the profile back to Auto in settings; the next chat.start
+    // sends the fresh advanced (null) — no restart, runtime re-decides.
+    const auto = await runtime.run({
+      text: '第二轮',
+      api: { baseUrl: API_BASE, model: 'qwen-max', advanced: autoAdvanced() },
+    })
+    expect(auto.contextWindowSource).toBe('fallback')
+    expect(auto.contextWindowTokens).toBe(32_768)
+  })
+
+  it('Case 5: chat.done carries contextWindowTokens AND contextWindowSource to the renderer', () => {
+    const parsed = chatEventSchema.parse({
+      kind: 'done',
+      runId: 'run-1',
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      messageId: 'message-1',
+      content: '完成。',
+      contextTokensUsed: 1_820,
+      contextWindowTokens: 128_000,
+      contextWindowSource: 'profile',
+    })
+    expect(parsed).toMatchObject({ contextWindowTokens: 128_000, contextWindowSource: 'profile' })
+    // Old events without the field stay valid (compat: no migration required).
+    const legacy = chatEventSchema.parse({
+      kind: 'done',
+      runId: 'run-1',
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      messageId: 'message-1',
+      content: '完成。',
+      contextWindowTokens: 32_768,
+    })
+    expect(legacy).toMatchObject({ contextWindowTokens: 32_768 })
+    expect('contextWindowSource' in legacy).toBe(false)
+  })
+})

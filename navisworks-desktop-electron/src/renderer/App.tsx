@@ -17,6 +17,7 @@ import {
   type ChatMessage,
   type ChatSession,
   type ChatStreamEvent,
+  type ContextWindowSource,
   type DesktopSettings,
   type NavisworksStatus,
   type SessionSummary,
@@ -206,6 +207,7 @@ export default function App() {
   const [contextUsage, setContextUsage] = useState<{
     used: number
     window?: number
+    source?: ContextWindowSource
     cacheHitRate?: number
   } | null>(null)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo>()
@@ -575,6 +577,7 @@ export default function App() {
           setContextUsage({
             used: done.contextTokensUsed,
             ...(typeof done.contextWindowTokens === 'number' ? { window: done.contextWindowTokens } : {}),
+            ...(typeof done.contextWindowSource === 'string' ? { source: done.contextWindowSource } : {}),
             ...(typeof done.cacheHitRate === 'number' ? { cacheHitRate: done.cacheHitRate } : {})
           })
         }

@@ -223,6 +223,9 @@ export const appSettingsSchema = z.strictObject({
   storage: z.nullish(storageSettingsSchema).transform((value) => value ?? DEFAULT_STORAGE_SETTINGS)
 })
 
+/** Where the context window a run budgeted against came from. */
+export const contextWindowSourceSchema = z.enum(['local', 'profile', 'provider', 'fallback'])
+
 export const navisworksStatusSchema = z.strictObject({
   connected: z.boolean(),
   status: z.string(),
@@ -429,6 +432,7 @@ export const chatEventSchema = z.discriminatedUnion('kind', [
     contextTokensUsed: z.number().optional(),
     cacheHitRate: z.number().optional(),
     contextWindowTokens: z.number().optional(),
+    contextWindowSource: contextWindowSourceSchema.optional(),
     compacted: z.boolean().optional()
   }),
   z.strictObject({
@@ -524,3 +528,4 @@ export type NavisworksConnectionState = z.output<typeof navisworksConnectionStat
 export type RuntimeInfo = z.output<typeof runtimeInfoSchema>
 export type ToolName = z.output<typeof toolNameSchema>
 export type ToolApprovalRequest = z.output<typeof eventSchemas['tool.approval.requested']>
+export type ContextWindowSource = z.output<typeof contextWindowSourceSchema>

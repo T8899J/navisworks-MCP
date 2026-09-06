@@ -3678,10 +3678,12 @@ select:focus-visible,
   }
 }
 
-/* 执行页: bounded number inputs, auto/fixed segmented choice and the folded
-   advanced area — mirroring the existing settings rows and theme choice. */
+/* ===== 执行设置页: card sections + bounded inputs + compact segmented ===== */
+
+/* Bounded number input shared by the execution page and the API profile's
+   advanced context-window field. */
 .execution-number-input {
-  width: 96px;
+  width: 104px;
   padding: 6px 10px;
   font-size: var(--text-label);
   border: 1px solid var(--border);
@@ -3696,24 +3698,111 @@ select:focus-visible,
   border-color: var(--accent, var(--border));
 }
 
-.execution-mode-choice {
-  display: flex;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  border: 0;
+.execution-number-input:disabled {
+  opacity: 0.5;
 }
 
-.execution-mode-choice .theme-option {
-  padding: 6px 10px;
+/* 紧凑 Auto/固定 segmented control — far slimmer than the theme-choice cards;
+   hover and keyboard focus stay visible in both themes, low-saturation only. */
+.execution-mode-choice {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 0;
+  padding: 2px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.execution-mode-option {
+  padding: 3px 12px;
+  font-size: var(--text-label);
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.execution-mode-option:hover {
+  color: var(--text);
+}
+
+.execution-mode-option:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--border));
+  outline-offset: 1px;
+}
+
+.execution-mode-option.is-active {
+  color: var(--text);
+  background: var(--background);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+/* Card sections: quiet surface, subtle border, no heavy shadow. The page body
+   reads in a bounded column instead of stretching edge to edge. */
+.execution-page-content {
+  width: min(100%, 1000px);
+}
+
+.execution-section {
+  margin-top: 14px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 13px;
+}
+
+.execution-section:first-child {
+  margin-top: 4px;
+}
+
+.execution-section-header {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.execution-section-header h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-body);
+  font-weight: 650;
+}
+
+.execution-section-header p {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+  line-height: 1.5;
+}
+
+/* Rows breathe: title and description stacked with real gaps, not crammed. */
+.execution-section .settings-row {
+  min-height: 54px;
+  padding: 9px 16px;
+}
+
+.execution-section .settings-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  line-height: 1.45;
+}
+
+.execution-section .settings-row label small {
+  line-height: 1.5;
 }
 
 .execution-advanced {
-  margin-top: 18px;
+  margin-top: 6px;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .execution-advanced > summary {
+  padding: 10px 16px;
   cursor: pointer;
+  font-size: var(--text-label);
   font-weight: 600;
   color: var(--text-muted);
   user-select: none;
@@ -3723,6 +3812,53 @@ select:focus-visible,
   color: var(--text);
 }
 
+.execution-advanced > summary:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--border));
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
 .execution-advanced[open] > summary {
-  margin-bottom: 10px;
+  margin-bottom: 2px;
+}
+
+/* API Profile 高级配置 (模型页): a quiet collapsible block matching the
+   provider fields; the hint line explains Auto vs Fixed. */
+.profile-advanced {
+  margin-top: 6px;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.profile-advanced > summary {
+  padding: 8px 0;
+  cursor: pointer;
+  font-size: var(--text-label);
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.profile-advanced > summary:hover,
+.profile-advanced > summary:focus-visible {
+  color: var(--text);
+}
+
+.provider-field-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+  line-height: 1.5;
+}
+
+/* Context ring popover: origin row (explanation lives in the ring title). */
+@media (max-width: 620px) {
+  .execution-section .settings-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .execution-page-content {
+    width: 100%;
+  }
 }

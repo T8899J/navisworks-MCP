@@ -18,7 +18,7 @@ import {
   useRef,
   useState
 } from 'react'
-import type { ExecutionSettings, ThemeMode, ToolName } from '../shared/ipc'
+import { DEFAULT_API_PROFILE_ADVANCED, type ApiProfileAdvancedSettings, type ExecutionSettings, type ThemeMode, type ToolName } from '../shared/ipc'
 import type { DesktopSettings } from './chatTypes'
 
 export interface RuntimeDiagnostics {
@@ -164,6 +164,8 @@ interface SettingsPanelProps {
     model: string
     apiKey?: string
     clearApiKey?: boolean
+    /** Full compatibility/capability set; callers spread the profile's existing value. */
+    advanced?: ApiProfileAdvancedSettings
   }): Promise<DesktopSettings>
   onDeleteApiProfile(profileId: string): Promise<DesktopSettings>
   onModelChange(model: string): void | Promise<void>
@@ -232,34 +234,35 @@ function NumberField({
   )
 }
 
-/** Auto / fixed segmented choice for the history and tool-result policies. */
-function ModeField({
-  id,
+/** 紧凑 Auto / 固定 segmented control: current side highlighted, keyboard focusable. */
+function ExecutionModeChoice({
   value,
+  disabled,
   onChange
 }: {
-  id: string
   value: 'auto' | 'fixed'
+  disabled?: boolean
   onChange(value: 'auto' | 'fixed'): void
 }) {
   return (
-    <fieldset className="theme-choice execution-mode-choice" id={id}>
-      {([
-        ['auto', 'Auto', '按上下文预算自动决定'],
-        ['fixed', '固定', '使用下方固定值']
-      ] as const).map(([mode, label, hint]) => (
-        <label className="theme-option" data-selected={value === mode} key={mode}>
-          <input
-            type="radio"
-            name={id}
-            value={mode}
-            checked={value === mode}
-            onChange={() => onChange(mode)}
-          />
-          <span><strong>{label}</strong><small>{hint}</small></span>
-        </label>
-      ))}
-    </fieldset>
+    <div className="execution-mode-choice" role="group" aria-label="Auto 或 固定">
+      <button
+        type="button"
+        className={`execution-mode-option${value === 'auto' ? ' is-active' : ''}`}
+        aria-pressed={value === 'auto'}
+        disabled={disabled}
+        onClick={() => onChange('auto')}>
+        Auto
+      </button>
+      <button
+        type="button"
+        className={`execution-mode-option${value === 'fixed' ? ' is-active' : ''}`}
+        aria-pressed={value === 'fixed'}
+        disabled={disabled}
+        onClick={() => onChange('fixed')}>
+        固定
+      </button>
+    </div>
   )
 }
 
@@ -279,10 +282,11 @@ export const SETTINGS_PAGES: Array<{
 ]
 
 /**
- * 执行页: the run-scoped agent execution policy. Everything applies on the
- * NEXT message — no restart — because chat.start passes the fresh settings
- * into the runtime every run. Advanced planner/verifier numbers live in a
- * collapsed 高级 area.
+ * 执行页: the run-scoped agent execution policy in three card sections —
+ * 执行控制 / 上下文管理 / 任务系统. Every change applies on the NEXT
+ * message (no restart): chat.start passes the fresh settings into the runtime
+ * each run. Low-frequency planner/compaction numbers stay folded under
+ * 高级参数.
  */
 function ExecutionPage({
   execution,
@@ -294,236 +298,257 @@ function ExecutionPage({
   onChange(patch: Partial<ExecutionSettings>): void
 }) {
   return (
-    <>
-      <div className="settings-row">
-        <label htmlFor="execution-max-tool-rounds">
-          最大工具轮数
-          <small>单次对话中模型连续调用工具的上限（1–64）</small>
-        </label>
-        <NumberField
-          id="execution-max-tool-rounds"
-          value={execution.maxToolRounds}
-          fallback={8}
-          min={1}
-          max={64}
-          disabled={disabled}
-          onCommit={(value) => onChange({ maxToolRounds: value ?? 8 })}
-        />
-      </div>
+    <div className="execution-page-content">
+      <section className="execution-section">
+        <header className="execution-section-header">
+          <h4>执行控制</h4>
+          <p>控制单轮 Agent 执行与自动上下文压缩行为。</p>
+        </header>
+        <div className="execution-section-body">
+          <div className="settings-row">
+            <label htmlFor="execution-max-tool-rounds">
+              最大工具轮数
+              <small>单轮对话中模型连续调用工具的轮数上限（1–64）</small>
+            </label>
+            <NumberField
+              id="execution-max-tool-rounds"
+              value={execution.maxToolRounds}
+              fallback={8}
+              min={1}
+              max={64}
+              disabled={disabled}
+              onCommit={(value) => onChange({maxToolRounds: value ?? 8})}
+            />
+          </div>
+          <div className="settings-row">
+            <label htmlFor="execution-compaction-enabled">
+              自动压缩
+              <small>上下文接近窗口时自动把早期过程总结为摘要</small>
+            </label>
+            <input
+              id="execution-compaction-enabled"
+              className="settings-switch"
+              type="checkbox"
+              checked={execution.compactionEnabled}
+              disabled={disabled}
+              onChange={(event) => onChange({ compactionEnabled: event.currentTarget.checked })}
+            />
+          </div>
+          <div className="settings-row">
+            <label htmlFor="execution-compaction-ratio">
+              压缩触发阈值
+              <small>上下文占用达到窗口比例后触发（50%–98%）</small>
+            </label>
+            <NumberField
+              id="execution-compaction-ratio"
+              value={Math.round(execution.compactionTriggerRatio * 100)}
+              fallback={85}
+              min={50}
+              max={98}
+              disabled={disabled || !execution.compactionEnabled}
+              onCommit={(value) => onChange({compactionTriggerRatio: (value ?? 85) / 100})}
+            />
+          </div>
+          <div className="settings-row">
+            <label htmlFor="execution-compact-keep">
+              压缩保留最近帧
+              <small>压缩时保留最近几轮完整对话（0–20）</small>
+            </label>
+            <NumberField
+              id="execution-compact-keep"
+              value={execution.compactKeepRecentFrames}
+              fallback={1}
+              min={0}
+              max={20}
+              disabled={disabled || !execution.compactionEnabled}
+              onCommit={(value) => onChange({compactKeepRecentFrames: value ?? 1})}
+            />
+          </div>
+        </div>
+      </section>
 
-      <h4 className="settings-group-title">上下文压缩</h4>
-      <div className="settings-row">
-        <label htmlFor="execution-compaction-enabled">
-          自动压缩
-          <small>接近上下文窗口时自动总结早期对话</small>
-        </label>
-        <input
-          id="execution-compaction-enabled"
-          className="settings-switch"
-          type="checkbox"
-          checked={execution.compactionEnabled}
-          disabled={disabled}
-          onChange={(event) => onChange({ compactionEnabled: event.currentTarget.checked })}
-        />
-      </div>
-      <div className="settings-row">
-        <label htmlFor="execution-compaction-ratio">
-          压缩触发阈值
-          <small>上下文占用达到窗口比例后触发（0.5–0.98）</small>
-        </label>
-        <NumberField
-          id="execution-compaction-ratio"
-          value={Math.round(execution.compactionTriggerRatio * 100)}
-          fallback={85}
-          min={50}
-          max={98}
-          disabled={disabled || !execution.compactionEnabled}
-          onCommit={(value) => onChange({ compactionTriggerRatio: (value ?? 85) / 100 })}
-        />
-      </div>
-      <div className="settings-row">
-        <label htmlFor="execution-compact-keep">
-          压缩保留最近帧
-          <small>压缩时保留最近几轮完整对话（0–20）</small>
-        </label>
-        <NumberField
-          id="execution-compact-keep"
-          value={execution.compactKeepRecentFrames}
-          fallback={1}
-          min={0}
-          max={20}
-          disabled={disabled || !execution.compactionEnabled}
-          onCommit={(value) => onChange({ compactKeepRecentFrames: value ?? 1 })}
-        />
-      </div>
+      <section className="execution-section">
+        <header className="execution-section-header">
+          <h4>上下文管理</h4>
+          <p>控制历史消息与工具结果如何分配当前上下文预算。</p>
+        </header>
+        <div className="execution-section-body">
+          <div className="settings-row">
+            <label htmlFor="execution-history-mode">
+              历史消息裁剪
+              <small>控制已有对话历史如何进入当前模型窗口：Auto 按 Token 预算裁剪，固定按条数预切</small>
+            </label>
+            <ExecutionModeChoice
+              value={execution.historyMode}
+              disabled={disabled}
+              onChange={(historyMode) => onChange({ historyMode })}
+            />
+          </div>
+          {execution.historyMode === 'fixed' ? (
+            <div className="settings-row">
+              <label htmlFor="execution-history-limit">
+                历史消息条数
+                <small>固定模式下进入上下文的最大历史消息数（4–1000）</small>
+              </label>
+              <NumberField
+                id="execution-history-limit"
+                value={execution.historyMessageLimit}
+                fallback={24}
+                min={4}
+                max={1000}
+                disabled={disabled}
+                onCommit={(value) => onChange({ historyMessageLimit: value ?? 24 })}
+              />
+            </div>
+          ) : null}
+          <div className="settings-row">
+            <label htmlFor="execution-tool-result-mode">
+              工具结果预算
+              <small>控制单次工具结果可占用多少上下文预算：Auto 按剩余预算动态放大，固定使用字符上限</small>
+            </label>
+            <ExecutionModeChoice
+              value={execution.toolResultMode}
+              disabled={disabled}
+              onChange={(toolResultMode) => onChange({ toolResultMode })}
+            />
+          </div>
+          {execution.toolResultMode === 'fixed' ? (
+            <div className="settings-row">
+              <label htmlFor="execution-tool-result-chars">
+                工具结果字符上限
+                <small>固定模式下每个工具结果注入上下文的字符数（500–200000）</small>
+              </label>
+              <NumberField
+                id="execution-tool-result-chars"
+                value={execution.toolResultMaxChars}
+                fallback={4000}
+                min={500}
+                max={200000}
+                disabled={disabled}
+                onCommit={(value) => onChange({ toolResultMaxChars: value ?? 4000 })}
+              />
+            </div>
+          ) : null}
+        </div>
+      </section>
 
-      <h4 className="settings-group-title">模型上下文</h4>
-      <div className="settings-row tool-row">
-        <label htmlFor="execution-history-mode">
-          历史上下文策略
-          <small>Auto 将完整历史交给按 Token 预算裁剪</small>
-        </label>
-        <ModeField
-          id="execution-history-mode"
-          value={execution.historyMode}
-          onChange={(historyMode) => onChange({ historyMode })}
-        />
-      </div>
-      {execution.historyMode === 'fixed' ? (
-        <div className="settings-row">
-          <label htmlFor="execution-history-limit">
-            历史消息条数
-            <small>固定模式下进入上下文的最大消息数（4–1000）</small>
-          </label>
-          <NumberField
-            id="execution-history-limit"
-            value={execution.historyMessageLimit}
-            fallback={24}
-            min={4}
-            max={1000}
-            disabled={disabled}
-            onCommit={(value) => onChange({ historyMessageLimit: value ?? 24 })}
-          />
+      <section className="execution-section">
+        <header className="execution-section-header">
+          <h4>任务系统</h4>
+          <p>控制任务规划、验证以及重新规划行为。</p>
+        </header>
+        <div className="execution-section-body">
+          <div className="settings-row">
+            <label htmlFor="execution-planner-attempts">
+              Planner 最大尝试
+              <small>任务规划结构化输出的尝试次数（1–5）</small>
+            </label>
+            <NumberField
+              id="execution-planner-attempts"
+              value={execution.plannerMaxAttempts}
+              fallback={2}
+              min={1}
+              max={5}
+              disabled={disabled}
+              onCommit={(value) => onChange({plannerMaxAttempts: value ?? 2})}
+            />
+          </div>
+          <div className="settings-row">
+            <label htmlFor="execution-planner-steps">
+              Planner 最大步骤
+              <small>单个任务计划最多包含的步骤数量（1–32）</small>
+            </label>
+            <NumberField
+              id="execution-planner-steps"
+              value={execution.plannerMaxSteps}
+              fallback={10}
+              min={1}
+              max={32}
+              disabled={disabled}
+              onCommit={(value) => onChange({plannerMaxSteps: value ?? 10})}
+            />
+          </div>
+          <div className="settings-row">
+            <label htmlFor="execution-verifier-attempts">
+              Verifier 最大尝试
+              <small>任务完成度验证结构化输出的尝试次数（1–5）</small>
+            </label>
+            <NumberField
+              id="execution-verifier-attempts"
+              value={execution.verifierMaxAttempts}
+              fallback={2}
+              min={1}
+              max={5}
+              disabled={disabled}
+              onCommit={(value) => onChange({verifierMaxAttempts: value ?? 2})}
+            />
+          </div>
+          <div className="settings-row">
+            <label htmlFor="execution-max-replans">
+              最大 Replan 次数
+              <small>任务重规划超过此次数后转为阻塞（0–16）</small>
+            </label>
+            <NumberField
+              id="execution-max-replans"
+              value={execution.maxTaskReplans}
+              fallback={2}
+              min={0}
+              max={16}
+              disabled={disabled}
+              onCommit={(value) => onChange({maxTaskReplans: value ?? 2})}
+            />
+          </div>
+          <details className="execution-advanced">
+            <summary>高级参数</summary>
+            <div className="settings-row">
+              <label htmlFor="execution-planner-tokens">
+                Planner 输出上限
+                <small>单次任务规划请求的输出 Token 上限；清空表示不限制</small>
+              </label>
+              <NumberField
+                id="execution-planner-tokens"
+                value={execution.plannerMaxTokens}
+                fallback={2048}
+                min={256}
+                max={200000}
+                disabled={disabled}
+                onCommit={(value) => onChange({ plannerMaxTokens: value ?? 2048 })}
+              />
+            </div>
+            <div className="settings-row">
+              <label htmlFor="execution-verifier-evidence">
+                Verifier 最大 Evidence
+                <small>完成度验证请求中展示的证据摘要条数（2–50）</small>
+              </label>
+              <NumberField
+                id="execution-verifier-evidence"
+                value={execution.verifierMaxEvidence}
+                fallback={12}
+                min={2}
+                max={50}
+                disabled={disabled}
+                onCommit={(value) => onChange({ verifierMaxEvidence: value ?? 12 })}
+              />
+            </div>
+            <div className="settings-row">
+              <label htmlFor="execution-compact-transcript">
+                压缩输入字符上限
+                <small>送入压缩器的对话文本字符上限（2000–200000）</small>
+              </label>
+              <NumberField
+                id="execution-compact-transcript"
+                value={execution.compactMaxTranscriptChars}
+                fallback={30000}
+                min={2000}
+                max={200000}
+                disabled={disabled || !execution.compactionEnabled}
+                onCommit={(value) => onChange({ compactMaxTranscriptChars: value ?? 30000 })}
+              />
+            </div>
+          </details>
         </div>
-      ) : null}
-      <div className="settings-row tool-row">
-        <label htmlFor="execution-tool-result-mode">
-          工具结果上下文
-          <small>Auto 按剩余上下文预算动态放大工具结果</small>
-        </label>
-        <ModeField
-          id="execution-tool-result-mode"
-          value={execution.toolResultMode}
-          onChange={(toolResultMode) => onChange({ toolResultMode })}
-        />
-      </div>
-      {execution.toolResultMode === 'fixed' ? (
-        <div className="settings-row">
-          <label htmlFor="execution-tool-result-chars">
-            工具结果字符上限
-            <small>固定模式下每个工具结果注入的字符数（500–200000）</small>
-          </label>
-          <NumberField
-            id="execution-tool-result-chars"
-            value={execution.toolResultMaxChars}
-            fallback={4000}
-            min={500}
-            max={200000}
-            disabled={disabled}
-            onCommit={(value) => onChange({ toolResultMaxChars: value ?? 4000 })}
-          />
-        </div>
-      ) : null}
-
-      <details className="execution-advanced">
-        <summary>高级</summary>
-        <div className="settings-row">
-          <label htmlFor="execution-planner-attempts">
-            Planner 最大尝试
-            <small>任务规划结构化输出的尝试次数（1–5）</small>
-          </label>
-          <NumberField
-            id="execution-planner-attempts"
-            value={execution.plannerMaxAttempts}
-            fallback={2}
-            min={1}
-            max={5}
-            disabled={disabled}
-            onCommit={(value) => onChange({ plannerMaxAttempts: value ?? 2 })}
-          />
-        </div>
-        <div className="settings-row">
-          <label htmlFor="execution-planner-steps">
-            Planner 最大步骤
-            <small>单个任务计划包含的步骤上限（1–32）</small>
-          </label>
-          <NumberField
-            id="execution-planner-steps"
-            value={execution.plannerMaxSteps}
-            fallback={10}
-            min={1}
-            max={32}
-            disabled={disabled}
-            onCommit={(value) => onChange({ plannerMaxSteps: value ?? 10 })}
-          />
-        </div>
-        <div className="settings-row">
-          <label htmlFor="execution-planner-tokens">
-            Planner 输出上限
-            <small>留空 = Auto（不发送输出限制）</small>
-          </label>
-          <NumberField
-            id="execution-planner-tokens"
-            value={execution.plannerMaxTokens}
-            fallback={2048}
-            min={256}
-            max={200000}
-            disabled={disabled}
-            onCommit={(value) => onChange({ plannerMaxTokens: value ?? 2048 })}
-          />
-        </div>
-        <div className="settings-row">
-          <label htmlFor="execution-verifier-attempts">
-            Verifier 最大尝试
-            <small>完成度验证结构化输出的尝试次数（1–5）</small>
-          </label>
-          <NumberField
-            id="execution-verifier-attempts"
-            value={execution.verifierMaxAttempts}
-            fallback={2}
-            min={1}
-            max={5}
-            disabled={disabled}
-            onCommit={(value) => onChange({ verifierMaxAttempts: value ?? 2 })}
-          />
-        </div>
-        <div className="settings-row">
-          <label htmlFor="execution-verifier-evidence">
-            Verifier 最大 Evidence
-            <small>验证时展示的证据摘要条数（2–50）</small>
-          </label>
-          <NumberField
-            id="execution-verifier-evidence"
-            value={execution.verifierMaxEvidence}
-            fallback={12}
-            min={2}
-            max={50}
-            disabled={disabled}
-            onCommit={(value) => onChange({ verifierMaxEvidence: value ?? 12 })}
-          />
-        </div>
-        <div className="settings-row">
-          <label htmlFor="execution-max-replans">
-            最大 Replan 次数
-            <small>超出后任务转为阻塞（0–16）</small>
-          </label>
-          <NumberField
-            id="execution-max-replans"
-            value={execution.maxTaskReplans}
-            fallback={2}
-            min={0}
-            max={16}
-            disabled={disabled}
-            onCommit={(value) => onChange({ maxTaskReplans: value ?? 2 })}
-          />
-        </div>
-        <div className="settings-row">
-          <label htmlFor="execution-compact-transcript">
-            压缩输入字符上限
-            <small>送入压缩器的对话文本上限（2000–200000）</small>
-          </label>
-          <NumberField
-            id="execution-compact-transcript"
-            value={execution.compactMaxTranscriptChars}
-            fallback={30000}
-            min={2000}
-            max={200000}
-            disabled={disabled || !execution.compactionEnabled}
-            onCommit={(value) => onChange({ compactMaxTranscriptChars: value ?? 30000 })}
-          />
-        </div>
-      </details>
-    </>
+      </section>
+    </div>
   )
 }
 
@@ -566,6 +591,9 @@ export function SettingsPanel({
   const [providerApiKeyText, setProviderApiKeyText] = useState('')
   const [editingApiKey, setEditingApiKey] = useState(false)
   const [pendingProfileDelete, setPendingProfileDelete] = useState(false)
+  // 高级配置 → 上下文窗口: Auto follows the provider; Fixed pins a number.
+  const [profileContextMode, setProfileContextMode] = useState<'auto' | 'fixed'>('auto')
+  const [profileContextText, setProfileContextText] = useState('')
   useEffect(() => {
     if (!selectedProfile) {
       setSelectedProfileId(settings.apiProfiles[0]?.id ?? null)
@@ -579,7 +607,26 @@ export function SettingsPanel({
     setEditingApiKey(false)
     setPendingProfileDelete(false)
     setCloudModels([])
+    const fixed = selectedProfile.advanced.contextWindowTokens
+    setProfileContextMode(fixed == null ? 'auto' : 'fixed')
+    setProfileContextText(fixed == null ? '' : String(fixed))
   }, [selectedProfile?.id, selectedProfile?.name, selectedProfile?.baseUrl, selectedProfile?.model])
+
+  /**
+   * Build the FULL advanced payload for the profile: the context-window edit
+   * spreads the existing value so the other compatibility settings survive.
+   */
+  const resolveProfileAdvanced = (): ApiProfileAdvancedSettings => {
+    const base = selectedProfile?.advanced ?? DEFAULT_API_PROFILE_ADVANCED
+    if (profileContextMode === 'auto') {
+      return { ...base, contextWindowTokens: null }
+    }
+    const parsed = Number(profileContextText)
+    const bounded = Number.isFinite(parsed)
+      ? Math.min(2_000_000, Math.max(1_024, Math.trunc(parsed)))
+      : 128_000
+    return { ...base, contextWindowTokens: bounded }
+  }
 
   const refreshModels = async () => {
     setRefreshBusy(true)
@@ -612,6 +659,7 @@ export function SettingsPanel({
         name: profileNameText.trim() || selectedProfile.name,
         baseUrl: providerBaseUrlText.trim(),
         model: cloudModelText.trim(),
+        advanced: resolveProfileAdvanced(),
         ...extra
       })
     } catch (error) {
@@ -930,6 +978,54 @@ export function SettingsPanel({
                       />
                     </div>
                   </div>
+
+                  <details className="profile-advanced">
+                    <summary>高级配置</summary>
+                    <div className="provider-field">
+                      <div className="provider-field-heading">
+                        <span className="provider-field-label">上下文窗口</span>
+                        <div className="execution-mode-choice" role="group" aria-label="上下文窗口模式">
+                          <button
+                            type="button"
+                            className={`execution-mode-option${profileContextMode === 'auto' ? ' is-active' : ''}`}
+                            aria-pressed={profileContextMode === 'auto'}
+                            onClick={() => setProfileContextMode('auto')}>
+                            Auto
+                          </button>
+                          <button
+                            type="button"
+                            className={`execution-mode-option${profileContextMode === 'fixed' ? ' is-active' : ''}`}
+                            aria-pressed={profileContextMode === 'fixed'}
+                            onClick={() => setProfileContextMode('fixed')}>
+                            固定
+                          </button>
+                        </div>
+                      </div>
+                      {profileContextMode === 'fixed' ? (
+                        <div className="cloud-model-row">
+                          <span className="cloud-model-label">窗口大小</span>
+                          <input
+                            id="profile-context-window"
+                            className="execution-number-input"
+                            type="number"
+                            inputMode="numeric"
+                            min={1024}
+                            max={2000000}
+                            step={1}
+                            value={profileContextText}
+                            placeholder="128000"
+                            onChange={(event) => setProfileContextText(event.currentTarget.value)}
+                          />
+                          <span className="cloud-model-label">tokens</span>
+                        </div>
+                      ) : null}
+                      <small className="provider-field-hint">
+                        {profileContextMode === 'auto'
+                          ? 'Auto：优先使用 Provider 能力；无法确定时使用安全预算。'
+                          : '固定：该 API 配置始终使用此上下文窗口（1024–2000000 tokens）。'}
+                      </small>
+                    </div>
+                  </details>
 
                   <div className="api-profile-actions">
                     <button className="secondary-button" type="button" disabled={!settings.apiEnabled || !selectedProfile.baseUrl || !selectedProfile.model} onClick={() => void onProviderChange({ activeApiProfileId: selectedProfile.id, preferApiModel: true })}>

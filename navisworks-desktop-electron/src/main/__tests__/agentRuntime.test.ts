@@ -135,6 +135,8 @@ describe('AgentRuntime streaming tool loop', () => {
       // No contextWindow was configured, so the local clamp's ceiling is the
       // budget this run reported back for the UI's usage ring.
       contextWindowTokens: 32768,
+      // The ring now also learns WHERE the number came from.
+      contextWindowSource: 'local',
     })
     expect(bridgeCalls).toBe(1)
     expect(events).toEqual([

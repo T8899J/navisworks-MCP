@@ -64,7 +64,11 @@ import {
   CURI_CORE_PROMPT,
   NAVISWORKS_CAPABILITY_PROMPT,
 } from './agent/prompts'
-import type { ApiProfileAdvancedSettings, ExecutionSettings } from '../shared/ipc'
+import type {
+  ApiProfileAdvancedSettings,
+  ContextWindowSource,
+  ExecutionSettings,
+} from '../shared/ipc'
 import { TaskManager, type TaskVerification } from './agent/taskManager'
 import { TaskPlanner } from './agent/taskPlanner'
 import { TaskVerifier } from './agent/taskVerifier'
@@ -288,6 +292,8 @@ export interface AgentRunResult {
    * against the real budget instead of guessing the provider's window.
    */
   contextWindowTokens?: number
+  /** Where `contextWindowTokens` came from ('fallback' = safety budget, not a model limit). */
+  contextWindowSource?: ContextWindowSource
   /** True when automatic context compaction ran during this run. */
   compacted?: boolean
   /** P4: the compact summary produced this run (if any), for durable persistence. */
@@ -328,6 +334,36 @@ export interface AgentRuntimeOptions {
 }
 
 export { AgentRuntimeError } from './model/types'
+export type { ContextWindowSource } from '../shared/ipc'
+
+/**
+ * API context-window resolution with an explicit SOURCE, so the UI can say
+ * WHERE the number came from instead of presenting a fallback budget as the
+ * model's real limit. Priority: profile override → provider capability →
+ * safe fallback (the configured local default; never presented as a model
+ * maximum).
+ */
+export interface ApiContextWindowResolution {
+  window: number
+  source: ContextWindowSource
+}
+
+export function resolveApiContextWindow(
+  profileTokens: number | null | undefined,
+  capabilities: { maxContextWindow?: number; defaultContextWindow?: number },
+  fallbackConfigured: number,
+): ApiContextWindowResolution {
+  if (profileTokens != null) {
+    return { window: Math.max(1024, profileTokens), source: 'profile' }
+  }
+  if (capabilities.maxContextWindow != null) {
+    return { window: Math.max(1024, capabilities.maxContextWindow), source: 'provider' }
+  }
+  if (capabilities.defaultContextWindow != null) {
+    return { window: Math.max(1024, capabilities.defaultContextWindow), source: 'provider' }
+  }
+  return { window: Math.max(1024, fallbackConfigured), source: 'fallback' }
+}
 export type { AgentBridgeClient } from './model/types'
 
 export class AgentRuntime {
@@ -428,17 +464,23 @@ export class AgentRuntime {
     // A single execution scope id for this run; the P5 ledger attributes modifying calls
     // to it so crash recovery / approval re-checks can correlate a call with its run.
     const runId = input.runId?.trim() || randomUUID()
-    // Context window priority — API: profile override → provider capability →
-    // safe fallback. The LOCAL 32768 clamp never applies to API endpoints, so a
-    // 128K profile really budgets 128K.
+    // Context window + its SOURCE. API priority: profile override → provider
+    // capability → safe fallback. The LOCAL 32768 clamp never applies to API
+    // endpoints, and the fallback is budget accounting — never presented as
+    // the model's real maximum.
     const advanced = apiActive ? api!.advanced ?? undefined : undefined
     const capabilities = provider.capabilities(model)
-    const effectiveWindow = provider.kind === 'ollama'
-      ? clampLocalContextWindow(this.#contextWindow)
-      : Math.max(1024, advanced?.contextWindowTokens
-        ?? capabilities.maxContextWindow
-        ?? capabilities.defaultContextWindow
-        ?? this.#contextWindow)
+    const localWindow = clampLocalContextWindow(this.#contextWindow)
+    const apiResolution = resolveApiContextWindow(
+      advanced?.contextWindowTokens,
+      capabilities,
+      this.#contextWindow,
+    )
+    const usingLocalWindow = provider.kind === 'ollama'
+    const effectiveWindow = usingLocalWindow ? localWindow : apiResolution.window
+    const contextWindowSource: ContextWindowSource = usingLocalWindow
+      ? 'local'
+      : apiResolution.source
     // Output reserve: budgeting always needs a number, but the WIRE parameter
     // is only sent when the profile configures one — an API run with
     // maxOutputTokens=null no longer inherits the local 2048 cap.
@@ -645,6 +687,7 @@ export class AgentRuntime {
           message,
           contextTokensUsed: latestContextTokens,
           contextWindowTokens: effectiveWindow,
+          contextWindowSource,
           ...(response.thinking.trim() ? { thinkingText: response.thinking } : {}),
           ...(latestCacheHitRate === undefined ? {} : { cacheHitRate: latestCacheHitRate }),
           ...(didCompactRun ? { compacted: true } : {}),
@@ -744,6 +787,7 @@ export class AgentRuntime {
               message: '模型没有返回文本或工具调用，请重试或更换模型。',
               contextTokensUsed: latestContextTokens,
               contextWindowTokens: effectiveWindow,
+        contextWindowSource,
               errorCode: 'MODEL_EMPTY_RESPONSE',
             }
           }
@@ -905,6 +949,7 @@ export class AgentRuntime {
         message: `工具调用超过 ${maxToolRounds} 轮，已停止以避免循环。请缩小指令范围后重试。`,
         contextTokensUsed: latestContextTokens,
         contextWindowTokens: effectiveWindow,
+        contextWindowSource,
         ...(didCompactRun ? { compacted: true } : {}),
         ...(capturedSummary === undefined || capturedSummary === '' ? {} : { compactSummary: capturedSummary }),
         errorCode: 'TOOL_ROUND_LIMIT',
@@ -921,6 +966,7 @@ export class AgentRuntime {
           message: error.message,
           contextTokensUsed: latestContextTokens,
           contextWindowTokens: effectiveWindow,
+          contextWindowSource,
           errorCode: error.code,
         }
       }
@@ -931,6 +977,7 @@ export class AgentRuntime {
           message: error.message,
           contextTokensUsed: latestContextTokens,
           contextWindowTokens: effectiveWindow,
+          contextWindowSource,
           errorCode: error.code,
         }
       }
@@ -940,6 +987,7 @@ export class AgentRuntime {
         message: `模型调用失败：${errorMessage(error)}`,
         contextTokensUsed: latestContextTokens,
         contextWindowTokens: effectiveWindow,
+        contextWindowSource,
         errorCode: 'MODEL_ERROR',
       }
     }

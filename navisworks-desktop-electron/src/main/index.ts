@@ -350,6 +350,9 @@ async function runAgent(
     ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText }),
     ...(result.cacheHitRate === undefined ? {} : { cacheHitRate: result.cacheHitRate }),
     ...(result.contextWindowTokens === undefined ? {} : { contextWindowTokens: result.contextWindowTokens }),
+    ...(result.contextWindowSource === undefined
+      ? {}
+      : { contextWindowSource: result.contextWindowSource }),
     ...(result.compacted ? { compacted: true } : {}),
     ...(result.compactSummary === undefined ? {} : { compactSummary: result.compactSummary }),
     ...(result.semanticMemory === undefined ? {} : { semanticMemory: result.semanticMemory }),

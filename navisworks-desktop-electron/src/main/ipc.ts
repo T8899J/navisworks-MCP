@@ -29,6 +29,7 @@ import {
   DEFAULT_EXECUTION_SETTINGS,
   DEFAULT_STORAGE_SETTINGS,
   type ApiProfileAdvancedSettings,
+  type ContextWindowSource,
   type ExecutionSettings,
   type StorageSettings
 } from '../shared/ipc'
@@ -125,6 +126,8 @@ export interface OllamaRunResult {
   cacheHitRate?: number
   /** Finite context window the run budgeted against; drives the UI usage ring. */
   contextWindowTokens?: number
+  /** Where the window came from ('fallback' = safety budget, NOT a model limit). */
+  contextWindowSource?: ContextWindowSource
   /** True when automatic context compaction ran during this run. */
   compacted?: boolean
   /** P4: the summary produced by this run's compaction, for durable persistence. */
@@ -746,6 +749,9 @@ export class ChatRunRegistry {
         ...(result.contextTokensUsed === undefined ? {} : { contextTokensUsed: result.contextTokensUsed }),
         ...(result.cacheHitRate === undefined ? {} : { cacheHitRate: result.cacheHitRate }),
         ...(result.contextWindowTokens === undefined ? {} : { contextWindowTokens: result.contextWindowTokens }),
+        ...(result.contextWindowSource === undefined
+          ? {}
+          : { contextWindowSource: result.contextWindowSource }),
         ...(result.compacted ? { compacted: true } : {})
       })
     } catch (error) {

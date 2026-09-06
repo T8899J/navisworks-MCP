@@ -8,10 +8,10 @@ import {
 } from '../shared/reasoning'
 import type { DesktopSettings, ToolApprovalRequest } from './chatTypes'
 import { ConversationColumn } from './ConversationColumn'
+import { resolveContextRingState } from './contextRing'
 import { EffortSlider } from './EffortSlider'
 import { pickHeroTitle } from './heroTitles'
 
-const LOCAL_MAX_CONTEXT_TOKENS = 32768
 
 /** Slash commands available from the composer input. */
 const SLASH_COMMANDS = [
@@ -43,7 +43,12 @@ interface ComposerProps {
    * `window` is the budget that reply actually ran against, as reported by the
    * runtime; absent until the first reply of the session lands.
    */
-  contextUsage?: { used: number; window?: number; cacheHitRate?: number } | null
+  contextUsage?: {
+    used: number
+    window?: number
+    source?: import('../shared/ipc').ContextWindowSource
+    cacheHitRate?: number
+  } | null
   approval?: ToolApprovalRequest | null
   approvalResolving?: boolean
   onDraftChange(value: string): void
@@ -99,22 +104,23 @@ export function Composer({
     : (['low', 'max'] as const)
   const activeEffort = usingApi ? settings.reasoningMode : localDisplayEffort(settings.reasoningMode)
   const effortIndex = Math.max(0, effortTicks.indexOf(activeEffort))
-  // Context-window budget. The runtime reports the window each finished run
-  // actually budgeted against, so the ring measures the real thing rather than
-  // assuming a provider window. Before the first reply of a session lands,
-  // mirror the runtime's own fallback (agentRuntime.run): the local clamp for
-  // Ollama, the configured window for an API endpoint that advertises none —
-  // a cloud run is never assumed to be a fixed 1M.
-  const fallbackContextTotal = usingApi
-    ? Math.max(1024, settings.contextWindowTokens)
-    : Math.min(settings.contextWindowTokens, LOCAL_MAX_CONTEXT_TOKENS)
-  const reportedWindow = contextUsage?.window
-  const contextTotal = reportedWindow !== undefined && reportedWindow > 0
-    ? reportedWindow
-    : fallbackContextTotal
-  const contextLabel = formatContextLabel(contextTotal)
-  const usedTokens = contextUsage?.used ?? 0
-  const contextPct = usedTokens > 0 ? Math.min(100, (usedTokens / contextTotal) * 100) : 0
+  // Context-window ring semantics (contextRing.ts): the runtime reports BOTH
+  // the window and WHERE it came from, and the ring never presents a fallback
+  // budget as the model's real limit. API Auto with no finished run shows an
+  // honest "Auto / waiting for the runtime" state instead of a number.
+  const ring = resolveContextRingState({
+    usingApi,
+    usedTokens: contextUsage?.used ?? 0,
+    reportedWindow: contextUsage?.window,
+    reportedSource: contextUsage?.source,
+    profileContextWindowTokens: usingApi
+      ? activeApiProfile?.advanced.contextWindowTokens ?? null
+      : null,
+    configuredContextWindowTokens: settings.contextWindowTokens,
+  })
+  const contextLabel = ring.total === null ? 'Auto' : formatContextLabel(ring.total)
+  const usedTokens = ring.usedTokens
+  const contextPct = ring.percent
   const ringCircumference = 2 * Math.PI * 9
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const controlsRef = useRef<HTMLDivElement>(null)
@@ -305,12 +311,8 @@ export function Composer({
               {/* Context-window ring: fills with session usage of the
                   active model's window; hover shows the details panel. */}
               <span
-                className={`context-ring${usingApi ? ' api' : ''}`}
-                title={reportedWindow !== undefined && reportedWindow > 0
-                  ? `上下文窗口 ${contextLabel}（本轮实际预算）`
-                  : usingApi
-                    ? `上下文窗口 ${contextLabel}（预算回退值，可能低于模型上限）`
-                    : `上下文窗口 ${contextLabel}（本地模型最高 32K）`}>
+                className={`context-ring${usingApi ? ' api' : ''}${ring.mode === 'auto' ? ' unknown' : ''}`}
+                title={ring.title}>
                 <svg viewBox="0 0 22 22" aria-hidden="true">
                   <circle className="context-ring-track" cx="11" cy="11" r="9" />
                   {contextPct > 0 ? (
@@ -334,6 +336,10 @@ export function Composer({
                   <div className="context-popover-row">
                     <span>已用 / 总量</span>
                     <span>{formatContextK(usedTokens)} / {contextLabel}</span>
+                  </div>
+                  <div className="context-popover-row">
+                    <span>窗口来源</span>
+                    <span>{ring.sourceLabel}</span>
                   </div>
                   <div className="context-popover-row">
                     <span>缓存命中率</span>

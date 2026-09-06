@@ -5,6 +5,7 @@ import {
   toolNameSchema,
   type ApiProfile,
   type ApiProfileAdvancedSettings,
+  type ContextWindowSource,
   type ExecutionSettings,
   type NavisworksInstanceSummary,
   type StorageSettings,
@@ -13,7 +14,7 @@ import {
 } from '../shared/ipc'
 import { normalizeReasoningEffort, type ReasoningEffort } from '../shared/reasoning'
 
-export type { ApiProfile, ToolApprovalRequest }
+export type { ApiProfile, ContextWindowSource, ToolApprovalRequest }
 export type { ReasoningEffort }
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'error'
@@ -144,6 +145,8 @@ export interface ChatStreamEvent {
   cacheHitRate?: number
   /** Finite context window the finished run budgeted against. */
   contextWindowTokens?: number
+  /** Where that window came from ('fallback' = safety budget, NOT a model limit). */
+  contextWindowSource?: ContextWindowSource
   compacted?: boolean
   error?: string | { code: string; message: string }
 }
