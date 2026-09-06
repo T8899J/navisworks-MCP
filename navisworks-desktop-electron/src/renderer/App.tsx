@@ -15,6 +15,7 @@ import type {
 } from '../shared/ipc'
 import {
   type ChatMessage,
+  type ChatRunPhase,
   type ChatSession,
   type ChatStreamEvent,
   type ContextWindowSource,
@@ -27,6 +28,10 @@ import {
   navisworksStatusBadge
 } from './chatTypes'
 import { Composer } from './Composer'
+import {
+  routeChatEventSession,
+  shouldApplyContextUsage,
+} from './sessionLifecycle'
 import { appearanceGateway, applyAppearance, applyFontScale } from './appearance'
 import { desktopGateway } from './desktop'
 import { MessageList } from './MessageList'
@@ -212,8 +217,19 @@ export default function App() {
   } | null>(null)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo>()
   const [drafts, setDrafts] = useState<Record<string, string>>({})
-  const [busy, setBusy] = useState(false)
-  const [turnId, setTurnId] = useState<string>()
+  // A structured run record instead of a boolean: it names WHICH session is
+  // running and WHAT phase it is in, so switching to another session never
+  // loses track of the background run (and its stop button stays scoped).
+  const [activeRun, setActiveRun] = useState<{
+    sessionId: string
+    turnId?: string
+    phase: ChatRunPhase
+  } | null>(null)
+  const abortWatchdogRef = useRef<number | undefined>(undefined)
+  // Freshest in-memory copy of every session with stream activity — events for
+  // a BACKGROUND session update this cache instead of the screen, and are
+  // persisted + shown when the user navigates back.
+  const inflightSessionsRef = useRef(new Map<string, ChatSession>())
   const [compactLayout, setCompactLayout] = useState(() => window.matchMedia(MOBILE_SIDEBAR_QUERY).matches)
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true)
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false)
@@ -247,11 +263,21 @@ export default function App() {
   const sessionLoadVersionRef = useRef(0)
   const sessionTransitionLockRef = useRef(new SessionTransitionLock())
   const busyRef = useRef(false)
+  const activeRunRef = useRef<{
+    sessionId: string
+    turnId?: string
+    phase: ChatRunPhase
+  } | null>(null)
 
   const draft = activeSessionId ? drafts[activeSessionId] ?? '' : ''
   sessionRef.current = session
   sessionsRef.current = sessions
   activeSessionIdRef.current = activeSessionId
+  // Any-run guard for non-session-scoped controls (delete/rename/compact stay
+  // locked while a background run is live). Session-scoped UI derives from
+  // activeRun directly.
+  const busy = activeRun !== null
+  const activeSessionBusy = activeRun?.sessionId === activeSessionId
   draftSessionIdRef.current = draftSessionId
   busyRef.current = busy
   const isDraftSession = activeSessionId !== undefined && activeSessionId === draftSessionId
@@ -331,10 +357,9 @@ export default function App() {
   }, [activateLoadedSession])
 
   const selectSession = useCallback((sessionId: string) => {
-    if (busy) {
-      setNotice('请先停止当前回复，再切换会话。')
-      return
-    }
+    // Switching/VIEWING another session is always allowed now: background run
+    // events keep updating the originating session's cache (and are persisted
+    // on completion). Only STARTING a second run is blocked (sendText).
     if (sessionTransitionLockRef.current.locked) {
       setNotice('会话正在更新，请稍后再切换。')
       return
@@ -379,10 +404,6 @@ export default function App() {
   }, [replaceSessionSummary, serviceAvailable])
 
   const openNewSession = useCallback(() => {
-    if (busyRef.current) {
-      setNotice('请先停止当前回复，再新建会话。')
-      return
-    }
     // Already composing an unsent draft: keep it instead of stacking a second
     // one; just surface the sidebar like any other new-session click would.
     if (draftSessionIdRef.current && activeSessionIdRef.current === draftSessionIdRef.current) {
@@ -527,9 +548,12 @@ export default function App() {
           activeSessionId,
           activeSessionIdRef.current
         )) return
-        sessionRef.current = loaded
-        setSession(loaded)
-        replaceSessionSummary(loaded)
+        // An inflight (streaming) copy is always fresher than the disk row —
+        // switching BACK to a running session must show the streamed content.
+        const resolved = inflightSessionsRef.current.get(activeSessionId) ?? loaded
+        sessionRef.current = resolved
+        setSession(resolved)
+        if (resolved) replaceSessionSummary(resolved)
       })
       .catch((error: unknown) => {
         if (shouldApplySessionLoad(
@@ -551,19 +575,42 @@ export default function App() {
     if (!serviceAvailable) return
 
     const applyChatEvent = (event: ChatStreamEvent) => {
-      if (event.sessionId && event.sessionId !== activeSessionId) return
-      const current = sessionRef.current
-      if (!current) return
-      const next = { ...current, messages: updateStreamMessage(current.messages, event) }
-      sessionRef.current = next
-      setSession(next)
+      const targetId = event.sessionId
+      if (!targetId) return
+      // Phase events steer the run indicator only; they never touch messages.
+      if (event.kind === 'phase') {
+        console.debug(`[chat-ui] PHASE session=${targetId} phase=${event.phase}`)
+        setActiveRun((current) => current?.sessionId === targetId
+          ? { ...current, phase: event.phase ?? 'generating' }
+          : current)
+        return
+      }
+      // Split "update the run's session data" from "update the screen": a
+      // background session's chunks go to the inflight cache, the active
+      // session's go to the screen AND the cache.
+      const isActive = routeChatEventSession(event, activeSessionIdRef.current) === 'screen'
+      const base = isActive && sessionRef.current?.id === targetId
+        ? sessionRef.current
+        : inflightSessionsRef.current.get(targetId)
+      if (!base) return
+      const next = { ...base, messages: updateStreamMessage(base.messages, event) }
+      if (isActive) {
+        sessionRef.current = next
+        setSession(next)
+      }
+      inflightSessionsRef.current.set(targetId, next)
       if (event.kind === 'done' || event.kind === 'error') {
-        setBusy(false)
-        setTurnId(undefined)
-        setPendingToolApproval((current) => current?.sessionId === event.sessionId ? null : current)
+        console.debug(`[chat-ui] ${event.kind === 'done' ? 'DONE_RECEIVED' : 'ERROR_RECEIVED'} session=${targetId}`)
+        if (abortWatchdogRef.current !== undefined) {
+          window.clearTimeout(abortWatchdogRef.current)
+          abortWatchdogRef.current = undefined
+        }
+        setActiveRun((current) => current?.sessionId === targetId ? null : current)
+        setPendingToolApproval((current) => current?.sessionId === targetId ? null : current)
         // A late completion for a session already removed from the list must
         // never resurrect it through sessions.save; only clear the run state.
-        if (shouldPersistChatCompletion(sessionsRef.current, event.sessionId)) {
+        // Persisting also refreshes the sidebar summary for background runs.
+        if (shouldPersistChatCompletion(sessionsRef.current, targetId)) {
           void persistSession(next)
         }
       }
@@ -573,23 +620,33 @@ export default function App() {
       desktopGateway.subscribe('chat.chunk', (event) => applyChatEvent(event as ChatStreamEvent)),
       desktopGateway.subscribe('chat.done', (event) => {
         const done = event as ChatStreamEvent
-        if (typeof done.contextTokensUsed === 'number') {
-          setContextUsage({
-            used: done.contextTokensUsed,
-            ...(typeof done.contextWindowTokens === 'number' ? { window: done.contextWindowTokens } : {}),
-            ...(typeof done.contextWindowSource === 'string' ? { source: done.contextWindowSource } : {}),
-            ...(typeof done.cacheHitRate === 'number' ? { cacheHitRate: done.cacheHitRate } : {})
-          })
-        }
-        if (done.compacted) {
-          setNotice('上下文已接近上限，早期过程已自动压缩为摘要')
+        // The context ring is session-scoped: a BACKGROUND session finishing
+        // must never repaint the ring of the session on screen.
+        if (shouldApplyContextUsage(done.sessionId, activeSessionIdRef.current)) {
+          if (typeof done.contextTokensUsed === 'number') {
+            setContextUsage({
+              used: done.contextTokensUsed,
+              ...(typeof done.contextWindowTokens === 'number' ? { window: done.contextWindowTokens } : {}),
+              ...(typeof done.contextWindowSource === 'string' ? { source: done.contextWindowSource } : {}),
+              ...(typeof done.cacheHitRate === 'number' ? { cacheHitRate: done.cacheHitRate } : {})
+            })
+          }
+          if (done.compacted) {
+            setNotice('上下文已接近上限，早期过程已自动压缩为摘要')
+          }
         }
         applyChatEvent(done)
       }),
       desktopGateway.subscribe('chat.error', (event) => applyChatEvent(event as ChatStreamEvent)),
       desktopGateway.subscribe('tool.approval.requested', (event) => {
         const approval = event as ToolApprovalRequest
-        if (approval.sessionId === activeSessionIdRef.current) setPendingToolApproval(approval)
+        // Single global run: keep the approval no matter which session the user
+        // is viewing — dropping it would leave the run waiting forever.
+        setPendingToolApproval(approval)
+        if (approval.sessionId !== activeSessionIdRef.current) {
+          const title = sessionsRef.current.find((item) => item.id === approval.sessionId)?.title ?? '后台会话'
+          setNotice(`会话「${title}」正在请求工具确认，请在输入区上方处理。`)
+        }
       }),
       desktopGateway.subscribe('navisworks.instances.changed', (event) => {
         const state = event as NavisworksConnectionState
@@ -645,7 +702,15 @@ export default function App() {
   const sendText = async (text: string) => {
     const trimmed = text.trim()
     const current = sessionRef.current
-    if (!trimmed || busy || !serviceAvailable) return
+    // One global Agent Run at a time (Navisworks safety): starting a second
+    // one is refused with a clear hint — browsing/drafting elsewhere is free.
+    if (activeRunRef.current) {
+      setNotice(activeRunRef.current.sessionId === activeSessionIdRef.current
+        ? '请等待当前回复完成，或先停止。'
+        : '另一个会话正在执行，请等待完成或先停止。')
+      return
+    }
+    if (!trimmed || !serviceAvailable) return
     if (sessionTransitionLockRef.current.locked) {
       setNotice('会话正在更新，请稍后再发送。')
       return
@@ -673,7 +738,8 @@ export default function App() {
     setSession(nextSession)
     sessionRef.current = nextSession
     setDraft('')
-    setBusy(true)
+    setActiveRun({ sessionId: current.id, phase: 'generating' })
+    inflightSessionsRef.current.set(current.id, nextSession)
     setNotice('')
     // First send of an unsent draft establishes the real session: clearing
     // the marker lets the persist below both list it in the sidebar and
@@ -699,7 +765,9 @@ export default function App() {
         model: settings.selectedModel,
         reasoningMode: settings.reasoningMode
       })
-      setTurnId(started.turnId)
+      setActiveRun((currentRun) => currentRun?.sessionId === current.id
+        ? { ...currentRun, turnId: started.turnId }
+        : currentRun)
     } catch (error) {
       const failedEvent: ChatStreamEvent = {
         sessionId: current.id,
@@ -710,16 +778,30 @@ export default function App() {
       const failed = { ...nextSession, messages: updateStreamMessage(nextSession.messages, failedEvent) }
       sessionRef.current = failed
       setSession(failed)
-      setBusy(false)
+      setActiveRun((currentRun) => currentRun?.sessionId === current.id ? null : currentRun)
+      inflightSessionsRef.current.delete(current.id)
       setNotice(eventErrorMessage(failedEvent.error))
       void persistSession(failed)
     }
   }
 
   const stop = async () => {
-    if (!activeSessionId || !busy) return
+    const run = activeRunRef.current
+    // The stop button only renders for the ACTIVE session's run, so this can
+    // never abort a background session by mistake.
+    if (!run || run.sessionId !== activeSessionId) return
     try {
-      await desktopGateway.abortChat(activeSessionId, turnId)
+      await desktopGateway.abortChat(run.sessionId, run.turnId)
+      // Watchdog: if the main process somehow never delivers the terminal
+      // event, reset the run state so the UI cannot stay stuck on 停止.
+      if (abortWatchdogRef.current !== undefined) window.clearTimeout(abortWatchdogRef.current)
+      abortWatchdogRef.current = window.setTimeout(() => {
+        if (activeRunRef.current?.sessionId === run.sessionId) {
+          console.debug(`[chat-ui] ABORT_WATCHDOG session=${run.sessionId}`)
+          setActiveRun(null)
+          setNotice('停止操作未及时确认，已重置运行状态。')
+        }
+      }, 15_000)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '停止生成失败')
     }
@@ -903,7 +985,7 @@ export default function App() {
   const runCompact = async () => {
     const sessionId = activeSessionId
     if (!sessionId || busy || !serviceAvailable) return
-    setBusy(true)
+    setActiveRun({ sessionId, phase: 'generating' })
     try {
       const { summary } = await desktopGateway.compactSession(sessionId)
       if (!summary) {
@@ -915,7 +997,7 @@ export default function App() {
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '压缩上下文失败')
     } finally {
-      setBusy(false)
+      setActiveRun((currentRun) => currentRun?.sessionId === sessionId ? null : currentRun)
     }
   }
 
@@ -1023,6 +1105,7 @@ export default function App() {
         activeSessionId={activeSessionId}
         open={sidebarOpen}
         busy={busy || sessionTransitioning}
+        runningSessionId={activeRun?.sessionId}
         settingsMode={settingsOpen}
         activeSettingsPage={settingsPage}
         onSettingsPageChange={setSettingsPage}
@@ -1190,7 +1273,8 @@ export default function App() {
             dockRef={composerDockRef}
             variant={showHero ? 'hero' : 'docked'}
             draft={draft}
-            busy={busy}
+            busy={activeSessionBusy}
+            phase={activeSessionBusy ? activeRun?.phase : undefined}
             settings={settings}
             serviceAvailable={serviceAvailable}
             contextUsage={contextUsage}

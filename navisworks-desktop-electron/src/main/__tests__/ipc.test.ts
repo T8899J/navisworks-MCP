@@ -1304,3 +1304,49 @@ describe('desktop IPC settings routes', () => {
     }
   })
 })
+
+describe('ChatRunRegistry — terminal event guarantees', () => {
+  it('emits chat.done even when compaction persistence never resolves', async () => {
+    const facade = createFacade(createSessionStore())
+    // A wedged disk write must not hold the renderer in "生成回复中".
+    // (Shadowed on the instance so the facade's private state stays reachable.)
+    const persistCompactSummary = vi.fn(() => new Promise<void>(() => {}))
+    ;(facade as unknown as { persistCompactSummary: () => Promise<void> }).persistCompactSummary = persistCompactSummary
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run() {
+        return { content: '回答完成。', compactSummary: '压缩摘要' }
+      },
+    }
+    const registry = new ChatRunRegistry(agent, facade)
+    const sender = fakeSender()
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => expect(send.mock.calls.some((call) => call[1] === 'chat.done')).toBe(true))
+    // The background persistence was started, but the terminal event did not
+    // wait for it.
+    expect(persistCompactSummary).toHaveBeenCalled()
+    expect(send.mock.calls.some((call) => call[1] === 'chat.error')).toBe(false)
+  })
+
+  it('emits exactly one terminal event when the run fails', async () => {
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run() {
+        throw new Error('模型调用失败')
+      },
+    }
+    const registry = new ChatRunRegistry(agent, createFacade(createSessionStore()))
+    const sender = fakeSender()
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => expect(send.mock.calls.some((call) => call[1] === 'chat.error')).toBe(true))
+    // Settle any follow-up work, then assert the exactly-once guarantee.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const terminalEvents = send.mock.calls.filter((call) => call[1] === 'chat.done' || call[1] === 'chat.error')
+    expect(terminalEvents).toHaveLength(1)
+    expect(terminalEvents[0]?.[1]).toBe('chat.error')
+  })
+})

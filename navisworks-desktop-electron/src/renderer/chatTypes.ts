@@ -128,11 +128,15 @@ export function navisworksInstanceDisplay(
   return { name, label: colliding ? `${name} · ${instance.processId}` : name }
 }
 
+export type ChatRunPhase = 'generating' | 'verifying'
+
 export interface ChatStreamEvent {
   sessionId: string
   turnId?: string
   messageId?: string
-  kind: 'thinking' | 'text' | 'tool-start' | 'tool-result' | 'done' | 'error'
+  kind: 'thinking' | 'text' | 'tool-start' | 'tool-result' | 'done' | 'error' | 'phase'
+  /** Present on kind='phase': what the background run is doing right now. */
+  phase?: ChatRunPhase
   text?: string
   delta?: string
   content?: string

@@ -291,6 +291,10 @@ async function runAgent(
       options.onEvent({ kind: 'thinking', delta: event.delta })
       return
     }
+    if (event.phase === 'verifying' || event.phase === 'generating') {
+      options.onEvent({ kind: 'phase', phase: event.phase })
+      return
+    }
     if (event.phase === 'started') {
       options.onEvent({
         kind: 'tool-start',

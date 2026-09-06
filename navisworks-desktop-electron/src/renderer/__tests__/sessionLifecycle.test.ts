@@ -3,6 +3,9 @@ import type { ChatSession, SessionSummary } from '../chatTypes'
 import {
   isSessionReadyForSend,
   planAfterDurableSessionDeletion,
+  routeChatEventSession,
+  shouldApplyContextUsage,
+  shouldSurfaceToolApproval,
   planSessionDeletion,
   planSessionReconciliation,
   removeDeletedSessionDraft,
@@ -165,5 +168,26 @@ describe('hero composer rule', () => {
     // A draft never carries messages: sendText clears the marker in the same
     // synchronous pass that appends them, so this input is unreachable.
     expect(shouldShowHeroComposer({ isLoading: false, isDraftSession: false, messageCount: 1 })).toBe(false)
+  })
+})
+
+describe('background-run event routing (切换会话不丢事件)', () => {
+  it('active session events go to the screen, background events to the cache — never dropped', () => {
+    // Case 5/6: user switched to B while A streams.
+    expect(routeChatEventSession({ sessionId: 'session-a' }, 'session-b')).toBe('background')
+    expect(routeChatEventSession({ sessionId: 'session-b' }, 'session-b')).toBe('screen')
+    // Missing session id cannot be routed.
+    expect(routeChatEventSession({}, 'session-b')).toBe('ignore')
+  })
+
+  it('context-usage updates are session-scoped (Case 7: B 的圆环不被 A 覆盖)', () => {
+    expect(shouldApplyContextUsage('session-a', 'session-b')).toBe(false)
+    expect(shouldApplyContextUsage('session-b', 'session-b')).toBe(true)
+    expect(shouldApplyContextUsage(undefined, 'session-b')).toBe(false)
+  })
+
+  it('tool approvals are always surfaced regardless of the viewed session (Case 8)', () => {
+    expect(shouldSurfaceToolApproval('session-a')).toBe(true)
+    expect(shouldSurfaceToolApproval(undefined)).toBe(false)
   })
 })

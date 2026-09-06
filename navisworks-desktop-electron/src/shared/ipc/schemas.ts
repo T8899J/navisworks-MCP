@@ -445,6 +445,7 @@ export const chatEventSchema = z.discriminatedUnion('kind', [
 const chatChunkEventSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...chatEventBase, kind: z.literal('thinking'), delta: z.string() }),
   z.strictObject({ ...chatEventBase, kind: z.literal('text'), delta: z.string() }),
+  z.strictObject({ ...chatEventBase, kind: z.literal('phase'), phase: z.enum(['generating', 'verifying']) }),
   z.strictObject({
     ...chatEventBase,
     kind: z.literal('tool-start'),

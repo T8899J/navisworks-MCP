@@ -10,6 +10,8 @@ interface SidebarProps {
   activeSessionId?: string
   open: boolean
   busy?: boolean
+  /** Session with a live background run: shows a quiet activity dot. */
+  runningSessionId?: string
   /** Renders the settings category list instead of the session list. */
   settingsMode?: boolean
   activeSettingsPage?: SettingsPageId
@@ -33,6 +35,7 @@ export function Sidebar({
   activeSettingsPage = 'appearance',
   onSettingsPageChange,
   onExitSettings,
+  runningSessionId,
   onClose,
   onCreate,
   onOpenSearch,
@@ -45,6 +48,7 @@ export function Sidebar({
 
   const renderRow = (session: SessionSummary): ReactNode => {
     const active = session.id === activeSessionId
+    const running = session.id === runningSessionId
     return (
       <article className="session-row" data-active={active} key={session.id} role="listitem">
         <button
@@ -55,6 +59,7 @@ export function Sidebar({
           <span className="session-title-line">
             {session.pinnedAt ? <Pin aria-label="已固定" size={12} /> : null}
             <span className="session-title">{session.title || '新会话'}</span>
+            {running ? <span className="session-running-dot" role="status" aria-label="正在运行" /> : null}
           </span>
         </button>
         <div className="session-actions" aria-label={`${session.title} 操作`}>

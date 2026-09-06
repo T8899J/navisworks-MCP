@@ -78,6 +78,8 @@ export interface VerifierOptions {
   maxAttempts?: number
   /** Evidence summaries rendered into the verification request. */
   maxEvidence?: number
+  /** Per-call timeout override (tests); defaults to INTERNAL_TASK_CALL_TIMEOUT_MS. */
+  callTimeoutMs?: number
 }
 
 function resolveVerifierOptions(options: VerifierOptions | undefined): { maxAttempts: number; maxEvidence: number } {
@@ -124,6 +126,8 @@ export class TaskVerifier {
         user,
         TASK_VERIFICATION_TOOL,
         signal,
+        undefined,
+        options?.callTimeoutMs,
       )
       const verification = call === undefined ? undefined : parseVerificationArguments(call.arguments)
       if (verification !== undefined) return verification

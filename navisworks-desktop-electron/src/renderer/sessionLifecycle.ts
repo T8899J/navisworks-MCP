@@ -142,3 +142,37 @@ export interface HeroComposerPlan {
 export function shouldShowHeroComposer(plan: HeroComposerPlan): boolean {
   return !plan.isLoading && (plan.isDraftSession || plan.messageCount === 0)
 }
+
+export type ChatEventRoute = 'screen' | 'background' | 'ignore'
+
+/**
+ * Where a chat stream event must land. With background runs allowed, a
+ * non-active session's events go to its inflight cache instead of the screen —
+ * they are NEVER dropped, or the run's reply would be lost.
+ */
+export function routeChatEventSession(
+  event: { sessionId?: string },
+  activeSessionId: string | undefined
+): ChatEventRoute {
+  if (!event.sessionId) return 'ignore'
+  return event.sessionId === activeSessionId ? 'screen' : 'background'
+}
+
+/**
+ * Context-ring usage is session-scoped: a done event from a background
+ * session must not repaint the ring of the session on screen.
+ */
+export function shouldApplyContextUsage(
+  doneSessionId: string | undefined,
+  activeSessionId: string | undefined
+): boolean {
+  return doneSessionId !== undefined && doneSessionId === activeSessionId
+}
+
+/**
+ * Tool approvals are always surfaced, no matter which session is being
+ * viewed — silently dropping one would leave the run waiting forever.
+ */
+export function shouldSurfaceToolApproval(approvalSessionId: string | undefined): boolean {
+  return approvalSessionId !== undefined
+}

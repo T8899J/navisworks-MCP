@@ -76,6 +76,7 @@ import {
 export type OllamaStreamEvent =
   | { kind: 'thinking'; delta: string }
   | { kind: 'text'; delta: string }
+  | { kind: 'phase'; phase: 'generating' | 'verifying' }
   | { kind: 'tool-start'; toolCallId: string; toolName: string; arguments: unknown }
   | {
       kind: 'tool-result'
@@ -603,6 +604,23 @@ export class ChatRunRegistry {
     settle: () => void
   ): Promise<void> {
     const base = { runId, sessionId: input.sessionId, turnId, messageId }
+    // Terminal exactly-once: every run settles into exactly ONE chat.done or
+    // chat.error, no matter which path (success / verifier degrade / abort /
+    // persistence failure) reaches the end first.
+    let terminalEmitted = false
+    const emitDone = (payload: Omit<EventPayload<'chat.done'>, 'runId' | 'sessionId' | 'turnId' | 'messageId'> & { messageId: string }): void => {
+      if (terminalEmitted) return
+      terminalEmitted = true
+      console.debug(`[chat-run] DONE_EMIT run=${runId} session=${input.sessionId}`)
+      emitTo(sender, 'chat.done', { ...base, ...payload })
+    }
+    const emitError = (error: { code: string; message: string }): void => {
+      if (terminalEmitted) return
+      terminalEmitted = true
+      console.debug(`[chat-run] ERROR_EMIT run=${runId} session=${input.sessionId} code=${error.code}`)
+      emitTo(sender, 'chat.error', { ...base, kind: 'error' as const, error })
+    }
+    console.debug(`[chat-run] START run=${runId} session=${input.sessionId}`)
     let runScope: Scope | undefined
     let navisworksBinding: NavisworksRunBinding | undefined
     let navisworksUnavailable: OllamaRunInput['navisworksUnavailable']
@@ -728,22 +746,13 @@ export class ChatRunRegistry {
         this.contextState?.markDocumentSeen(input.sessionId, observedDocumentRevision)
       }
 
-      // P4: durably persist any summary this run's auto-compaction produced (the renderer's
-      // own save preserves it; see saveSession). Best-effort — a persistence failure must not
-      // block delivering the answer to the user.
-      if (result.compactSummary !== undefined) {
-        await this.persistence.persistCompactSummary(input.sessionId, result.compactSummary)
-          .catch(() => undefined)
-      }
-      if (result.semanticMemory !== undefined) {
-        await this.persistence.persistSemanticMemory(input.sessionId, result.semanticMemory)
-          .catch(() => undefined)
-      }
-
-      emitTo(sender, 'chat.done', {
-        ...base,
+      // The user's run is OVER the moment agent.run returns: emit the terminal
+      // event FIRST so the renderer never waits on disk. Compaction-summary /
+      // semantic-memory persistence is best-effort background work AFTER the
+      // unblock — a slow or failing write can never hold "生成回复中" open.
+      emitDone({
+        kind: 'done' as const,
         messageId: result.messageId ?? messageId,
-        kind: 'done',
         content: result.content,
         ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText }),
         ...(result.contextTokensUsed === undefined ? {} : { contextTokensUsed: result.contextTokensUsed }),
@@ -754,16 +763,25 @@ export class ChatRunRegistry {
           : { contextWindowSource: result.contextWindowSource }),
         ...(result.compacted ? { compacted: true } : {})
       })
+
+      // P4: durably persist any summary this run's auto-compaction produced (the
+      // renderer's own save preserves it; see saveSession). Deliberately AFTER
+      // the terminal event and non-blocking for the UI.
+      if (result.compactSummary !== undefined) {
+        void this.persistence.persistCompactSummary(input.sessionId, result.compactSummary)
+          .catch(() => undefined)
+      }
+      if (result.semanticMemory !== undefined) {
+        void this.persistence.persistSemanticMemory(input.sessionId, result.semanticMemory)
+          .catch(() => undefined)
+      }
     } catch (error) {
       const ipcError = controller.signal.aborted
         ? new DesktopIpcError('CANCELLED', '已取消本次生成。')
         : toSafeIpcError(error)
-      emitTo(sender, 'chat.error', {
-        ...base,
-        kind: 'error',
-        error: { code: ipcError.code, message: ipcError.message }
-      })
+      emitError({ code: ipcError.code, message: ipcError.message })
     } finally {
+      console.debug(`[chat-run] SETTLED run=${runId} session=${input.sessionId}`)
       await runScope?.dispose()
       if (this.#runningInstances.delete(runId)
         && this.instanceRegistry !== undefined

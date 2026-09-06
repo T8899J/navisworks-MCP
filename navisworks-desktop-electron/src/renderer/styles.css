@@ -3862,3 +3862,26 @@ select:focus-visible,
     width: 100%;
   }
 }
+
+/* Sidebar running indicator: a quiet pulsing dot on the session that has a
+   live background run — visible from any other session the user switched to. */
+.session-running-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--accent, var(--text-muted));
+  animation: session-running-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes session-running-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-running-dot {
+    animation: none;
+    opacity: 0.8;
+  }
+}

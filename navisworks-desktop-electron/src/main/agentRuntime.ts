@@ -108,6 +108,11 @@ export interface AgentRuntimeSettings {
   verifierMaxAttempts: number
   verifierMaxEvidence: number
   maxTaskReplans: number
+  /**
+   * Per-call timeout for the hidden planner/verifier model calls. Undefined =
+   * the INTERNAL_TASK_CALL_TIMEOUT_MS default; tests inject a short value.
+   */
+  taskCallTimeoutMs?: number
 }
 
 export const DEFAULT_RUNTIME_SETTINGS: AgentRuntimeSettings = {
@@ -212,6 +217,10 @@ export interface AgentHistoryEntry {
 export type AgentRunEvent =
   | { phase: 'text'; delta: string }
   | { phase: 'thinking'; delta: string }
+  /** Run-phase signal: the completion gate is verifying the active task. */
+  | { phase: 'verifying' }
+  /** Back to normal generation after a gate verdict kept the loop running. */
+  | { phase: 'generating' }
   | {
       phase: 'started'
       runId: string
@@ -588,10 +597,12 @@ export class AgentRuntime {
       maxAttempts: runtimeConfig.plannerMaxAttempts,
       maxSteps: runtimeConfig.plannerMaxSteps,
       maxTokens: runtimeConfig.plannerMaxTokens,
+      ...(runtimeConfig.taskCallTimeoutMs === undefined ? {} : { callTimeoutMs: runtimeConfig.taskCallTimeoutMs }),
     }
     const verifierOptions = {
       maxAttempts: runtimeConfig.verifierMaxAttempts,
       maxEvidence: runtimeConfig.verifierMaxEvidence,
+      ...(runtimeConfig.taskCallTimeoutMs === undefined ? {} : { callTimeoutMs: runtimeConfig.taskCallTimeoutMs }),
     }
     const taskContextFeedback: { verification?: TaskVerificationFeedback } = {}
     let taskDecisionMade = false
@@ -703,8 +714,11 @@ export class AgentRuntime {
         // (paused VERIFIER_ERROR), it NEVER reads as complete.
         const runCompletionGate = async (): Promise<TaskGateOutcome> => {
           if (taskManager === undefined || activeTask === undefined) return { kind: 'continue' }
+          console.debug(`[chat-run] VERIFY_START run=${runId} task=${activeTask.id}`)
+          options.onEvent?.({ phase: 'verifying' })
           const verification = await verifyOrDegrade()
           if (verification === null) {
+            console.debug(`[chat-run] VERIFY_TIMEOUT run=${runId} task=${activeTask.id}`)
             verificationDisabled = true
             await pauseIfRunning('VERIFIER_ERROR')
             return response.toolCalls.length === 0
@@ -722,7 +736,7 @@ export class AgentRuntime {
             ...(verification.missingEvidence === undefined ? {} : { missingEvidence: verification.missingEvidence }),
             ...(verification.nextAction === undefined ? {} : { nextAction: verification.nextAction }),
           }
-          console.debug(`[task] TASK_VERIFIED verdict=${verification.verdict} task=${activeTask.id}`)
+          console.debug(`[chat-run] VERIFY_DONE run=${runId} verdict=${verification.verdict} task=${activeTask.id}`)
           if (verification.verdict === 'complete') {
             activeTask = await taskManager.complete(activeTask.id)
             refreshTaskContext()
@@ -776,6 +790,7 @@ export class AgentRuntime {
           // task context; the next round keeps calling the tools it needs.
           activeTask = await taskManager.applyVerification(activeTask.id, verification)
           refreshTaskContext()
+          options.onEvent?.({ phase: 'generating' })
           return { kind: 'continue' }
         }
 
@@ -792,6 +807,7 @@ export class AgentRuntime {
             }
           }
           if (activeTask !== undefined && activeTask.status === 'running' && !verificationDisabled) {
+            console.debug(`[chat-run] MODEL_RESPONSE_COMPLETE run=${runId} (entering completion gate)`)
             const gate = await runCompletionGate()
             if (gate.kind === 'stop') return gate.result
             // Verdict continue/replan: the refreshed task context now guides

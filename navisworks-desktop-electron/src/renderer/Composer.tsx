@@ -36,6 +36,8 @@ interface ComposerProps {
   variant?: 'docked' | 'hero'
   draft: string
   busy: boolean
+  /** Run phase while busy: verifying shows a distinct hint instead of 生成中. */
+  phase?: 'generating' | 'verifying'
   settings: DesktopSettings
   serviceAvailable: boolean
   /**
@@ -68,6 +70,7 @@ export function Composer({
   variant = 'docked',
   draft,
   busy,
+  phase,
   settings,
   serviceAvailable,
   contextUsage,
@@ -450,7 +453,11 @@ export function Composer({
           </div>
           </>}
           <span className="sr-only" id="composer-service-status" aria-live="polite">
-            {serviceAvailable ? (busy ? '助手正在生成回复' : '可以发送消息') : '桌面服务未连接'}
+            {serviceAvailable
+              ? (busy
+                ? (phase === 'verifying' ? '正在验证任务完成度' : '助手正在生成回复')
+                : '可以发送消息')
+              : '桌面服务未连接'}
           </span>
         </form>
       </ConversationColumn>

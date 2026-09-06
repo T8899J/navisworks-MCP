@@ -1,6 +1,6 @@
 import type { AgentToolContract } from '../toolCatalog'
 import type { ChatMessage, ModelProvider } from '../model/types'
-import { errorMessage } from '../model/providerUtils'
+import { errorMessage, linkAbortSignals } from '../model/providerUtils'
 import type { CuriTask } from './taskTypes'
 import type { TaskStepInput } from './taskManager'
 
@@ -104,6 +104,15 @@ export interface ReplanDecision {
   steps: TaskStepInput[]
 }
 
+/**
+ * Hard cap for ONE hidden planner/verifier model call. These calls run after
+ * the user's answer is already on screen — they must never borrow the API
+ * profile's full request timeout (300s × retries would leave the chat run
+ * "generating" for many minutes). The external abort signal stays effective:
+ * a user stop aborts the internal call immediately.
+ */
+export const INTERNAL_TASK_CALL_TIMEOUT_MS = 20_000
+
 const MAX_PLANNER_ATTEMPTS = 2
 const MAX_STEPS = 10
 const MAX_CRITERIA = 10
@@ -118,6 +127,8 @@ export interface PlannerOptions {
   maxSteps?: number
   /** Sampling cap for the planner request; null sends no max_tokens field. */
   maxTokens?: number | null
+  /** Per-call timeout override (tests); defaults to INTERNAL_TASK_CALL_TIMEOUT_MS. */
+  callTimeoutMs?: number
 }
 
 function resolvePlannerOptions(
@@ -163,6 +174,7 @@ export class TaskPlanner {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const call = await emitInternalToolCall(
         provider, model, PLANNER_SYSTEM_PROMPT, user, TASK_PLAN_TOOL, signal, maxTokens,
+        options?.callTimeoutMs,
       )
       const decision = call === undefined ? undefined : parsePlanArguments(call.arguments, maxSteps)
       if (decision !== undefined) return decision
@@ -198,6 +210,7 @@ export class TaskPlanner {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const call = await emitInternalToolCall(
         provider, model, REPLAN_SYSTEM_PROMPT, user, TASK_PLAN_TOOL, signal, maxTokens,
+        options?.callTimeoutMs,
       )
       const decision = call === undefined ? undefined : parseReplanArguments(call.arguments, maxSteps)
       if (decision !== undefined) return decision
@@ -220,11 +233,19 @@ export async function emitInternalToolCall(
   tool: { type: 'function'; function: { name: string; description: string; parameters: unknown } },
   signal?: AbortSignal,
   maxTokens?: number | null,
+  timeoutMs: number = INTERNAL_TASK_CALL_TIMEOUT_MS,
 ): Promise<{ name: string; arguments: Record<string, unknown> } | undefined> {
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userContent },
   ]
+  // Internal budget: the caller's abort signal (user stop) AND a short timer
+  // are combined — either one aborts the hidden model call.
+  const timeoutController = new AbortController()
+  const timer = setTimeout(() => {
+    timeoutController.abort(new Error(`internal task call exceeded ${timeoutMs}ms`))
+  }, Math.max(1, timeoutMs))
+  const linked = linkAbortSignals(signal, timeoutController.signal)
   let response
   try {
     response = await provider.complete({
@@ -236,12 +257,19 @@ export async function emitInternalToolCall(
         temperature: 0,
         ...(maxTokens === null ? {} : { maxTokens: maxTokens ?? MAX_PLANNER_TOKENS }),
       },
-      ...(signal ? { signal } : {}),
+      signal: linked.signal,
     })
   } catch (error) {
     if (signal?.aborted) throw error
-    console.debug(`[task] internal call failed: ${errorMessage(error)}`)
+    if (timeoutController.signal.aborted) {
+      console.debug(`[task] internal call timed out after ${timeoutMs}ms`)
+    } else {
+      console.debug(`[task] internal call failed: ${errorMessage(error)}`)
+    }
     return undefined
+  } finally {
+    clearTimeout(timer)
+    linked.dispose()
   }
   return extractInternalToolCall(response.toolCalls, tool.function.name)
 }
