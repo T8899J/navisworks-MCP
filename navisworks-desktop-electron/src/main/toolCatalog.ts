@@ -17,6 +17,7 @@ export interface AgentToolContract {
 }
 
 export type AgentToolName =
+  | 'read_tool_result'
   | 'navisworks_status'
   | 'navisworks_get_document'
   | 'navisworks_get_selection'

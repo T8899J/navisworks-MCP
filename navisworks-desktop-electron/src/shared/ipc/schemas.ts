@@ -4,6 +4,9 @@ import { REASONING_EFFORTS, type ReasoningEffort } from '../reasoning'
 const nonEmptyString = z.string().trim().min(1)
 const dateTimeString = z.string().trim().min(1)
 
+/** Tool permission: allow executes silently, ask gates on user approval, deny hides the tool. */
+export const toolPermissionSchema = z.enum(['allow', 'ask', 'deny'])
+
 export const reasoningEffortSchema = z.enum(REASONING_EFFORTS)
 export type { ReasoningEffort }
 
@@ -93,6 +96,7 @@ export const appearanceStateSchema = z.strictObject({
 })
 
 export const toolNameSchema = z.enum([
+  'read_tool_result',
   'navisworks_status',
   'navisworks_get_document',
   'navisworks_get_selection',
@@ -217,10 +221,23 @@ export const appSettingsSchema = z.strictObject({
   apiEnabled: z.boolean(),
   apiProfiles: z.array(apiProfileSchema),
   activeApiProfileId: z.string().nullable(),
+  /** Per-tool permission overrides (allow/ask/deny); absent keys use registry defaults. */
+  toolPermissions: z.nullish(z.record(z.string(), toolPermissionSchema)).transform((value) => value ?? {}),
   /** Run-scoped agent execution policy; absent in old payloads → defaults. */
   execution: z.nullish(executionSettingsSchema).transform((value) => value ?? DEFAULT_EXECUTION_SETTINGS),
   /** Disk-history retention; absent in old payloads → defaults. */
   storage: z.nullish(storageSettingsSchema).transform((value) => value ?? DEFAULT_STORAGE_SETTINGS)
+})
+
+/** One registry tool as surfaced to the settings UI (resolved permission included). */
+export const toolDefinitionSummarySchema = z.strictObject({
+  name: nonEmptyString,
+  label: nonEmptyString,
+  description: z.string(),
+  impact: z.enum(['read-only', 'view-state-change']),
+  category: z.enum(['navisworks', 'internal']),
+  permission: toolPermissionSchema,
+  defaultPermission: toolPermissionSchema
 })
 
 /** Where the context window a run budgeted against came from. */
@@ -321,6 +338,10 @@ export const requestSchemas = {
   'appearance.get': {
     input: emptyInput,
     output: appearanceStateSchema
+  },
+  'tools.list': {
+    input: emptyInput,
+    output: z.array(toolDefinitionSummarySchema)
   },
   'appearance.update': {
     input: z.strictObject({ themeMode: themeModeSchema }),
@@ -522,5 +543,8 @@ export type NavisworksInstanceSummary = z.output<typeof navisworksInstanceSummar
 export type NavisworksConnectionState = z.output<typeof navisworksConnectionStateSchema>
 export type RuntimeInfo = z.output<typeof runtimeInfoSchema>
 export type ToolName = z.output<typeof toolNameSchema>
+export type ToolDefinitionSummary = z.output<typeof toolDefinitionSummarySchema>
 export type ToolApprovalRequest = z.output<typeof eventSchemas['tool.approval.requested']>
+export type ToolPermission = z.output<typeof toolPermissionSchema>
+
 export type ContextWindowSource = z.output<typeof contextWindowSourceSchema>

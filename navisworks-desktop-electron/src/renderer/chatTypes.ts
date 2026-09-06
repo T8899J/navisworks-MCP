@@ -6,6 +6,8 @@ import {
   type ApiProfile,
   type ApiProfileAdvancedSettings,
   type ContextWindowSource,
+  type ToolDefinitionSummary,
+  type ToolPermission,
   type ExecutionSettings,
   type NavisworksInstanceSummary,
   type StorageSettings,
@@ -14,7 +16,7 @@ import {
 } from '../shared/ipc'
 import { normalizeReasoningEffort, type ReasoningEffort } from '../shared/reasoning'
 
-export type { ApiProfile, ContextWindowSource, ToolApprovalRequest }
+export type { ApiProfile, ContextWindowSource, ToolApprovalRequest, ToolDefinitionSummary, ToolPermission }
 export type { ReasoningEffort }
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'error'
@@ -71,7 +73,9 @@ export interface DesktopSettings {
   apiEnabled: boolean
   apiProfiles: ApiProfile[]
   activeApiProfileId: string | null
-  /** Run-scoped agent execution policy (执行设置页). */
+  /** Per-tool permission overrides (allow/ask/deny). */
+  toolPermissions: Record<string, ToolPermission>
+  /** Run-scoped agent execution policy (defaults; no user UI). */
   execution: ExecutionSettings
   /** Disk-history retention. */
   storage: StorageSettings
@@ -310,9 +314,21 @@ export function normalizeSettings(value: unknown): DesktopSettings {
     apiEnabled: Boolean(source.apiEnabled ?? source.ApiEnabled ?? true),
     apiProfiles,
     activeApiProfileId: typeof source.activeApiProfileId === 'string' ? source.activeApiProfileId : null,
+    toolPermissions: normalizeToolPermissions(asRecord(source.toolPermissions ?? {})),
     execution: normalizeExecutionSettings(asRecord(source.execution ?? {})),
     storage: normalizeStorageSettings(asRecord(source.storage ?? {}))
   }
+}
+
+function normalizeToolPermissions(value: Record<string, unknown>): Record<string, ToolPermission> {
+  const allowed: readonly string[] = ['allow', 'ask', 'deny']
+  const result: Record<string, ToolPermission> = {}
+  for (const [name, permission] of Object.entries(value)) {
+    if (name.trim() && typeof permission === 'string' && allowed.includes(permission)) {
+      result[name] = permission as ToolPermission
+    }
+  }
+  return result
 }
 
 function normalizeProfileAdvanced(value: Record<string, unknown>): ApiProfileAdvancedSettings {

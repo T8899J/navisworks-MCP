@@ -3896,3 +3896,22 @@ select:focus-visible,
     opacity: 0.8;
   }
 }
+
+/* 工具与权限: per-tool allow/ask/deny picker. */
+.tool-permission-select {
+  padding: 5px 8px;
+  font-size: var(--text-label);
+  color: var(--text);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.tool-permission-select:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--border));
+  outline-offset: 1px;
+}
+
+.tool-permission-select:disabled {
+  opacity: 0.5;
+}

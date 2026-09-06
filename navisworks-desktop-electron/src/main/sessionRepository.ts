@@ -11,6 +11,7 @@ import {
   type ApiProfileAdvancedSettings,
   type ExecutionSettings,
   type StorageSettings,
+  type ToolPermission,
 } from '../shared/ipc'
 import type { SemanticMemory } from './agent/semanticMemory'
 
@@ -90,6 +91,8 @@ export interface AppSettings {
   apiEnabled: boolean
   apiProfiles: ApiProfileSettings[]
   activeApiProfileId: string | null
+  /** Per-tool permission overrides; legacy disabledTools still honored on load. */
+  toolPermissions: Record<string, ToolPermission>
   /** Run-scoped agent execution policy (defaults filled on load). */
   execution: ExecutionSettings
   /** Disk-history retention (defaults filled on load). */
@@ -174,6 +177,8 @@ export interface WpfAppSettingsSnapshot {
   CloudModel?: string | null
   ApiProfiles?: WpfApiProfileSnapshot[] | null
   ActiveApiProfileId?: string | null
+  /** Electron-only extension: per-tool permission overrides. */
+  ToolPermissions?: Record<string, unknown> | null
   /** Electron-only extension: run-scoped agent execution policy. */
   Execution?: Record<string, unknown> | null
   /** Electron-only extension: disk-history retention. */
@@ -285,6 +290,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   apiEnabled: true,
   apiProfiles: [],
   activeApiProfileId: null,
+  toolPermissions: {},
   execution: { ...DEFAULT_EXECUTION_SETTINGS },
   storage: { ...DEFAULT_STORAGE_SETTINGS },
 }
@@ -512,6 +518,7 @@ function fromWpfSettingsSnapshot(snapshot: WpfAppSettingsSnapshot): AppSettings 
     apiEnabled: optionalBoolean(snapshot.ApiEnabled, true),
     apiProfiles,
     activeApiProfileId: hasStoredProfiles ? snapshot.ActiveApiProfileId ?? null : fallbackProfileId,
+    toolPermissions: parseToolPermissions(snapshot.ToolPermissions),
     // New fields default when absent — old settings.json files migrate intact.
     execution: parseExecutionSettings(snapshot.Execution),
     storage: parseStorageSettings(snapshot.Storage),
@@ -541,6 +548,7 @@ function toWpfSettingsSnapshot(settings: AppSettings): WpfAppSettingsSnapshot {
     CloudModel: activeProfile?.model ?? '',
     ApiProfiles: settings.apiProfiles.map(toWpfApiProfileSnapshot),
     ActiveApiProfileId: settings.activeApiProfileId,
+    ToolPermissions: { ...settings.toolPermissions },
     Execution: { ...settings.execution },
     Storage: { ...settings.storage },
   }
@@ -717,6 +725,7 @@ function parseWpfSettingsSnapshot(value: unknown): WpfAppSettingsSnapshot {
     CloudModel: optionalString(entry.CloudModel, ''),
     ApiProfiles: optionalObjectArray(entry.ApiProfiles).map(parseWpfApiProfileSnapshot),
     ActiveApiProfileId: nullableString(entry.ActiveApiProfileId),
+    ToolPermissions: objectOrNull(entry.ToolPermissions),
     Execution: objectOrNull(entry.Execution),
     Storage: objectOrNull(entry.Storage),
   }
@@ -894,6 +903,11 @@ export function normalizeProfileAdvanced(value: unknown): ApiProfileAdvancedSett
   return parseProfileAdvanced(value)
 }
 
+/** Lenient normalization for permission patches (schema-compatible). */
+export function normalizeToolPermissions(value: unknown): Record<string, ToolPermission> {
+  return parseToolPermissions(value)
+}
+
 /** Lenient per-field normalization for execution settings (schema-compatible). */
 export function normalizeExecutionSettings(value: unknown): ExecutionSettings {
   return parseExecutionSettings(value)
@@ -902,6 +916,18 @@ export function normalizeExecutionSettings(value: unknown): ExecutionSettings {
 /** Lenient per-field normalization for storage settings (schema-compatible). */
 export function normalizeStorageSettings(value: unknown): StorageSettings {
   return parseStorageSettings(value)
+}
+
+function parseToolPermissions(value: unknown): Record<string, ToolPermission> {
+  const entry = objectOrNull(value) ?? {}
+  const allowed: readonly string[] = ['allow', 'ask', 'deny']
+  const result: Record<string, ToolPermission> = {}
+  for (const [name, permission] of Object.entries(entry)) {
+    if (typeof name === 'string' && name.trim() && typeof permission === 'string' && allowed.includes(permission)) {
+      result[name] = permission as ToolPermission
+    }
+  }
+  return result
 }
 
 function parseExecutionSettings(value: unknown): ExecutionSettings {

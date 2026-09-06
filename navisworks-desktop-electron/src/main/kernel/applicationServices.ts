@@ -1,6 +1,7 @@
 import { AgentRuntime } from '../agentRuntime'
 import { resolveResult } from '../agent/toolResultStore'
 import { NavisworksBridgeClient } from '../bridgeClient'
+import { ToolOutputStore } from '../toolOutputStore'
 import type { DesktopDataPaths } from '../dataPaths'
 import { ToolApprovalRegistry } from '../ipc'
 import { ModelRouter } from '../model/modelRouter'
@@ -58,6 +59,7 @@ export async function installApplicationServices(
     executionLedger: appScope.require(ExecutionLedgerToken),
     operationCoordinator: appScope.require(OperationCoordinatorToken),
     taskManager: appScope.require(TaskManagerToken),
+    toolOutputStore: new ToolOutputStore(paths.toolOutputDirectory),
     resolveToolResult: (value) => resolveResult(paths.toolResultsDirectory, value),
   })
 

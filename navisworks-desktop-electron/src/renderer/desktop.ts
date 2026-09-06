@@ -102,6 +102,11 @@ export const desktopGateway = {
     return [...await requireApi().request('ollama.models.list', endpoint)]
   },
 
+  /** Registry tool summaries (with resolved permissions) for the settings UI. */
+  async listTools() {
+    return await requireApi().request('tools.list')
+  },
+
   async testOllama(
     model?: string,
     endpoint?: { baseUrl?: string; apiKey?: string }

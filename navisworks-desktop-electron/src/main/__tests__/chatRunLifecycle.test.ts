@@ -192,3 +192,146 @@ describe('chat run lifecycle — terminal states (Cases 1–4)', () => {
     }
   })
 })
+
+import { ToolOutputStore } from '../toolOutputStore'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+describe('bounded tool output + internal reader (P3 runtime)', () => {
+  it('a huge find_items result becomes preview + resultRef, then pages via read_tool_result', async () => {
+    const outDir = await mkdtemp(join(tmpdir(), 'curi-runtime-tool-output-'))
+    try {
+      const bigItems = Array.from({ length: 2_000 }, (_, index) => ({
+        id: `item-${index}`,
+        name: `构件-${index}（中文内容，UTF-8 字节按 3 计）`,
+      }))
+      const bridgeCalls: string[] = []
+      const harnessBridge: AgentBridgeClient = {
+        async call<T>(method: string) {
+          bridgeCalls.push(method)
+          if (method === 'navisworks_find_items') {
+            return { items: bigItems, total: 2_000, truncated: false } as T
+          }
+          return { connected: true } as T
+        },
+      }
+      const bodies: Array<Record<string, unknown>> = []
+      const events: Array<Record<string, unknown>> = []
+      let index = 0
+      const fetchImpl = vi.fn(async (url: unknown, init?: { body?: string }) => {
+        const bodyText = String(init?.body ?? '{}')
+        const body = JSON.parse(bodyText) as Record<string, unknown>
+        bodies.push(body)
+        const toolsJson = JSON.stringify(body.tools ?? [])
+        index += 1
+        // Hidden internal calls: planner first, verifier after the final text.
+        if (toolsJson.includes('curi_emit_task_plan')) {
+          return internalTurn('curi_emit_task_plan', FULL_PLAN)
+        }
+        if (toolsJson.includes('curi_emit_task_verification')) {
+          return internalTurn('curi_emit_task_verification', { verdict: 'complete', reason: '证据充分' })
+        }
+        if (index === 1) {
+          return ndjsonResponse([{
+            message: {
+              role: 'assistant', content: '',
+              tool_calls: [{ id: 'call-1', function: { index: 0, name: 'navisworks_find_items', arguments: '{"query":"泵"}' } }],
+            },
+            prompt_eval_count: 10, eval_count: 0,
+          }])
+        }
+        // Round 2: the model pages the stored result — pull the resultRef from
+        // the tool message it can see, exactly like a real model would.
+        if (index === 3) {
+          const refMatch = bodyText.match(/tor_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)
+          const args = JSON.stringify({ resultRef: refMatch?.[0] ?? '', offset: 50, limit: 50 })
+          return ndjsonResponse([{
+            message: {
+              role: 'assistant', content: '',
+              tool_calls: [{ id: 'call-2', function: { index: 0, name: 'read_tool_result', arguments: args } }],
+            },
+            prompt_eval_count: 10, eval_count: 0,
+          }])
+        }
+        return textTurn('已读取完整数据。')
+      }) as unknown as typeof fetch
+
+      const taskManager = new TaskManager()
+      const runtime = new AgentRuntime({
+        bridgeClient: harnessBridge,
+        fetchImpl,
+        taskManager,
+        toolOutputStore: new ToolOutputStore(outDir),
+      })
+      const result = await runtime.run(
+        { sessionId: 's-big', text: '查找所有泵' },
+        { onEvent: (event) => events.push(event as unknown as Record<string, unknown>) },
+      )
+      expect(bridgeCalls).toEqual(['navisworks_find_items'])
+      expect(result.isSuccess).toBe(true)
+      // Find the model request that first SAW the find_items result (a
+      // planner request may sit between the tool rounds).
+      const toolContents = bodies
+        .flatMap((body) => (body.messages as Array<{ role: string; content: string }> | undefined) ?? [])
+        .filter((message) => message.role === 'tool')
+        .map((message) => message.content)
+      const findContent = toolContents.find((content) => content.includes('navisworks_find_items'))
+      expect(findContent).toBeDefined()
+      expect(findContent).toContain('"resultRef":"tor_')
+      expect(findContent).toContain('"truncated":true')
+      expect(findContent).toContain('"total":2000')
+      // The bounded preview is FAR smaller than the ~160KB raw payload.
+      expect(findContent!.length).toBeLessThan(30_000)
+      // The read_tool_result page returned the second slice.
+      const readContent = toolContents.find((content) => content.includes('read_tool_result') && content.includes('"offset":50'))
+      expect(readContent).toBeDefined()
+      expect(readContent).toContain('"returned":50')
+      expect(readContent).toContain('"hasMore":true')
+      // The session-visible completed event carries the bounded preview too.
+      const completed = events.find((event) => event.phase === 'completed' && event.tool === 'navisworks_find_items')
+      expect((completed?.result as Record<string, unknown>).resultRef).toMatch(/^tor_/)
+    } finally {
+      await rm(outDir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('deny: a forged deny-tool call never reaches the bridge and reports PERMISSION_DENIED', async () => {
+    let index = 0
+    const bridgeCalls: string[] = []
+    const harnessBridge: AgentBridgeClient = {
+      async call<T>(method: string) {
+        bridgeCalls.push(method)
+        return {} as T
+      },
+    }
+    const bodies: Array<Record<string, unknown>> = []
+    const fetchImpl = vi.fn(async (_url: unknown, init?: { body?: string }) => {
+      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      index += 1
+      if (index === 1) {
+        return ndjsonResponse([{
+          message: {
+            role: 'assistant', content: '',
+            tool_calls: [{ id: 'call-1', function: { index: 0, name: 'navisworks_status', arguments: '{}' } }],
+          },
+          prompt_eval_count: 10, eval_count: 0,
+        }])
+      }
+      return textTurn('好的，已停止。')
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ bridgeClient: harnessBridge, fetchImpl })
+    const result = await runtime.run({
+      text: '查状态',
+      toolPermissions: { navisworks_status: 'deny' },
+    })
+    expect(result.isSuccess).toBe(true)
+    expect(bridgeCalls).toEqual([])
+    // The deny result reached the model as a tool message: PERMISSION_DENIED
+    // with a clear "the user disabled this tool" message.
+    const toolMessages = (bodies[1]?.messages as Array<{ role: string; content: string }>)
+      .filter((message) => message.role === 'tool')
+    expect(toolMessages.some((message) => message.content.includes('PERMISSION_DENIED'))).toBe(true)
+    expect(toolMessages.some((message) => message.content.includes('该工具已被用户禁用'))).toBe(true)
+  })
+})

@@ -16,6 +16,7 @@ import type {
 import {
   type ChatMessage,
   type ChatRunPhase,
+  type ToolDefinitionSummary,
   type ChatSession,
   type ChatStreamEvent,
   type ContextWindowSource,
@@ -69,6 +70,7 @@ const DEFAULT_SETTINGS: DesktopSettings = {
   apiEnabled: true,
   apiProfiles: [],
   activeApiProfileId: null,
+  toolPermissions: {},
   execution: DEFAULT_EXECUTION_SETTINGS,
   storage: DEFAULT_STORAGE_SETTINGS
 }
@@ -209,6 +211,14 @@ export default function App() {
   // Context-ring usage of the active session: tokens of the last round, the
   // window that round actually budgeted against, and the backend's cache hit
   // rate when it reports one.
+  // Registry tool summaries for the 工具与权限 page (single source: main).
+  const [toolDefinitions, setToolDefinitions] = useState<ToolDefinitionSummary[]>([])
+  const refreshToolDefinitions = useCallback(() => {
+    if (!serviceAvailable) return
+    void desktopGateway.listTools()
+      .then((summaries) => setToolDefinitions(summaries))
+      .catch(() => setToolDefinitions([]))
+  }, [serviceAvailable])
   const [contextUsage, setContextUsage] = useState<{
     used: number
     window?: number
@@ -662,6 +672,12 @@ export default function App() {
   useEffect(() => {
     setContextUsage(null)
   }, [activeSessionId])
+
+  // Tool registry summaries must re-resolve whenever settings change:
+  // permissions shown in the 工具与权限 page always mirror the latest state.
+  useEffect(() => {
+    refreshToolDefinitions()
+  }, [refreshToolDefinitions, settings.toolPermissions, settings.disabledTools])
 
   // Escape dismisses the in-app delete confirmation; clicking the dimmed
   // backdrop cancels too.
@@ -1145,7 +1161,16 @@ export default function App() {
             }}
             onModelChange={(selectedModel) => updateSettings({ ...settings, selectedModel, preferApiModel: false })}
             onDisabledToolsChange={(disabledTools) => updateSettings({ ...settings, disabledTools })}
-            onExecutionSettingsChange={(execution) => updateSettings({ ...settings, execution })}
+            tools={toolDefinitions}
+            onToolPermissionChange={(name, permission) => {
+              void updateSettings({
+                ...settings,
+                toolPermissions: { ...(settings.toolPermissions ?? {}), [name]: permission },
+              })
+            }}
+            onBulkToolPermissions={(toolPermissions) => {
+              void updateSettings({ ...settings, toolPermissions })
+            }}
             onRefreshModels={refreshModels}
             onFetchCloudModels={(profileId) => desktopGateway.listApiProfileModels(profileId)}
             cloudLatency={cloudLatency}

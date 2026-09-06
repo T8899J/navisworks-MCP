@@ -2,11 +2,12 @@ import { BridgeError, type BridgeCallOptions } from './bridgeClient'
 import type { NavisworksBridgeClient } from './bridgeClient'
 import { randomUUID } from 'node:crypto'
 import {
-  AGENT_TOOL_DEFINITIONS,
-  toolCatalog,
   type AgentToolName,
   ToolCatalogError,
 } from './toolCatalog'
+import { toolRegistry } from './tool/registry'
+import type { ToolOutputStore } from './toolOutputStore'
+import type { ToolPermission } from '../shared/ipc'
 import { ModelRouter } from './model/modelRouter'
 import {
   AgentRuntimeError,
@@ -255,6 +256,8 @@ export interface AgentRunInput {
   model?: string
   reasoningMode?: ReasoningEffort
   disabledTools?: readonly string[]
+  /** Explicit per-tool permission overrides (allow/ask/deny) for this run. */
+  toolPermissions?: Record<string, ToolPermission>
   api?: ApiEndpointConfig
   /** Run-scope execution policy; falls back to the legacy defaults when absent. */
   runtimeConfig?: AgentRuntimeSettings
@@ -335,6 +338,8 @@ export interface AgentRuntimeOptions {
   operationCoordinator?: DocumentOperationCoordinator
   /** Resolve an externalized persisted tool result for runtime-internal recall. */
   resolveToolResult?: (value: unknown) => Promise<unknown>
+  /** Bounded tool-output store: large results become preview + resultRef. */
+  toolOutputStore?: ToolOutputStore
   /**
    * Task System v1: durable task lifecycle (plan/evidence/verify). Optional —
    * omitted in unit tests and every behavior stays exactly as before.
@@ -383,7 +388,7 @@ export class AgentRuntime {
   readonly #contextWindow: number
   readonly #numPredict: number
   readonly #maxToolRounds: number
-  readonly #disabledTools: Set<string>
+  readonly #toolOutputStore: ToolOutputStore | undefined
   readonly #contextState: ContextState | undefined
   readonly #executionLedger: ToolExecutionLedger | undefined
   readonly #operationCoordinator: DocumentOperationCoordinator | undefined
@@ -403,7 +408,7 @@ export class AgentRuntime {
     this.#contextWindow = options.contextWindow ?? LOCAL_MAX_CONTEXT_TOKENS
     this.#numPredict = Math.max(1, Math.trunc(options.numPredict ?? 2048))
     this.#maxToolRounds = positiveInteger(options.maxToolRounds ?? MAX_TOOL_ROUNDS, 'maxToolRounds')
-    this.#disabledTools = new Set<string>()
+    this.#toolOutputStore = options.toolOutputStore
     this.#contextState = options.contextState
     this.#executionLedger = options.executionLedger
     this.#operationCoordinator = options.operationCoordinator
@@ -461,7 +466,13 @@ export class AgentRuntime {
     // execution changes apply on the very next message — no app restart.
     const runtimeConfig = input.runtimeConfig ?? DEFAULT_RUNTIME_SETTINGS
     const provider = apiActive ? this.#apiProvider(api!) : this.#router.local()
-    const disabledTools = new Set(input.disabledTools ?? [])
+    const disabledTools = input.disabledTools
+    // Registry materialization: deny tools never reach the model, ask tools
+    // are offered but gate on approval, allow tools run silently.
+    const tools = toolRegistry.materialize({
+      permissions: input.toolPermissions,
+      legacyDisabled: disabledTools,
+    })
     const model = apiActive
       ? api!.model!.trim()
       : (input.model?.trim() || this.#model)
@@ -469,7 +480,7 @@ export class AgentRuntime {
     const think = apiActive
       ? false
       : (effort === undefined ? this.#think : localThinkForEffort(effort))
-    const tools = AGENT_TOOL_DEFINITIONS.filter((definition) => !disabledTools.has(definition.function.name))
+
     // A single execution scope id for this run; the P5 ledger attributes modifying calls
     // to it so crash recovery / approval re-checks can correlate a call with its run.
     const runId = input.runId?.trim() || randomUUID()
@@ -877,16 +888,36 @@ export class AgentRuntime {
             arguments: toolCall.arguments,
           })
 
-          const toolResult = await this.#executeTool(
+          let toolResult = await this.#executeTool(
             toolCall,
             runId,
-            disabledTools,
+            toolRegistry.resolvePermission(toolCall.name, {
+              permissions: input.toolPermissions,
+              legacyDisabled: disabledTools,
+            }),
             options.signal,
             options.requestToolApproval,
             hasExplicitAmbiguousRetryConfirmation(trimmedInput),
             input.navisworksBinding,
             input.navisworksUnavailable,
           )
+          // Bound large tool results ONCE: full data goes to the
+          // ToolOutputStore, the model/session receive preview + resultRef.
+          if (toolResult.error === undefined && this.#toolOutputStore !== undefined) {
+            const bounded = await this.#toolOutputStore.bound({
+              sessionId: input.sessionId ?? '',
+              toolCallId: toolCall.id,
+              toolName: toolCall.name,
+              data: toolResult.result,
+            })
+            toolResult = {
+              ...toolResult,
+              result: bounded.content,
+              wire: toolResult.error === undefined
+                ? buildToolSuccessObservation(toolCall.name, bounded.content)
+                : toolResult.wire,
+            }
+          }
           options.onEvent?.({
             phase: 'completed',
             runId,
@@ -1012,7 +1043,7 @@ export class AgentRuntime {
   async #executeTool(
     toolCall: { id: string; name: string; arguments: Record<string, unknown> },
     runId: string,
-    disabledTools: ReadonlySet<string>,
+    permission: ToolPermission,
     signal?: AbortSignal,
     requestToolApproval?: RunAgentOptions['requestToolApproval'],
     allowAmbiguousRetry = false,
@@ -1020,19 +1051,50 @@ export class AgentRuntime {
     navisworksUnavailable?: AgentRunInput['navisworksUnavailable'],
   ): Promise<{ result?: unknown; error?: { code: string; message: string; ambiguousOutcome?: boolean }; wire: Record<string, unknown> }> {
     const ledger = this.#executionLedger
-    const isModifying = toolCatalog.get(toolCall.name)?.impact === 'view-state-change'
+    const isModifying = toolRegistry.get(toolCall.name)?.impact === 'view-state-change'
     let documentAtRequest: string | undefined
     let ledgerStarted = false
     let executing = false
     try {
-      toolCatalog.assertAllowed(toolCall.name, toolCall.arguments)
+      toolRegistry.assertAllowed(toolCall.name, toolCall.arguments)
+      // Double protection for deny: materialization already hides the tool
+      // from the model — a forged call is rejected here as well.
+      if (permission === 'deny') {
+        const message = `该工具已被用户禁用：${toolCall.name}`
+        return {
+          error: { code: 'PERMISSION_DENIED', message },
+          wire: buildToolErrorObservation(toolCall.name, 'PERMISSION_DENIED', message),
+        }
+      }
+      // Internal tool: reads Curi's own stored tool outputs — no bridge and no
+      // Navisworks dependency, so it works while the instance is offline.
+      if (toolCall.name === 'read_tool_result') {
+        const store = this.#toolOutputStore
+        if (store === undefined) {
+          const message = '工具结果存储在当前运行中不可用。'
+          return {
+            error: { code: 'TOOL_OUTPUT_UNAVAILABLE', message },
+            wire: buildToolErrorObservation(toolCall.name, 'TOOL_OUTPUT_UNAVAILABLE', message),
+          }
+        }
+        const normalizedArguments = toolRegistry.normalizeArguments(toolCall.name, toolCall.arguments)
+        const resultRef = typeof normalizedArguments.resultRef === 'string' ? normalizedArguments.resultRef : ''
+        const offset = typeof normalizedArguments.offset === 'number' ? normalizedArguments.offset : 0
+        const limit = typeof normalizedArguments.limit === 'number' ? normalizedArguments.limit : 50
+        const page = await store.read(resultRef, offset, limit)
+        if (page.error !== undefined) {
+          const message = page.error
+          return {
+            error: { code: 'TOOL_OUTPUT_UNAVAILABLE', message },
+            wire: buildToolErrorObservation(toolCall.name, 'TOOL_OUTPUT_UNAVAILABLE', message),
+          }
+        }
+        return { result: page, wire: buildToolSuccessObservation(toolCall.name, page) }
+      }
       if (navisworksUnavailable !== undefined) {
         throw new NavisworksTargetError(navisworksUnavailable.code, navisworksUnavailable.message)
       }
-      if (disabledTools.has(toolCall.name)) {
-        throw new ToolCatalogError(`工具已被用户禁用：${toolCall.name}`)
-      }
-      const normalizedArguments = toolCatalog.normalizeArguments(toolCall.name, toolCall.arguments)
+      const normalizedArguments = toolRegistry.normalizeArguments(toolCall.name, toolCall.arguments)
       if (isModifying) {
         documentAtRequest = navisworksBinding?.documentInstanceId
           ?? this.#contextState?.documentInstanceId
@@ -1071,7 +1133,12 @@ export class AgentRuntime {
         })
         ledgerStarted = ledger !== undefined
         await ledger?.mark(runId, toolCall.id, 'awaiting-approval')
-        const approved = requestToolApproval
+        // permission=allow means the user explicitly opted out of per-call
+        // prompts for this tool; ask still goes through the approval flow.
+        // Existing ledger/safety checks above stay untouched.
+        const approved = permission === 'allow'
+          ? true
+          : requestToolApproval
           ? await requestToolApproval({
               runId,
               toolCallId: toolCall.id,
@@ -1135,6 +1202,34 @@ export class AgentRuntime {
           await ledger?.resolveAmbiguous(ambiguous, 'USER_CONFIRMED_RETRY')
         }
       }
+      // A read-only tool the user set to ask: gate on approval without the
+      // modifying-call ledger machinery. Refusal is a PERMISSION result — the
+      // model must know the user said no, not that the tool failed.
+      if (permission === 'ask' && !isModifying) {
+        const approved = requestToolApproval
+          ? await requestToolApproval({
+              runId,
+              toolCallId: toolCall.id,
+              toolName: toolCall.name as AgentToolName,
+              arguments: normalizedArguments,
+              argumentsHash: hashArguments(normalizedArguments),
+              ...(navisworksBinding === undefined
+                ? {}
+                : {
+                    instanceId: navisworksBinding.instanceId,
+                    bridgeSessionId: navisworksBinding.bridgeSessionId,
+                  }),
+            })
+          : false
+        if (!approved) {
+          const message = `用户拒绝了本次工具调用（权限设置为每次询问）：${toolCall.name}`
+          return {
+            error: { code: 'PERMISSION_DENIED', message },
+            wire: buildToolErrorObservation(toolCall.name, 'PERMISSION_DENIED', message),
+          }
+        }
+      }
+
       const callBridge = () => navisworksBinding === undefined
         ? this.#bridgeClient.call(toolCall.name, normalizedArguments, { signal })
         : callWithNavisworksRunBinding(
@@ -1505,7 +1600,12 @@ function toolErrorNextActions(code: string): string[] {
     case 'ARGUMENTS_CHANGED':
       return ['重新生成稳定参数，并对修改操作重新请求审批。']
     case 'TOOL_NOT_ALLOWED':
+    case 'PERMISSION_DENIED':
       return ['改用允许列表中的最小必要工具；不需要实时数据时直接回答。']
+    case 'TOOL_OUTPUT_UNAVAILABLE':
+      return [
+        '该结果已过期或不可用；如仍需要数据，请用相同参数重新调用原工具。',
+      ]
     default:
       return [
         '确认 Navisworks Manage 2023 已启动。',

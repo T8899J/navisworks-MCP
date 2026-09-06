@@ -23,6 +23,8 @@ import type {
   JsonSettingsRepository
 } from './sessionRepository'
 import { toAgentRuntimeSettings, type AgentRuntimeSettings, type ApiEndpointConfig } from './agentRuntime'
+import { toolRegistry } from './tool/registry'
+import { normalizeToolPermissions } from './sessionRepository'
 import { normalizeProfileAdvanced, normalizeExecutionSettings, normalizeStorageSettings } from './sessionRepository'
 import {
   DEFAULT_API_PROFILE_ADVANCED,
@@ -31,7 +33,8 @@ import {
   type ApiProfileAdvancedSettings,
   type ContextWindowSource,
   type ExecutionSettings,
-  type StorageSettings
+  type StorageSettings,
+  type ToolPermission
 } from '../shared/ipc'
 import type { ToolCatalog } from './toolCatalog'
 import type {
@@ -96,6 +99,8 @@ export interface OllamaRunInput {
   history: readonly OllamaHistoryEntry[]
   /** Run-scope execution policy from the FRESH settings of this run. */
   runtimeConfig?: AgentRuntimeSettings
+  /** Explicit per-tool permissions for this run (fresh settings). */
+  toolPermissions?: Record<string, ToolPermission>
   model?: string
   reasoningMode?: ReasoningEffort
   /** Tool names switched off in settings; honored fresh on every request. */
@@ -186,10 +191,11 @@ export interface OllamaToolApprovalRequest {
  * Renderer-side settings patch. The two new policy groups (and profile
  * advanced) may arrive partial — the facade normalizes them per field.
  */
-type SettingsPatch = Partial<Omit<AppSettings, 'apiProfiles' | 'execution' | 'storage'>> & {
+type SettingsPatch = Partial<Omit<AppSettings, 'apiProfiles' | 'execution' | 'storage' | 'toolPermissions'>> & {
   apiProfiles?: Array<Omit<ApiProfile, 'advanced'> & { advanced?: Partial<ApiProfileAdvancedSettings> | null }>
   execution?: Partial<ExecutionSettings> | null
   storage?: Partial<StorageSettings> | null
+  toolPermissions?: Partial<Record<string, ToolPermission>> | null
 }
 
 export interface DesktopIpcDependencies {
@@ -333,6 +339,13 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       if (!endpoint) throw new DesktopIpcError('NOT_FOUND', 'API 配置不存在。')
       if (!endpoint.baseUrl) throw new DesktopIpcError('VALIDATION_FAILED', 'API 地址为空。')
       return dependencies.ollama.testConnection(endpoint)
+    }),
+    'tools.list': routeHandler<'tools.list'>(async () => {
+      const settings = await persistence.getSettings()
+      return toolRegistry.listUiTools({
+        permissions: settings.toolPermissions,
+        legacyDisabled: settings.disabledTools,
+      })
     }),
     'appearance.get': routeHandler<'appearance.get'>(() => dependencies.appearance.getState()),
     'appearance.update': routeHandler<'appearance.update'>(async ({ themeMode }) => {
@@ -718,6 +731,7 @@ export class ChatRunRegistry {
           text: input.text,
           history,
           runtimeConfig,
+          toolPermissions: settings.toolPermissions,
           ...(input.model === undefined ? {} : { model: input.model }),
           ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
           ...(disabledTools.length === 0 ? {} : { disabledTools }),
@@ -1126,6 +1140,9 @@ export class PersistenceFacade {
         preferApiModel: patch.preferApiModel ?? current.preferApiModel ?? false,
         ollamaEnabled: patch.ollamaEnabled ?? current.ollamaEnabled ?? true,
         apiEnabled: patch.apiEnabled ?? current.apiEnabled ?? true,
+        toolPermissions: patch.toolPermissions
+          ? normalizeToolPermissions(patch.toolPermissions)
+          : current.toolPermissions,
         execution: patch.execution ? normalizeExecutionSettings(patch.execution) : current.execution,
         storage: patch.storage ? normalizeStorageSettings(patch.storage) : current.storage,
         activeApiProfileId: validProfileId(
@@ -1433,6 +1450,7 @@ function defaultPersistedSettings(): PersistedSettings {
     apiEnabled: true,
     apiProfiles: [],
     activeApiProfileId: null,
+    toolPermissions: {},
     execution: { ...DEFAULT_EXECUTION_SETTINGS },
     storage: { ...DEFAULT_STORAGE_SETTINGS }
   }
@@ -1465,6 +1483,7 @@ function toDesktopSettings(settings: PersistedSettings): AppSettings {
       advanced: profile.advanced ?? { ...DEFAULT_API_PROFILE_ADVANCED },
     })),
     activeApiProfileId: settings.activeApiProfileId ?? null,
+    toolPermissions: settings.toolPermissions ?? {},
     execution: settings.execution ?? { ...DEFAULT_EXECUTION_SETTINGS },
     storage: settings.storage ?? { ...DEFAULT_STORAGE_SETTINGS }
   }

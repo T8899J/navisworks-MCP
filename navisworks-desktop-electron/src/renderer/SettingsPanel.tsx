@@ -18,13 +18,26 @@ import {
   useRef,
   useState
 } from 'react'
-import { DEFAULT_API_PROFILE_ADVANCED, type ApiProfileAdvancedSettings, type ExecutionSettings, type ThemeMode, type ToolName } from '../shared/ipc'
+import { DEFAULT_API_PROFILE_ADVANCED, type ApiProfileAdvancedSettings, type ThemeMode, type ToolDefinitionSummary, type ToolName, type ToolPermission } from '../shared/ipc'
 import type { DesktopSettings } from './chatTypes'
 
 export interface RuntimeDiagnostics {
   dataDirectory?: string
   runtime?: string
 }
+
+export type SettingsPageId = 'appearance' | 'model' | 'tools' | 'runtime'
+
+export const SETTINGS_PAGES: Array<{
+  id: SettingsPageId
+  label: string
+  icon: typeof Palette
+}> = [
+  { id: 'appearance', label: '外观', icon: Palette },
+  { id: 'model', label: '模型', icon: Bot },
+  { id: 'tools', label: '工具与权限', icon: Wrench },
+  { id: 'runtime', label: '运行信息', icon: Database }
+]
 
 /**
  * Dropdown model picker styled like the composer's model menu. The trigger
@@ -170,8 +183,12 @@ interface SettingsPanelProps {
   onDeleteApiProfile(profileId: string): Promise<DesktopSettings>
   onModelChange(model: string): void | Promise<void>
   onDisabledToolsChange(disabledTools: ToolName[]): void | Promise<void>
-  /** Persist a patch of the run-scoped execution policy (执行页). */
-  onExecutionSettingsChange(execution: ExecutionSettings): void | Promise<void>
+  /** Registry summaries (resolved permissions included) for the 工具与权限 page. */
+  tools: ToolDefinitionSummary[]
+  /** Persist one tool permission change; the next run applies it. */
+  onToolPermissionChange(name: ToolName, permission: ToolPermission): void | Promise<void>
+  /** Persist a whole permission map (只读模式 toggle). */
+  onBulkToolPermissions(permissions: Record<string, ToolPermission>): void | Promise<void>
   onRefreshModels(): void | Promise<void>
   /** Lists models from the given OpenAI-compatible endpoint (cloud fetch). */
   onFetchCloudModels(profileId: string): Promise<string[]>
@@ -181,376 +198,6 @@ interface SettingsPanelProps {
   onTestApiProfile(profileId: string): Promise<{ connected: boolean; message: string }>
 }
 
-/** Execution-page number input: commit on blur/Enter, bounded by the schema. */
-function NumberField({
-  id,
-  value,
-  fallback,
-  min,
-  max,
-  disabled,
-  onCommit
-}: {
-  id: string
-  value: number | null
-  fallback: number
-  min: number
-  max: number
-  disabled?: boolean
-  onCommit(value: number | null): void
-}) {
-  const [text, setText] = useState(value === null ? '' : String(value))
-  useEffect(() => {
-    setText(value === null ? '' : String(value))
-  }, [value])
-  const commit = () => {
-    const parsed = Number(text)
-    if (text.trim() === '' || !Number.isFinite(parsed)) {
-      onCommit(null)
-      return
-    }
-    onCommit(Math.min(max, Math.max(min, Math.trunc(parsed))))
-  }
-  return (
-    <input
-      id={id}
-      className="execution-number-input"
-      type="number"
-      inputMode="numeric"
-      min={min}
-      max={max}
-      step={1}
-      value={text}
-      placeholder={String(fallback)}
-      disabled={disabled}
-      onChange={(event) => setText(event.currentTarget.value)}
-      onBlur={commit}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter') {
-          event.currentTarget.blur()
-        }
-      }}
-    />
-  )
-}
-
-/** 紧凑 Auto / 固定 segmented control: current side highlighted, keyboard focusable. */
-function ExecutionModeChoice({
-  value,
-  disabled,
-  onChange
-}: {
-  value: 'auto' | 'fixed'
-  disabled?: boolean
-  onChange(value: 'auto' | 'fixed'): void
-}) {
-  return (
-    <div className="execution-mode-choice" role="group" aria-label="Auto 或 固定">
-      <button
-        type="button"
-        className={`execution-mode-option${value === 'auto' ? ' is-active' : ''}`}
-        aria-pressed={value === 'auto'}
-        disabled={disabled}
-        onClick={() => onChange('auto')}>
-        Auto
-      </button>
-      <button
-        type="button"
-        className={`execution-mode-option${value === 'fixed' ? ' is-active' : ''}`}
-        aria-pressed={value === 'fixed'}
-        disabled={disabled}
-        onClick={() => onChange('fixed')}>
-        固定
-      </button>
-    </div>
-  )
-}
-
-export type SettingsPageId = 'appearance' | 'model' | 'tools' | 'execution' | 'runtime'
-
-
-export const SETTINGS_PAGES: Array<{
-  id: SettingsPageId
-  label: string
-  icon: typeof Palette
-}> = [
-  { id: 'appearance', label: '外观', icon: Palette },
-  { id: 'model', label: '模型', icon: Bot },
-  { id: 'tools', label: '工具', icon: Wrench },
-  { id: 'execution', label: '执行', icon: Gauge },
-  { id: 'runtime', label: '运行信息', icon: Database }
-]
-
-/**
- * 执行页: the run-scoped agent execution policy in three card sections —
- * 执行控制 / 上下文管理 / 任务系统. Every change applies on the NEXT
- * message (no restart): chat.start passes the fresh settings into the runtime
- * each run. Low-frequency planner/compaction numbers stay folded under
- * 高级参数.
- */
-function ExecutionPage({
-  execution,
-  disabled,
-  onChange
-}: {
-  execution: ExecutionSettings
-  disabled: boolean
-  onChange(patch: Partial<ExecutionSettings>): void
-}) {
-  return (
-    <div className="execution-page-content">
-      <section className="execution-section">
-        <header className="execution-section-header">
-          <h4>执行控制</h4>
-          <p>控制单轮 Agent 执行与自动上下文压缩行为。</p>
-        </header>
-        <div className="execution-section-body">
-          <div className="settings-row">
-            <label htmlFor="execution-max-tool-rounds">
-              最大工具轮数
-              <small>单轮对话中模型连续调用工具的轮数上限（1–64）</small>
-            </label>
-            <NumberField
-              id="execution-max-tool-rounds"
-              value={execution.maxToolRounds}
-              fallback={8}
-              min={1}
-              max={64}
-              disabled={disabled}
-              onCommit={(value) => onChange({maxToolRounds: value ?? 8})}
-            />
-          </div>
-          <div className="settings-row">
-            <label htmlFor="execution-compaction-enabled">
-              自动压缩
-              <small>上下文接近窗口时自动把早期过程总结为摘要</small>
-            </label>
-            <input
-              id="execution-compaction-enabled"
-              className="settings-switch"
-              type="checkbox"
-              checked={execution.compactionEnabled}
-              disabled={disabled}
-              onChange={(event) => onChange({ compactionEnabled: event.currentTarget.checked })}
-            />
-          </div>
-          <div className="settings-row">
-            <label htmlFor="execution-compaction-ratio">
-              压缩触发阈值
-              <small>上下文占用达到窗口比例后触发（50%–98%）</small>
-            </label>
-            <NumberField
-              id="execution-compaction-ratio"
-              value={Math.round(execution.compactionTriggerRatio * 100)}
-              fallback={85}
-              min={50}
-              max={98}
-              disabled={disabled || !execution.compactionEnabled}
-              onCommit={(value) => onChange({compactionTriggerRatio: (value ?? 85) / 100})}
-            />
-          </div>
-          <div className="settings-row">
-            <label htmlFor="execution-compact-keep">
-              压缩保留最近帧
-              <small>压缩时保留最近几轮完整对话（0–20）</small>
-            </label>
-            <NumberField
-              id="execution-compact-keep"
-              value={execution.compactKeepRecentFrames}
-              fallback={1}
-              min={0}
-              max={20}
-              disabled={disabled || !execution.compactionEnabled}
-              onCommit={(value) => onChange({compactKeepRecentFrames: value ?? 1})}
-            />
-          </div>
-        </div>
-      </section>
-
-      <section className="execution-section">
-        <header className="execution-section-header">
-          <h4>上下文管理</h4>
-          <p>控制历史消息与工具结果如何分配当前上下文预算。</p>
-        </header>
-        <div className="execution-section-body">
-          <div className="settings-row">
-            <label htmlFor="execution-history-mode">
-              历史消息裁剪
-              <small>控制已有对话历史如何进入当前模型窗口：Auto 按 Token 预算裁剪，固定按条数预切</small>
-            </label>
-            <ExecutionModeChoice
-              value={execution.historyMode}
-              disabled={disabled}
-              onChange={(historyMode) => onChange({ historyMode })}
-            />
-          </div>
-          {execution.historyMode === 'fixed' ? (
-            <div className="settings-row">
-              <label htmlFor="execution-history-limit">
-                历史消息条数
-                <small>固定模式下进入上下文的最大历史消息数（4–1000）</small>
-              </label>
-              <NumberField
-                id="execution-history-limit"
-                value={execution.historyMessageLimit}
-                fallback={24}
-                min={4}
-                max={1000}
-                disabled={disabled}
-                onCommit={(value) => onChange({ historyMessageLimit: value ?? 24 })}
-              />
-            </div>
-          ) : null}
-          <div className="settings-row">
-            <label htmlFor="execution-tool-result-mode">
-              工具结果预算
-              <small>控制单次工具结果可占用多少上下文预算：Auto 按剩余预算动态放大，固定使用字符上限</small>
-            </label>
-            <ExecutionModeChoice
-              value={execution.toolResultMode}
-              disabled={disabled}
-              onChange={(toolResultMode) => onChange({ toolResultMode })}
-            />
-          </div>
-          {execution.toolResultMode === 'fixed' ? (
-            <div className="settings-row">
-              <label htmlFor="execution-tool-result-chars">
-                工具结果字符上限
-                <small>固定模式下每个工具结果注入上下文的字符数（500–200000）</small>
-              </label>
-              <NumberField
-                id="execution-tool-result-chars"
-                value={execution.toolResultMaxChars}
-                fallback={4000}
-                min={500}
-                max={200000}
-                disabled={disabled}
-                onCommit={(value) => onChange({ toolResultMaxChars: value ?? 4000 })}
-              />
-            </div>
-          ) : null}
-        </div>
-      </section>
-
-      <section className="execution-section">
-        <header className="execution-section-header">
-          <h4>任务系统</h4>
-          <p>控制任务规划、验证以及重新规划行为。</p>
-        </header>
-        <div className="execution-section-body">
-          <div className="settings-row">
-            <label htmlFor="execution-planner-attempts">
-              Planner 最大尝试
-              <small>任务规划结构化输出的尝试次数（1–5）</small>
-            </label>
-            <NumberField
-              id="execution-planner-attempts"
-              value={execution.plannerMaxAttempts}
-              fallback={2}
-              min={1}
-              max={5}
-              disabled={disabled}
-              onCommit={(value) => onChange({plannerMaxAttempts: value ?? 2})}
-            />
-          </div>
-          <div className="settings-row">
-            <label htmlFor="execution-planner-steps">
-              Planner 最大步骤
-              <small>单个任务计划最多包含的步骤数量（1–32）</small>
-            </label>
-            <NumberField
-              id="execution-planner-steps"
-              value={execution.plannerMaxSteps}
-              fallback={10}
-              min={1}
-              max={32}
-              disabled={disabled}
-              onCommit={(value) => onChange({plannerMaxSteps: value ?? 10})}
-            />
-          </div>
-          <div className="settings-row">
-            <label htmlFor="execution-verifier-attempts">
-              Verifier 最大尝试
-              <small>任务完成度验证结构化输出的尝试次数（1–5）</small>
-            </label>
-            <NumberField
-              id="execution-verifier-attempts"
-              value={execution.verifierMaxAttempts}
-              fallback={2}
-              min={1}
-              max={5}
-              disabled={disabled}
-              onCommit={(value) => onChange({verifierMaxAttempts: value ?? 2})}
-            />
-          </div>
-          <div className="settings-row">
-            <label htmlFor="execution-max-replans">
-              最大 Replan 次数
-              <small>任务重规划超过此次数后转为阻塞（0–16）</small>
-            </label>
-            <NumberField
-              id="execution-max-replans"
-              value={execution.maxTaskReplans}
-              fallback={2}
-              min={0}
-              max={16}
-              disabled={disabled}
-              onCommit={(value) => onChange({maxTaskReplans: value ?? 2})}
-            />
-          </div>
-          <details className="execution-advanced">
-            <summary>高级参数</summary>
-            <div className="settings-row">
-              <label htmlFor="execution-planner-tokens">
-                Planner 输出上限
-                <small>单次任务规划请求的输出 Token 上限；清空表示不限制</small>
-              </label>
-              <NumberField
-                id="execution-planner-tokens"
-                value={execution.plannerMaxTokens}
-                fallback={2048}
-                min={256}
-                max={200000}
-                disabled={disabled}
-                onCommit={(value) => onChange({ plannerMaxTokens: value ?? 2048 })}
-              />
-            </div>
-            <div className="settings-row">
-              <label htmlFor="execution-verifier-evidence">
-                Verifier 最大 Evidence
-                <small>完成度验证请求中展示的证据摘要条数（2–50）</small>
-              </label>
-              <NumberField
-                id="execution-verifier-evidence"
-                value={execution.verifierMaxEvidence}
-                fallback={12}
-                min={2}
-                max={50}
-                disabled={disabled}
-                onCommit={(value) => onChange({ verifierMaxEvidence: value ?? 12 })}
-              />
-            </div>
-            <div className="settings-row">
-              <label htmlFor="execution-compact-transcript">
-                压缩输入字符上限
-                <small>送入压缩器的对话文本字符上限（2000–200000）</small>
-              </label>
-              <NumberField
-                id="execution-compact-transcript"
-                value={execution.compactMaxTranscriptChars}
-                fallback={30000}
-                min={2000}
-                max={200000}
-                disabled={disabled || !execution.compactionEnabled}
-                onCommit={(value) => onChange({ compactMaxTranscriptChars: value ?? 30000 })}
-              />
-            </div>
-          </details>
-        </div>
-      </section>
-    </div>
-  )
-}
 
 export function SettingsPanel({
   settings,
@@ -565,7 +212,9 @@ export function SettingsPanel({
   onDeleteApiProfile,
   onModelChange,
   onDisabledToolsChange,
-  onExecutionSettingsChange,
+  onToolPermissionChange,
+  onBulkToolPermissions,
+  tools,
   onRefreshModels,
   onFetchCloudModels,
   cloudLatency,
@@ -731,8 +380,26 @@ export function SettingsPanel({
     }
   }
 
+  /**
+   * Persist one tool permission. Deny entries are mirrored into the legacy
+   * disabledTools list for old readers; ask/allow are removed from it (ask
+   * must never read as disabled).
+   */
+  const changeToolPermission = (name: ToolName, permission: ToolPermission) => {
+    const overrides = { ...(settings.toolPermissions ?? {}) }
+    overrides[name] = permission
+    const legacy = new Set(disabledTools)
+    if (permission === 'deny') legacy.add(name)
+    else legacy.delete(name)
+    void onToolPermissionChange(name, permission)
+    void onDisabledToolsChange([...legacy])
+  }
+
   const disabledTools = settings.disabledTools ?? []
-  const readOnlyMode = VIEW_STATE_TOOL_NAMES.every((name) => disabledTools.includes(name))
+  // 只读模式: every view-changing tool resolves to deny.
+  const readOnlyMode = tools
+    .filter((tool) => tool.impact === 'view-state-change')
+    .every((tool) => tool.permission === 'deny')
   // SETTINGS_PAGES is a compile-time constant; index 0 always exists.
   const activePageMeta = SETTINGS_PAGES.find((page) => page.id === activePage) ?? SETTINGS_PAGES[0]!
   // Snap legacy/off-step values to the nearest named level.
@@ -745,23 +412,9 @@ export function SettingsPanel({
   )
   const activeLevel = FONT_LEVELS[fontLevelIndex]!
 
-  const setToolEnabled = (name: ToolName, enabled: boolean) => {
-    const next = enabled
-      ? disabledTools.filter((item) => item !== name)
-      : [...new Set([...disabledTools, name])]
-    void onDisabledToolsChange(next)
-  }
-
   // Read-only mode is derived state: checked means every view-state tool is
   // off. Turning it off re-enables exactly those tools and leaves the six
   // read-only switches untouched.
-  const toggleReadOnlyMode = (enabled: boolean) => {
-    const next = enabled
-      ? [...new Set([...disabledTools, ...VIEW_STATE_TOOL_NAMES])]
-      : disabledTools.filter((name) => !VIEW_STATE_TOOL_NAMES.includes(name))
-    void onDisabledToolsChange(next)
-  }
-
   return (
     <section
       className="settings-page"
@@ -1096,25 +749,48 @@ export function SettingsPanel({
                     className="settings-switch"
                     type="checkbox"
                     checked={readOnlyMode}
-                    onChange={(event) => toggleReadOnlyMode(event.currentTarget.checked)}
+                    onChange={(event) => {
+                      const next = { ...(settings.toolPermissions ?? {}) }
+                      for (const tool of tools) {
+                        if (tool.impact !== 'view-state-change') continue
+                        if (event.currentTarget.checked) next[tool.name] = 'deny'
+                        else delete next[tool.name]
+                      }
+                      const viewStateNames = tools
+                        .filter((tool) => tool.impact === 'view-state-change')
+                        .map((tool) => tool.name as ToolName)
+                      void onDisabledToolsChange(
+                        event.currentTarget.checked
+                          ? [...new Set([...disabledTools, ...viewStateNames])]
+                          : disabledTools.filter((name) => !viewStateNames.includes(name)),
+                      )
+                      void onBulkToolPermissions(next)
+                    }}
                   />
                 </div>
                 <div className="tool-list">
-                  {TOOL_CATALOG_UI.map((tool) => {
-                    const inputId = `tool-switch-${tool.name}`
+                  {tools.map((tool) => {
+                    const inputId = `tool-permission-${tool.name}`
                     return (
                       <div className="tool-row" key={tool.name}>
                         <label htmlFor={inputId}>
-                          <strong>{tool.name}</strong>
-                          <small>{tool.description}{tool.viewState ? ' · 会改动画面' : ''}</small>
+                          <strong>{tool.label}</strong>
+                          <small>{tool.description}{tool.impact === 'view-state-change' ? ' · 会改动画面' : ''}</small>
                         </label>
-                        <input
+                        <select
                           id={inputId}
-                          className="settings-switch"
-                          type="checkbox"
-                          checked={!disabledTools.includes(tool.name)}
-                          onChange={(event) => setToolEnabled(tool.name, event.currentTarget.checked)}
-                        />
+                          className="tool-permission-select"
+                          value={tool.permission}
+                          disabled={!serviceAvailable}
+                          onChange={(event) => changeToolPermission(
+                            tool.name as ToolName,
+                            event.currentTarget.value as ToolPermission,
+                          )}
+                        >
+                          <option value="allow">允许</option>
+                          <option value="ask">每次询问</option>
+                          <option value="deny">禁止</option>
+                        </select>
                       </div>
                     )
                   })}
@@ -1122,13 +798,6 @@ export function SettingsPanel({
               </>
             ) : null}
 
-            {activePage === 'execution' ? (
-              <ExecutionPage
-                execution={settings.execution}
-                disabled={!serviceAvailable}
-                onChange={(patch) => void onExecutionSettingsChange({ ...settings.execution, ...patch })}
-              />
-            ) : null}
 
             {activePage === 'runtime' ? (
               <dl className="diagnostic-list">

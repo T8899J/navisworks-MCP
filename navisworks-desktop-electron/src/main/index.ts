@@ -324,6 +324,7 @@ async function runAgent(
       text: input.text,
       history: input.history,
       ...(input.runtimeConfig === undefined ? {} : { runtimeConfig: input.runtimeConfig }),
+      ...(input.toolPermissions === undefined ? {} : { toolPermissions: input.toolPermissions }),
       ...(input.model === undefined ? {} : { model: input.model }),
       ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
       ...(input.disabledTools === undefined ? {} : { disabledTools: input.disabledTools }),
