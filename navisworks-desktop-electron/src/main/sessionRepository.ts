@@ -4,6 +4,14 @@ import { randomUUID } from 'node:crypto'
 import type { DesktopDataPaths } from './dataPaths'
 import type { ThemeMode } from '../shared/ipc'
 import { toolNameSchema } from '../shared/ipc'
+import {
+  DEFAULT_API_PROFILE_ADVANCED,
+  DEFAULT_EXECUTION_SETTINGS,
+  DEFAULT_STORAGE_SETTINGS,
+  type ApiProfileAdvancedSettings,
+  type ExecutionSettings,
+  type StorageSettings,
+} from '../shared/ipc'
 import type { SemanticMemory } from './agent/semanticMemory'
 
 const EMPTY_GUID = '00000000-0000-0000-0000-000000000000'
@@ -54,6 +62,8 @@ export interface ApiProfileSettings {
   apiKeyCiphertext: string
   /** Read only during one-time migration; never written back to disk. */
   legacyApiKey: string
+  /** Compatibility & capability overrides; always complete after load. */
+  advanced: ApiProfileAdvancedSettings
 }
 
 export interface AppSettings {
@@ -63,8 +73,11 @@ export interface AppSettings {
   skills: ManagedExtension[]
   reasoningMode: string | null
   activeSessionId: string | null
+  /** Legacy local-model field (migration only); the API runtime never reads it. */
   gpuVramGb: number
+  /** Local Ollama context window; API windows come from profile/capability. */
   contextWindowTokens: number
+  /** Local Ollama output cap; API output comes from the profile's advanced. */
   numPredict: number
   themeMode: ThemeMode
   disabledTools: string[]
@@ -77,6 +90,10 @@ export interface AppSettings {
   apiEnabled: boolean
   apiProfiles: ApiProfileSettings[]
   activeApiProfileId: string | null
+  /** Run-scoped agent execution policy (defaults filled on load). */
+  execution: ExecutionSettings
+  /** Disk-history retention (defaults filled on load). */
+  storage: StorageSettings
 }
 
 /** Exact PascalCase disk contract written by the WPF System.Text.Json model. */
@@ -126,6 +143,8 @@ export interface WpfApiProfileSnapshot {
   BaseUrl: string
   Model: string
   ApiKeyCiphertext: string
+  /** Electron-only extension: compatibility & capability overrides. */
+  Advanced?: Record<string, unknown> | null
 }
 
 /** Exact PascalCase disk contract written by AppSettingsSnapshot. */
@@ -155,6 +174,10 @@ export interface WpfAppSettingsSnapshot {
   CloudModel?: string | null
   ApiProfiles?: WpfApiProfileSnapshot[] | null
   ActiveApiProfileId?: string | null
+  /** Electron-only extension: run-scoped agent execution policy. */
+  Execution?: Record<string, unknown> | null
+  /** Electron-only extension: disk-history retention. */
+  Storage?: Record<string, unknown> | null
 }
 
 export type SessionLoadSource = 'none' | 'primary' | 'backup' | 'unavailable'
@@ -262,6 +285,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   apiEnabled: true,
   apiProfiles: [],
   activeApiProfileId: null,
+  execution: { ...DEFAULT_EXECUTION_SETTINGS },
+  storage: { ...DEFAULT_STORAGE_SETTINGS },
 }
 
 /**
@@ -306,7 +331,11 @@ export class SessionRepository {
       } else {
         sessions.push(session)
       }
-      await this.#saveOrThrow(sessions.sort(compareSessionsByRecency).slice(0, 30))
+      // Disk retention follows the user's StorageSettings, read fresh so a
+      // settings change applies without a restart. Model-context trimming is
+      // a different concern and never deletes what is kept on disk.
+      const { storage } = await this.getSettings()
+      await this.#saveOrThrow(sessions.sort(compareSessionsByRecency), storage)
     })
   }
 
@@ -317,7 +346,8 @@ export class SessionRepository {
       if (remaining.length === sessions.length) {
         return false
       }
-      await this.#saveOrThrow(remaining)
+      const { storage } = await this.getSettings()
+      await this.#saveOrThrow(remaining, storage)
       return true
     })
   }
@@ -342,11 +372,18 @@ export class SessionRepository {
     })
   }
 
-  async #saveOrThrow(sessions: readonly ConversationSession[]): Promise<void> {
-    const bounded = sessions.slice(0, 30).map((session) => ({
-      ...session,
-      messages: session.messages?.slice(-100) ?? null,
-    }))
+  async #saveOrThrow(
+    sessions: readonly ConversationSession[],
+    storage: StorageSettings = { ...DEFAULT_STORAGE_SETTINGS },
+  ): Promise<void> {
+    // 0 disables count-based retention: keep everything on disk.
+    const bounded = (storage.maxSessions > 0 ? sessions.slice(0, storage.maxSessions) : sessions)
+      .map((session) => ({
+        ...session,
+        messages: storage.maxMessagesPerSession > 0 && session.messages !== null
+          ? session.messages.slice(-storage.maxMessagesPerSession)
+          : session.messages,
+      }))
     if (!await this.#sessions.save(bounded)) {
       throw new SessionRepositoryError('SESSION_SAVE_FAILED', '无法保存会话文件。')
     }
@@ -453,6 +490,7 @@ function fromWpfSettingsSnapshot(snapshot: WpfAppSettingsSnapshot): AppSettings 
       model: optionalString(snapshot.CloudModel, ''),
       apiKeyCiphertext: '',
       legacyApiKey: optionalString(snapshot.ProviderApiKey, ''),
+      advanced: { ...DEFAULT_API_PROFILE_ADVANCED },
     })
   }
   const fallbackProfileId = apiProfiles[0]?.id ?? null
@@ -474,6 +512,9 @@ function fromWpfSettingsSnapshot(snapshot: WpfAppSettingsSnapshot): AppSettings 
     apiEnabled: optionalBoolean(snapshot.ApiEnabled, true),
     apiProfiles,
     activeApiProfileId: hasStoredProfiles ? snapshot.ActiveApiProfileId ?? null : fallbackProfileId,
+    // New fields default when absent — old settings.json files migrate intact.
+    execution: parseExecutionSettings(snapshot.Execution),
+    storage: parseStorageSettings(snapshot.Storage),
   }
 }
 
@@ -500,6 +541,8 @@ function toWpfSettingsSnapshot(settings: AppSettings): WpfAppSettingsSnapshot {
     CloudModel: activeProfile?.model ?? '',
     ApiProfiles: settings.apiProfiles.map(toWpfApiProfileSnapshot),
     ActiveApiProfileId: settings.activeApiProfileId,
+    Execution: { ...settings.execution },
+    Storage: { ...settings.storage },
   }
 }
 
@@ -535,6 +578,7 @@ function fromWpfApiProfileSnapshot(snapshot: WpfApiProfileSnapshot): ApiProfileS
     model: snapshot.Model,
     apiKeyCiphertext: snapshot.ApiKeyCiphertext,
     legacyApiKey: '',
+    advanced: parseProfileAdvanced(snapshot.Advanced),
   }
 }
 
@@ -545,6 +589,7 @@ function toWpfApiProfileSnapshot(profile: ApiProfileSettings): WpfApiProfileSnap
     BaseUrl: profile.baseUrl,
     Model: profile.model,
     ApiKeyCiphertext: profile.apiKeyCiphertext,
+    Advanced: { ...profile.advanced },
   }
 }
 
@@ -672,6 +717,8 @@ function parseWpfSettingsSnapshot(value: unknown): WpfAppSettingsSnapshot {
     CloudModel: optionalString(entry.CloudModel, ''),
     ApiProfiles: optionalObjectArray(entry.ApiProfiles).map(parseWpfApiProfileSnapshot),
     ActiveApiProfileId: nullableString(entry.ActiveApiProfileId),
+    Execution: objectOrNull(entry.Execution),
+    Storage: objectOrNull(entry.Storage),
   }
 }
 
@@ -683,6 +730,7 @@ function parseWpfApiProfileSnapshot(value: unknown): WpfApiProfileSnapshot {
     BaseUrl: optionalString(entry.BaseUrl, ''),
     Model: optionalString(entry.Model, ''),
     ApiKeyCiphertext: optionalString(entry.ApiKeyCiphertext, ''),
+    Advanced: objectOrNull(entry.Advanced),
   }
 }
 
@@ -806,6 +854,152 @@ function parseSemanticMemory(value: unknown): SemanticMemory | undefined {
     updatedAt: typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
       ? Math.max(0, Math.trunc(entry.updatedAt))
       : 0,
+  }
+}
+
+function objectOrNull(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
+    return fallback
+  }
+  return Math.min(max, Math.max(min, value))
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, value))
+}
+
+function nullableClampInteger(
+  value: unknown,
+  fallback: number | null,
+  min: number,
+  max: number,
+): number | null {
+  if (value === undefined || value === null) return fallback
+  return clampInteger(value, fallback ?? min, min, max)
+}
+
+function optionalEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return allowed.includes(value as T) ? value as T : fallback
+}
+
+/** Lenient per-field normalization for profile advanced settings (schema-compatible). */
+export function normalizeProfileAdvanced(value: unknown): ApiProfileAdvancedSettings {
+  return parseProfileAdvanced(value)
+}
+
+/** Lenient per-field normalization for execution settings (schema-compatible). */
+export function normalizeExecutionSettings(value: unknown): ExecutionSettings {
+  return parseExecutionSettings(value)
+}
+
+/** Lenient per-field normalization for storage settings (schema-compatible). */
+export function normalizeStorageSettings(value: unknown): StorageSettings {
+  return parseStorageSettings(value)
+}
+
+function parseExecutionSettings(value: unknown): ExecutionSettings {
+  const entry = objectOrNull(value) ?? {}
+  const defaults = DEFAULT_EXECUTION_SETTINGS
+  return {
+    maxToolRounds: clampInteger(entry.maxToolRounds, defaults.maxToolRounds, 1, 64),
+    compactionEnabled: typeof entry.compactionEnabled === 'boolean'
+      ? entry.compactionEnabled
+      : defaults.compactionEnabled,
+    compactionTriggerRatio: clampNumber(
+      entry.compactionTriggerRatio,
+      defaults.compactionTriggerRatio,
+      0.5,
+      0.98,
+    ),
+    compactKeepRecentFrames: clampInteger(
+      entry.compactKeepRecentFrames,
+      defaults.compactKeepRecentFrames,
+      0,
+      20,
+    ),
+    compactMaxTranscriptChars: clampInteger(
+      entry.compactMaxTranscriptChars,
+      defaults.compactMaxTranscriptChars,
+      2_000,
+      200_000,
+    ),
+    historyMode: optionalEnum(entry.historyMode, ['auto', 'fixed'] as const, defaults.historyMode),
+    historyMessageLimit: nullableClampInteger(
+      entry.historyMessageLimit,
+      defaults.historyMessageLimit,
+      4,
+      1_000,
+    ),
+    toolResultMode: optionalEnum(entry.toolResultMode, ['auto', 'fixed'] as const, defaults.toolResultMode),
+    toolResultMaxChars: nullableClampInteger(
+      entry.toolResultMaxChars,
+      defaults.toolResultMaxChars,
+      500,
+      200_000,
+    ),
+    plannerMaxAttempts: clampInteger(entry.plannerMaxAttempts, defaults.plannerMaxAttempts, 1, 5),
+    plannerMaxSteps: clampInteger(entry.plannerMaxSteps, defaults.plannerMaxSteps, 1, 32),
+    plannerMaxTokens: nullableClampInteger(
+      entry.plannerMaxTokens,
+      defaults.plannerMaxTokens,
+      256,
+      200_000,
+    ),
+    verifierMaxAttempts: clampInteger(entry.verifierMaxAttempts, defaults.verifierMaxAttempts, 1, 5),
+    verifierMaxEvidence: clampInteger(entry.verifierMaxEvidence, defaults.verifierMaxEvidence, 2, 50),
+    maxTaskReplans: clampInteger(entry.maxTaskReplans, defaults.maxTaskReplans, 0, 16),
+  }
+}
+
+function parseStorageSettings(value: unknown): StorageSettings {
+  const entry = objectOrNull(value) ?? {}
+  const defaults = DEFAULT_STORAGE_SETTINGS
+  return {
+    maxSessions: clampInteger(entry.maxSessions, defaults.maxSessions, 0, 10_000),
+    maxMessagesPerSession: clampInteger(entry.maxMessagesPerSession, defaults.maxMessagesPerSession, 0, 10_000),
+  }
+}
+
+function parseProfileAdvanced(value: unknown): ApiProfileAdvancedSettings {
+  const entry = objectOrNull(value) ?? {}
+  const defaults = DEFAULT_API_PROFILE_ADVANCED
+  return {
+    contextWindowTokens: nullableClampInteger(
+      entry.contextWindowTokens,
+      defaults.contextWindowTokens,
+      1024,
+      2_000_000,
+    ),
+    maxOutputTokens: nullableClampInteger(
+      entry.maxOutputTokens,
+      defaults.maxOutputTokens,
+      128,
+      1_000_000,
+    ),
+    temperature: typeof entry.temperature === 'number' && Number.isFinite(entry.temperature)
+      ? clampNumber(entry.temperature, 0.2, 0, 2)
+      : defaults.temperature,
+    requestTimeoutMs: clampInteger(entry.requestTimeoutMs, defaults.requestTimeoutMs, 5_000, 600_000),
+    maxTokensParameter: optionalEnum(
+      entry.maxTokensParameter,
+      ['auto', 'max_tokens', 'max_completion_tokens', 'omit'] as const,
+      defaults.maxTokensParameter,
+    ),
+    sendReasoningEffort: optionalEnum(
+      entry.sendReasoningEffort,
+      ['auto', 'on', 'off'] as const,
+      defaults.sendReasoningEffort,
+    ),
+    sendStreamOptions: typeof entry.sendStreamOptions === 'boolean'
+      ? entry.sendStreamOptions
+      : defaults.sendStreamOptions,
   }
 }
 

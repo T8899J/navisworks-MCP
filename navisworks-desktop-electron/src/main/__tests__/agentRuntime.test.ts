@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { AgentRuntime, type AgentBridgeClient } from '../agentRuntime'
+import { AgentRuntime, DEFAULT_RUNTIME_SETTINGS, type AgentBridgeClient } from '../agentRuntime'
 import { CURI_CORE_PROMPT, NAVISWORKS_CAPABILITY_PROMPT } from '../agent/prompts'
 
 /** Builds a fetch response whose body is the ndjson stream Ollama actually sends. */
@@ -516,7 +516,12 @@ describe('AgentRuntime streaming tool loop', () => {
       }
       return ndjsonResponse([{ message: { role: 'assistant', content: '完成。' }, prompt_eval_count: 20, eval_count: 1 }])
     }) as unknown as typeof fetch
-    await new AgentRuntime({ bridgeClient: bridge, fetchImpl }).run('查大量构件')
+    await new AgentRuntime({ bridgeClient: bridge, fetchImpl }).run({
+      text: '查大量构件',
+      // Auto sizing would now let this ~16KB payload through on the 32K local
+      // window; the legacy truncation notice is exercised in fixed mode.
+      runtimeConfig: { ...DEFAULT_RUNTIME_SETTINGS, toolResultMode: 'fixed', toolResultMaxChars: 4_000 },
+    })
     const toolMessage = toolMessageContent(bodies[1])
     // The oversized wire result was sliced, but the notice still reports the item count and
     // that the full payload remains locally recallable (P3-C: not a blind slice).

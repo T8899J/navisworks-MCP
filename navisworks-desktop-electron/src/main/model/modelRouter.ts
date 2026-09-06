@@ -1,5 +1,5 @@
 import { OllamaProvider } from './ollamaProvider'
-import { OpenAICompatibleProvider } from './openaiProvider'
+import { OpenAICompatibleProvider, type ProviderCompatibilityOptions } from './openaiProvider'
 import type { ModelProvider, ProviderEndpoint } from './types'
 
 /** The always-on local worker endpoint. */
@@ -8,6 +8,13 @@ export const LOCAL_OLLAMA_BASE_URL = 'http://localhost:11434'
 export interface ModelRouterOptions {
   requestTimeoutMs?: number
   fetchImpl?: typeof fetch
+}
+
+/** API endpoint options that ride the API profile's advanced settings. */
+export interface ApiEndpointRoutingOptions extends ProviderEndpoint {
+  requestTimeoutMs?: number
+  contextWindow?: number
+  compatibility?: ProviderCompatibilityOptions
 }
 
 /**
@@ -30,12 +37,15 @@ export class ModelRouter {
     })
   }
 
-  forEndpoint(endpoint: ProviderEndpoint): ModelProvider {
+  forEndpoint(endpoint: ProviderEndpoint | ApiEndpointRoutingOptions): ModelProvider {
     if (endpoint.kind === 'openai') {
+      const options = endpoint as ApiEndpointRoutingOptions
       return new OpenAICompatibleProvider({
-        baseUrl: endpoint.baseUrl ?? '',
-        apiKey: endpoint.apiKey,
-        requestTimeoutMs: this.#options.requestTimeoutMs,
+        baseUrl: options.baseUrl ?? '',
+        apiKey: options.apiKey,
+        requestTimeoutMs: options.requestTimeoutMs ?? this.#options.requestTimeoutMs,
+        contextWindow: options.contextWindow,
+        compatibility: options.compatibility,
         fetchImpl: this.#options.fetchImpl,
       })
     }

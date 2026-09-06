@@ -183,3 +183,43 @@ describe('TaskPlanner — replan', () => {
     }
   })
 })
+
+describe('TaskPlanner — runtime-configurable options', () => {
+  it('maxAttempts=1 degrades after a single invalid attempt', async () => {
+    const warn = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    try {
+      const { provider, requests } = stubProvider([() => emptyResult])
+      const decision = await new TaskPlanner().plan(provider, 'test-model', { ...PLANNER_INPUT }, undefined, {
+        maxAttempts: 1,
+      })
+      expect(decision).toBeNull()
+      expect(requests).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('maxSteps caps the emitted plan length', async () => {
+    const fiveSteps = {
+      needsTask: true,
+      objective: '多步任务',
+      steps: Array.from({ length: 5 }, (_, index) => ({
+        title: `步骤${index + 1}`,
+        completionCriteria: [`条件${index + 1}`],
+      })),
+    }
+    const { provider } = stubProvider([() => planResult(fiveSteps)])
+    const decision = await new TaskPlanner().plan(provider, 'test-model', { ...PLANNER_INPUT }, undefined, {
+      maxSteps: 2,
+    })
+    expect(decision?.task?.steps).toHaveLength(2)
+  })
+
+  it('plannerMaxTokens=null omits the sampling cap from the internal request', async () => {
+    const { provider, requests } = stubProvider([() => planResult({ needsTask: false })])
+    await new TaskPlanner().plan(provider, 'test-model', { ...PLANNER_INPUT }, undefined, {
+      maxTokens: null,
+    })
+    expect(requests[0]?.sampling?.maxTokens).toBeUndefined()
+  })
+})

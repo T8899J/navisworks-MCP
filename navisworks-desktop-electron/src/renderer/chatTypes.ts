@@ -1,7 +1,13 @@
 import {
+  DEFAULT_API_PROFILE_ADVANCED,
+  DEFAULT_EXECUTION_SETTINGS,
+  DEFAULT_STORAGE_SETTINGS,
   toolNameSchema,
   type ApiProfile,
+  type ApiProfileAdvancedSettings,
+  type ExecutionSettings,
   type NavisworksInstanceSummary,
+  type StorageSettings,
   type ToolApprovalRequest,
   type ToolName,
 } from '../shared/ipc'
@@ -64,7 +70,13 @@ export interface DesktopSettings {
   apiEnabled: boolean
   apiProfiles: ApiProfile[]
   activeApiProfileId: string | null
+  /** Run-scoped agent execution policy (执行设置页). */
+  execution: ExecutionSettings
+  /** Disk-history retention. */
+  storage: StorageSettings
 }
+
+export type { ApiProfileAdvancedSettings, ExecutionSettings, StorageSettings }
 
 export interface NavisworksStatus {
   connected: boolean
@@ -262,12 +274,14 @@ export function normalizeSettings(value: unknown): DesktopSettings {
   const rawApiProfiles = Array.isArray(source.apiProfiles) ? source.apiProfiles : []
   const apiProfiles = rawApiProfiles.map((value, index): ApiProfile => {
     const profile = asRecord(value)
+    const rawAdvanced = asRecord(profile.advanced ?? {})
     return {
       id: String(profile.id ?? `api-${index}`),
       name: String(profile.name ?? 'API'),
       baseUrl: String(profile.baseUrl ?? ''),
       model: String(profile.model ?? ''),
-      hasApiKey: Boolean(profile.hasApiKey)
+      hasApiKey: Boolean(profile.hasApiKey),
+      advanced: normalizeProfileAdvanced(rawAdvanced)
     }
   })
 
@@ -288,8 +302,100 @@ export function normalizeSettings(value: unknown): DesktopSettings {
     ollamaEnabled: Boolean(source.ollamaEnabled ?? source.OllamaEnabled ?? true),
     apiEnabled: Boolean(source.apiEnabled ?? source.ApiEnabled ?? true),
     apiProfiles,
-    activeApiProfileId: typeof source.activeApiProfileId === 'string' ? source.activeApiProfileId : null
+    activeApiProfileId: typeof source.activeApiProfileId === 'string' ? source.activeApiProfileId : null,
+    execution: normalizeExecutionSettings(asRecord(source.execution ?? {})),
+    storage: normalizeStorageSettings(asRecord(source.storage ?? {}))
   }
+}
+
+function normalizeProfileAdvanced(value: Record<string, unknown>): ApiProfileAdvancedSettings {
+  return {
+    contextWindowTokens: nullableInt(value.contextWindowTokens, DEFAULT_API_PROFILE_ADVANCED.contextWindowTokens),
+    maxOutputTokens: nullableInt(value.maxOutputTokens, DEFAULT_API_PROFILE_ADVANCED.maxOutputTokens),
+    temperature: typeof value.temperature === 'number' && Number.isFinite(value.temperature)
+      ? Math.min(2, Math.max(0, value.temperature))
+      : DEFAULT_API_PROFILE_ADVANCED.temperature,
+    requestTimeoutMs: boundedInt(value.requestTimeoutMs, DEFAULT_API_PROFILE_ADVANCED.requestTimeoutMs, 5_000, 600_000),
+    maxTokensParameter: value.maxTokensParameter === 'max_tokens'
+      || value.maxTokensParameter === 'max_completion_tokens'
+      || value.maxTokensParameter === 'omit'
+      ? value.maxTokensParameter
+      : 'auto',
+    sendReasoningEffort: value.sendReasoningEffort === 'on' || value.sendReasoningEffort === 'off'
+      ? value.sendReasoningEffort
+      : 'auto',
+    sendStreamOptions: typeof value.sendStreamOptions === 'boolean'
+      ? value.sendStreamOptions
+      : DEFAULT_API_PROFILE_ADVANCED.sendStreamOptions
+  }
+}
+
+function normalizeExecutionSettings(value: Record<string, unknown>): ExecutionSettings {
+  return {
+    maxToolRounds: boundedInt(value.maxToolRounds, DEFAULT_EXECUTION_SETTINGS.maxToolRounds, 1, 64),
+    compactionEnabled: typeof value.compactionEnabled === 'boolean'
+      ? value.compactionEnabled
+      : DEFAULT_EXECUTION_SETTINGS.compactionEnabled,
+    compactionTriggerRatio: boundedNumber(
+      value.compactionTriggerRatio,
+      DEFAULT_EXECUTION_SETTINGS.compactionTriggerRatio,
+      0.5,
+      0.98,
+    ),
+    compactKeepRecentFrames: boundedInt(
+      value.compactKeepRecentFrames,
+      DEFAULT_EXECUTION_SETTINGS.compactKeepRecentFrames,
+      0,
+      20,
+    ),
+    compactMaxTranscriptChars: boundedInt(
+      value.compactMaxTranscriptChars,
+      DEFAULT_EXECUTION_SETTINGS.compactMaxTranscriptChars,
+      2_000,
+      200_000,
+    ),
+    historyMode: value.historyMode === 'fixed' ? 'fixed' : 'auto',
+    historyMessageLimit: nullableInt(value.historyMessageLimit, DEFAULT_EXECUTION_SETTINGS.historyMessageLimit),
+    toolResultMode: value.toolResultMode === 'fixed' ? 'fixed' : 'auto',
+    toolResultMaxChars: nullableInt(value.toolResultMaxChars, DEFAULT_EXECUTION_SETTINGS.toolResultMaxChars),
+    plannerMaxAttempts: boundedInt(value.plannerMaxAttempts, DEFAULT_EXECUTION_SETTINGS.plannerMaxAttempts, 1, 5),
+    plannerMaxSteps: boundedInt(value.plannerMaxSteps, DEFAULT_EXECUTION_SETTINGS.plannerMaxSteps, 1, 32),
+    plannerMaxTokens: nullableInt(value.plannerMaxTokens, DEFAULT_EXECUTION_SETTINGS.plannerMaxTokens),
+    verifierMaxAttempts: boundedInt(value.verifierMaxAttempts, DEFAULT_EXECUTION_SETTINGS.verifierMaxAttempts, 1, 5),
+    verifierMaxEvidence: boundedInt(value.verifierMaxEvidence, DEFAULT_EXECUTION_SETTINGS.verifierMaxEvidence, 2, 50),
+    maxTaskReplans: boundedInt(value.maxTaskReplans, DEFAULT_EXECUTION_SETTINGS.maxTaskReplans, 0, 16)
+  }
+}
+
+function normalizeStorageSettings(value: Record<string, unknown>): StorageSettings {
+  return {
+    maxSessions: boundedInt(value.maxSessions, DEFAULT_STORAGE_SETTINGS.maxSessions, 0, 10_000),
+    maxMessagesPerSession: boundedInt(
+      value.maxMessagesPerSession,
+      DEFAULT_STORAGE_SETTINGS.maxMessagesPerSession,
+      0,
+      10_000,
+    )
+  }
+}
+
+function boundedInt(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(max, Math.max(min, Math.trunc(parsed)))
+}
+
+function boundedNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(max, Math.max(min, parsed))
+}
+
+function nullableInt(value: unknown, fallback: number | null): number | null {
+  if (value === null || value === undefined || value === '') return fallback
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.trunc(parsed)
 }
 
 export function normalizeStatus(value: unknown): NavisworksStatus {

@@ -6,9 +6,11 @@ import {
   DEFAULT_APP_SETTINGS,
   JsonSessionRepository,
   JsonSettingsRepository,
+  SessionRepository,
   type AppSettings,
   type ConversationSession,
 } from '../sessionRepository'
+import { DEFAULT_API_PROFILE_ADVANCED } from '../../shared/ipc'
 
 const temporaryDirectories: string[] = []
 
@@ -201,6 +203,7 @@ describe('WPF-compatible JSON repositories', () => {
         model: 'qwen-plus',
         apiKeyCiphertext: 'encrypted-value',
         legacyApiKey: '',
+        advanced: { ...DEFAULT_API_PROFILE_ADVANCED },
       }],
       activeApiProfileId: 'profile-1',
     })).resolves.toBe(true)
@@ -254,3 +257,127 @@ async function createPaths() {
     sourceDescription: 'test',
   }
 }
+
+describe('settings migration — legacy limits become configurable policy', () => {
+  it('loads an old settings.json intact and fills execution/storage defaults', async () => {
+    const paths = await createPaths()
+    // Old disk contract: PascalCase, no Execution/Storage/Advanced anywhere.
+    await writeFile(path.join(paths.settingsFile), JSON.stringify({
+      SelectedModel: 'qwen3.5:9b-q4_K_M',
+      Models: ['qwen3.5:9b-q4_K_M'],
+      Plugins: [],
+      Skills: [],
+      ReasoningMode: 'high',
+      ActiveSessionId: null,
+      GpuVramGb: 8,
+      CustomProfileContextWindowTokens: 32768,
+      CustomProfileNumPredict: 2048,
+      ThemeMode: 'dark',
+      DisabledTools: ['navisworks_select_items'],
+      FontScale: 1.1,
+      PreferApiModel: true,
+      OllamaEnabled: true,
+      ApiEnabled: true,
+      ApiProfiles: [{
+        Id: 'profile-1',
+        Name: '我的 API',
+        BaseUrl: 'https://cloud.example.com/v1',
+        Model: 'qwen-plus',
+        ApiKeyCiphertext: 'encrypted-key-material',
+      }],
+      ActiveApiProfileId: 'profile-1',
+    }), 'utf8')
+
+    const repository = new JsonSettingsRepository(paths)
+    const loaded = await repository.load()
+    // Nothing the user configured may be lost.
+    expect(loaded?.apiProfiles[0]).toMatchObject({
+      id: 'profile-1',
+      baseUrl: 'https://cloud.example.com/v1',
+      apiKeyCiphertext: 'encrypted-key-material',
+    })
+    expect(loaded?.themeMode).toBe('dark')
+    expect(loaded?.reasoningMode).toBe('high')
+    expect(loaded?.disabledTools).toEqual(['navisworks_select_items'])
+    // Legacy local fields stay readable (migration/compat only).
+    expect(loaded?.gpuVramGb).toBe(8)
+    expect(loaded?.numPredict).toBe(2048)
+    // New policy groups arrive as complete defaults.
+    expect(loaded?.execution).toMatchObject({
+      maxToolRounds: 8,
+      historyMode: 'auto',
+      toolResultMode: 'auto',
+      maxTaskReplans: 2,
+    })
+    expect(loaded?.storage).toEqual({ maxSessions: 30, maxMessagesPerSession: 100 })
+    expect(loaded?.apiProfiles[0]?.advanced).toMatchObject({
+      contextWindowTokens: null,
+      maxOutputTokens: null,
+      maxTokensParameter: 'auto',
+    })
+  })
+
+  it('persists execution/storage/profile-advanced when saving updated settings', async () => {
+    const paths = await createPaths()
+    const repository = new JsonSettingsRepository(paths)
+    await expect(repository.save({
+      ...DEFAULT_APP_SETTINGS,
+      apiProfiles: [{
+        id: 'profile-1',
+        name: '测试 API',
+        baseUrl: 'https://cloud.example.com/v1',
+        model: 'qwen-plus',
+        apiKeyCiphertext: '',
+        legacyApiKey: '',
+        advanced: {
+          ...DEFAULT_API_PROFILE_ADVANCED,
+          contextWindowTokens: 131_072,
+          maxOutputTokens: 8_192,
+          maxTokensParameter: 'max_completion_tokens',
+        },
+      }],
+      execution: { ...DEFAULT_APP_SETTINGS.execution, maxToolRounds: 24, maxTaskReplans: 4 },
+      storage: { maxSessions: 0, maxMessagesPerSession: 0 },
+    })).resolves.toBe(true)
+
+    const onDisk = JSON.parse(await readFile(path.join(paths.settingsFile), 'utf8'))
+    expect(onDisk.Execution.maxToolRounds).toBe(24)
+    expect(onDisk.Execution.maxTaskReplans).toBe(4)
+    expect(onDisk.Storage).toEqual({ maxSessions: 0, maxMessagesPerSession: 0 })
+    expect(onDisk.ApiProfiles[0].Advanced).toMatchObject({
+      contextWindowTokens: 131_072,
+      maxOutputTokens: 8_192,
+      maxTokensParameter: 'max_completion_tokens',
+    })
+
+    // And it round-trips back through load.
+    const reloaded = await repository.load()
+    expect(reloaded?.execution.maxToolRounds).toBe(24)
+    expect(reloaded?.storage.maxSessions).toBe(0)
+    expect(reloaded?.apiProfiles[0]?.advanced.contextWindowTokens).toBe(131_072)
+  })
+
+  it('storage 0 disables count-based trimming (disk history survives)', async () => {
+    const paths = await createPaths()
+    const repository = new SessionRepository(paths)
+    await repository.updateSettings({ storage: { maxSessions: 0, maxMessagesPerSession: 0 } })
+    for (let index = 0; index < 35; index += 1) {
+      await repository.saveSession({
+        id: `00000000-0000-0000-0000-${String(index).padStart(12, '0')}`,
+        title: `会话 ${index}`,
+        preview: '',
+        updatedAt: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}.000+08:00`,
+        messages: Array.from({ length: 120 }, () => ({
+          role: 'user', content: 'm', isTransient: false, thinkingText: '', tools: [],
+        })),
+        contextTokensUsed: 0,
+        pinnedAt: null,
+      })
+    }
+    const listed = await repository.listSessions()
+    expect(listed.length).toBe(35)
+    const newest = listed.find((session) =>
+      session.id === '00000000-0000-0000-0000-000000000034')
+    expect(newest?.messages).toHaveLength(120)
+  })
+})

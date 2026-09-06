@@ -44,6 +44,7 @@ import { Sidebar } from './Sidebar'
 import { TitleBar } from './TitleBar'
 import { SearchOverlay } from './SearchOverlay'
 import { SettingsPanel, type SettingsPageId } from './SettingsPanel'
+import { DEFAULT_EXECUTION_SETTINGS, DEFAULT_STORAGE_SETTINGS } from '../shared/ipc'
 import {
   deriveNavisworksRebindState,
   navisworksRebindStateKey,
@@ -61,7 +62,9 @@ const DEFAULT_SETTINGS: DesktopSettings = {
   ollamaEnabled: true,
   apiEnabled: true,
   apiProfiles: [],
-  activeApiProfileId: null
+  activeApiProfileId: null,
+  execution: DEFAULT_EXECUTION_SETTINGS,
+  storage: DEFAULT_STORAGE_SETTINGS
 }
 
 const DEFAULT_NAVISWORKS_STATUS: NavisworksStatus = {
@@ -1056,6 +1059,7 @@ export default function App() {
             }}
             onModelChange={(selectedModel) => updateSettings({ ...settings, selectedModel, preferApiModel: false })}
             onDisabledToolsChange={(disabledTools) => updateSettings({ ...settings, disabledTools })}
+            onExecutionSettingsChange={(execution) => updateSettings({ ...settings, execution })}
             onRefreshModels={refreshModels}
             onFetchCloudModels={(profileId) => desktopGateway.listApiProfileModels(profileId)}
             cloudLatency={cloudLatency}

@@ -73,20 +73,36 @@ const MAX_ATTEMPTS = 2
 const MAX_TEXT_CHARS = 400
 const MAX_RENDERED_EVIDENCE = 12
 
+export interface VerifierOptions {
+  /** Structured-output attempts before degrading (execution settings). */
+  maxAttempts?: number
+  /** Evidence summaries rendered into the verification request. */
+  maxEvidence?: number
+}
+
+function resolveVerifierOptions(options: VerifierOptions | undefined): { maxAttempts: number; maxEvidence: number } {
+  return {
+    maxAttempts: Math.min(5, Math.max(1, options?.maxAttempts ?? MAX_ATTEMPTS)),
+    maxEvidence: Math.min(50, Math.max(2, options?.maxEvidence ?? MAX_RENDERED_EVIDENCE)),
+  }
+}
+
 export class TaskVerifier {
   async verify(
     provider: ModelProvider,
     model: string,
     request: VerificationRequest,
     signal?: AbortSignal,
+    options?: VerifierOptions,
   ): Promise<TaskVerification | null> {
     const { task } = request
+    const { maxAttempts, maxEvidence } = resolveVerifierOptions(options)
     const user = [
       `任务目标：${task.objective}`,
       `完成条件：\n${task.completionCriteria.map((entry) => `- ${entry}`).join('\n') || '（未定义）'}`,
       `步骤状态：\n${task.steps.map((step) => `${step.id}. [${step.status}] ${step.title}`).join('\n') || '（无步骤）'}`,
       `证据摘要（编号即证据 id）：\n${task.evidence
-        .slice(-MAX_RENDERED_EVIDENCE)
+        .slice(-maxEvidence)
         .map((entry) => `- ${entry.id} ${entry.toolName ?? entry.type}：${clip(entry.summary, 200)}`)
         .join('\n') || '（无）'}`,
       request.recentToolOutcomes?.length
@@ -100,7 +116,7 @@ export class TaskVerifier {
         : undefined,
     ].filter((entry) => entry !== undefined).join('\n\n')
 
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const call = await emitInternalToolCall(
         provider,
         model,

@@ -192,3 +192,48 @@ describe('renderReferenceSetBlock', () => {
     expect(renderReferenceSetBlock(null)).toBe('')
   })
 })
+
+describe('Selection freshness — live state never crosses a user turn', () => {
+  it('drops the selection fact from new context even when it is seconds old', () => {
+    // Last turn: get_selection returned 6 items. This turn assembles a new
+    // context: those 6 ids must NOT arrive as a "current selection" fact —
+    // the user may have re-selected in the Navisworks UI in between.
+    const state = new ContextState()
+    state.observe({ documentInstanceId: 'doc-A', bridgeSessionId: 'b1' })
+    state.ingestToolResult('navisworks_get_selection', {
+      items: [{ id: 'i-1' }, { id: 'i-2' }, { id: 'i-3' }, { id: 'i-4' }, { id: 'i-5' }, { id: 'i-6' }],
+    }, 'call-1')
+    expect(state.factsForCurrentDocument().some((fact) => fact.type === 'selection')).toBe(false)
+    // The raw tool message carried the value in its own run; the historical
+    // reference set still exists for "刚才那些 / 第 N 个" usage.
+    expect(state.lastRelevantReferenceSet()?.kind).toBe('selection')
+  })
+})
+
+describe('renderReferenceSetBlock — selection is a historical reference', () => {
+  it('labels a selection set as historical and demands a fresh get_selection for live state', () => {
+    const block = renderReferenceSetBlock({
+      id: 'rs', documentInstanceId: 'doc', sourceToolCallId: 'c', kind: 'selection',
+      orderedRefs: ['idA', 'idB', 'idC'],
+      createdAt: 0,
+    })
+    expect(block).toContain('历史引用')
+    expect(block).toContain('不是当前实时 Selection')
+    expect(block).toContain('navisworks_get_selection')
+    expect(block).not.toContain('当前选择（按结果顺序')
+    // Historical ordinals keep working: "刚才那 6 个里的第 2 个" resolves here.
+    expect(block).toContain('1. idA')
+    expect(block).toContain('2. idB')
+    expect(block).toContain('3. idC')
+  })
+
+  it('keeps non-selection sets on the plain ordered-list wording', () => {
+    const block = renderReferenceSetBlock({
+      id: 'rs', documentInstanceId: 'doc', sourceToolCallId: 'c', kind: 'items',
+      orderedRefs: ['idA'],
+      createdAt: 0,
+    })
+    expect(block).toContain('最近结果集')
+    expect(block).not.toContain('历史引用')
+  })
+})

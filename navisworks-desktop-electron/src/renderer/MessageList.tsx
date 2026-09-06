@@ -13,11 +13,13 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState
 } from 'react'
 import type { ChatMessage, ToolCall } from './chatTypes'
 import { displayValue } from './chatTypes'
+import { BottomFollowController } from './bottomFollow'
 import { ConversationColumn } from './ConversationColumn'
 import {
   NAV_ANCHOR_OFFSET_PX,
@@ -351,7 +353,12 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
   const scrollerRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<HTMLElement>(null)
   const navRef = useRef<HTMLDivElement>(null)
-  const shouldFollowRef = useRef(true)
+  // Bottom-follow state machine (bottomFollow.ts): whether new content keeps
+  // the view pinned to the bottom, and which scroll events are programmatic
+  // echoes vs real user intent. Pure logic, unit-tested without a DOM.
+  const followRef = useRef<BottomFollowController | null>(null)
+  if (followRef.current === null) followRef.current = new BottomFollowController()
+  const follow = followRef.current
   const [showBottomButton, setShowBottomButton] = useState(false)
   const [navHover, setNavHover] = useState<{ id: string; top: number } | null>(null)
   const [isNavDragging, setIsNavDragging] = useState(false)
@@ -369,11 +376,24 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
   // itself never scrolls (overflow is hidden; it is the scrubber already).
   const navGap = turns.length > 40 ? '2px' : turns.length > 24 ? '4px' : '7px'
 
-  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+  // Streaming / composer auto-follow is ALWAYS instant: a smooth anchor is
+  // exactly what created the lost-follow race (its intermediate scroll events
+  // fired before reaching the bottom and were read as "the user left").
+  const anchorToBottomInstant = () => {
     const scroller = scrollerRef.current
     if (!scroller) return
-    scroller.scrollTo({ top: scroller.scrollHeight, behavior })
-    shouldFollowRef.current = true
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'instant' })
+    follow.recordInstantAnchor(scroller.scrollTop)
+  }
+
+  // Explicit "回到底部" click: smooth on purpose. The follow latch tolerates
+  // the intermediate scroll events and re-engages on arrival; user input
+  // mid-travel clears it and the real position decides.
+  const scrollToBottomSmooth = () => {
+    const scroller = scrollerRef.current
+    if (!scroller) return
+    follow.beginSmoothTravel()
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' })
     setShowBottomButton(false)
   }
 
@@ -382,6 +402,9 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
   const scrollToMessage = (id: string) => {
     const scroller = scrollerRef.current
     if (!scroller) return
+    // A nav jump is explicit user navigation: clear any programmatic guards
+    // so the travel is judged by real positions alone.
+    follow.userInterrupted()
     const target = scroller.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
     if (!target) return
     const delta = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top
@@ -416,6 +439,9 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
   // stays under the threshold releases as a smooth click jump to the anchor.
   const beginNavDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
+    // Scrubbing is user intent: clear any programmatic guards so the drag's
+    // scroll events are judged by real position (bottom → follow, else not).
+    follow.userInterrupted()
     const scroller = scrollerRef.current
     const nav = event.currentTarget
     if (!scroller) return
@@ -559,16 +585,52 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
   const hoveredTurnIndex = navHover ? turnIndexOfMessage.get(navHover.id) : undefined
   const activeTurn = hoveredTurnIndex == null ? undefined : turns[hoveredTurnIndex]
 
-  useEffect(() => {
-    if (!shouldFollowRef.current) return
-    // Snapping into a session (first open or switch) should land at the
-    // latest message with no travel; new messages arriving in the same
-    // session still smooth-follow. 'instant' overrides the scroller's CSS
-    // scroll-behavior: smooth.
+  // Bottom anchor for message / composer changes. useLayoutEffect so the pin
+  // happens BEFORE the browser paints — otherwise the last content flashes
+  // behind the composer for a frame before a late correction.
+  useLayoutEffect(() => {
+    const scroller = scrollerRef.current
+    if (!scroller) return
     const switched = prevSessionRef.current !== sessionTitle
     prevSessionRef.current = sessionTitle
-    scrollToBottom(switched ? 'instant' : 'auto')
+    if (switched) {
+      // Snapping into a session (first open or switch) always lands at the
+      // latest message instantly and re-engages follow, whatever the user was
+      // doing in the previous session.
+      follow.resetToFollowing()
+      anchorToBottomInstant()
+      setShowBottomButton(false)
+      return
+    }
+    if (!follow.following) return
+    anchorToBottomInstant()
   }, [messages, composerClearance, sessionTitle])
+
+  // Content height changes that don't ride on a messages-array update — tool
+  // details expanding, thinking blocks growing, font reflow — must also keep
+  // the bottom pinned WHILE following, and must never move the view while the
+  // user is reading history.
+  useEffect(() => {
+    const scroller = scrollerRef.current
+    const column = scroller?.querySelector<HTMLElement>('.message-column')
+    if (!scroller || !column) return
+    let frame = 0
+    const observer = new ResizeObserver(() => {
+      if (!follow.following || frame !== 0) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        const current = scrollerRef.current
+        if (!current || !follow.following) return
+        current.scrollTo({ top: current.scrollHeight, behavior: 'instant' })
+        follow.recordInstantAnchor(current.scrollTop)
+      })
+    })
+    observer.observe(column)
+    return () => {
+      observer.disconnect()
+      if (frame !== 0) cancelAnimationFrame(frame)
+    }
+  }, [])
 
   // Hide the rail the instant the conversation column's left edge meets it —
   // a layout collision, not a window-width breakpoint. The rail is absolute
@@ -625,11 +687,14 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
         aria-relevant="additions"
         tabIndex={0}
         onScroll={(event) => {
-          const scroller = event.currentTarget
-          const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 64
-          shouldFollowRef.current = atBottom
-          setShowBottomButton(!atBottom && messages.length > 0)
-        }}>
+          // The follow controller decides whether this event is a programmatic
+          // echo (ignored) or real movement (follow = am I at the bottom?).
+          const following = follow.onScroll(event.currentTarget)
+          setShowBottomButton(!following && messages.length > 0)
+        }}
+        onWheel={() => follow.userInterrupted()}
+        onTouchStart={() => follow.userInterrupted()}
+        onPointerDown={() => follow.userInterrupted()}>
         <ConversationColumn className="message-column">
           {/* Rendered only with at least one message: the empty state lives in
               the composer hero variant now. */}
@@ -693,7 +758,7 @@ export function MessageList({ messages, sessionTitle, composerClearance, onRetry
         <button
           className="scroll-bottom-button"
           type="button"
-          onClick={() => scrollToBottom()}
+          onClick={scrollToBottomSmooth}
           aria-label="回到最新消息">
           <ChevronDown aria-hidden="true" size={18} />
         </button>

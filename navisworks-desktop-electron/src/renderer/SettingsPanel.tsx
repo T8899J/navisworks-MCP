@@ -3,6 +3,7 @@ import {
   Check,
   ChevronDown,
   Database,
+  Gauge,
   KeyRound,
   LoaderCircle,
   MonitorCog,
@@ -17,7 +18,7 @@ import {
   useRef,
   useState
 } from 'react'
-import type { ThemeMode, ToolName } from '../shared/ipc'
+import type { ExecutionSettings, ThemeMode, ToolName } from '../shared/ipc'
 import type { DesktopSettings } from './chatTypes'
 
 export interface RuntimeDiagnostics {
@@ -167,6 +168,8 @@ interface SettingsPanelProps {
   onDeleteApiProfile(profileId: string): Promise<DesktopSettings>
   onModelChange(model: string): void | Promise<void>
   onDisabledToolsChange(disabledTools: ToolName[]): void | Promise<void>
+  /** Persist a patch of the run-scoped execution policy (执行页). */
+  onExecutionSettingsChange(execution: ExecutionSettings): void | Promise<void>
   onRefreshModels(): void | Promise<void>
   /** Lists models from the given OpenAI-compatible endpoint (cloud fetch). */
   onFetchCloudModels(profileId: string): Promise<string[]>
@@ -176,7 +179,92 @@ interface SettingsPanelProps {
   onTestApiProfile(profileId: string): Promise<{ connected: boolean; message: string }>
 }
 
-export type SettingsPageId = 'appearance' | 'model' | 'tools' | 'runtime'
+/** Execution-page number input: commit on blur/Enter, bounded by the schema. */
+function NumberField({
+  id,
+  value,
+  fallback,
+  min,
+  max,
+  disabled,
+  onCommit
+}: {
+  id: string
+  value: number | null
+  fallback: number
+  min: number
+  max: number
+  disabled?: boolean
+  onCommit(value: number | null): void
+}) {
+  const [text, setText] = useState(value === null ? '' : String(value))
+  useEffect(() => {
+    setText(value === null ? '' : String(value))
+  }, [value])
+  const commit = () => {
+    const parsed = Number(text)
+    if (text.trim() === '' || !Number.isFinite(parsed)) {
+      onCommit(null)
+      return
+    }
+    onCommit(Math.min(max, Math.max(min, Math.trunc(parsed))))
+  }
+  return (
+    <input
+      id={id}
+      className="execution-number-input"
+      type="number"
+      inputMode="numeric"
+      min={min}
+      max={max}
+      step={1}
+      value={text}
+      placeholder={String(fallback)}
+      disabled={disabled}
+      onChange={(event) => setText(event.currentTarget.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.currentTarget.blur()
+        }
+      }}
+    />
+  )
+}
+
+/** Auto / fixed segmented choice for the history and tool-result policies. */
+function ModeField({
+  id,
+  value,
+  onChange
+}: {
+  id: string
+  value: 'auto' | 'fixed'
+  onChange(value: 'auto' | 'fixed'): void
+}) {
+  return (
+    <fieldset className="theme-choice execution-mode-choice" id={id}>
+      {([
+        ['auto', 'Auto', '按上下文预算自动决定'],
+        ['fixed', '固定', '使用下方固定值']
+      ] as const).map(([mode, label, hint]) => (
+        <label className="theme-option" data-selected={value === mode} key={mode}>
+          <input
+            type="radio"
+            name={id}
+            value={mode}
+            checked={value === mode}
+            onChange={() => onChange(mode)}
+          />
+          <span><strong>{label}</strong><small>{hint}</small></span>
+        </label>
+      ))}
+    </fieldset>
+  )
+}
+
+export type SettingsPageId = 'appearance' | 'model' | 'tools' | 'execution' | 'runtime'
+
 
 export const SETTINGS_PAGES: Array<{
   id: SettingsPageId
@@ -186,8 +274,258 @@ export const SETTINGS_PAGES: Array<{
   { id: 'appearance', label: '外观', icon: Palette },
   { id: 'model', label: '模型', icon: Bot },
   { id: 'tools', label: '工具', icon: Wrench },
+  { id: 'execution', label: '执行', icon: Gauge },
   { id: 'runtime', label: '运行信息', icon: Database }
 ]
+
+/**
+ * 执行页: the run-scoped agent execution policy. Everything applies on the
+ * NEXT message — no restart — because chat.start passes the fresh settings
+ * into the runtime every run. Advanced planner/verifier numbers live in a
+ * collapsed 高级 area.
+ */
+function ExecutionPage({
+  execution,
+  disabled,
+  onChange
+}: {
+  execution: ExecutionSettings
+  disabled: boolean
+  onChange(patch: Partial<ExecutionSettings>): void
+}) {
+  return (
+    <>
+      <div className="settings-row">
+        <label htmlFor="execution-max-tool-rounds">
+          最大工具轮数
+          <small>单次对话中模型连续调用工具的上限（1–64）</small>
+        </label>
+        <NumberField
+          id="execution-max-tool-rounds"
+          value={execution.maxToolRounds}
+          fallback={8}
+          min={1}
+          max={64}
+          disabled={disabled}
+          onCommit={(value) => onChange({ maxToolRounds: value ?? 8 })}
+        />
+      </div>
+
+      <h4 className="settings-group-title">上下文压缩</h4>
+      <div className="settings-row">
+        <label htmlFor="execution-compaction-enabled">
+          自动压缩
+          <small>接近上下文窗口时自动总结早期对话</small>
+        </label>
+        <input
+          id="execution-compaction-enabled"
+          className="settings-switch"
+          type="checkbox"
+          checked={execution.compactionEnabled}
+          disabled={disabled}
+          onChange={(event) => onChange({ compactionEnabled: event.currentTarget.checked })}
+        />
+      </div>
+      <div className="settings-row">
+        <label htmlFor="execution-compaction-ratio">
+          压缩触发阈值
+          <small>上下文占用达到窗口比例后触发（0.5–0.98）</small>
+        </label>
+        <NumberField
+          id="execution-compaction-ratio"
+          value={Math.round(execution.compactionTriggerRatio * 100)}
+          fallback={85}
+          min={50}
+          max={98}
+          disabled={disabled || !execution.compactionEnabled}
+          onCommit={(value) => onChange({ compactionTriggerRatio: (value ?? 85) / 100 })}
+        />
+      </div>
+      <div className="settings-row">
+        <label htmlFor="execution-compact-keep">
+          压缩保留最近帧
+          <small>压缩时保留最近几轮完整对话（0–20）</small>
+        </label>
+        <NumberField
+          id="execution-compact-keep"
+          value={execution.compactKeepRecentFrames}
+          fallback={1}
+          min={0}
+          max={20}
+          disabled={disabled || !execution.compactionEnabled}
+          onCommit={(value) => onChange({ compactKeepRecentFrames: value ?? 1 })}
+        />
+      </div>
+
+      <h4 className="settings-group-title">模型上下文</h4>
+      <div className="settings-row tool-row">
+        <label htmlFor="execution-history-mode">
+          历史上下文策略
+          <small>Auto 将完整历史交给按 Token 预算裁剪</small>
+        </label>
+        <ModeField
+          id="execution-history-mode"
+          value={execution.historyMode}
+          onChange={(historyMode) => onChange({ historyMode })}
+        />
+      </div>
+      {execution.historyMode === 'fixed' ? (
+        <div className="settings-row">
+          <label htmlFor="execution-history-limit">
+            历史消息条数
+            <small>固定模式下进入上下文的最大消息数（4–1000）</small>
+          </label>
+          <NumberField
+            id="execution-history-limit"
+            value={execution.historyMessageLimit}
+            fallback={24}
+            min={4}
+            max={1000}
+            disabled={disabled}
+            onCommit={(value) => onChange({ historyMessageLimit: value ?? 24 })}
+          />
+        </div>
+      ) : null}
+      <div className="settings-row tool-row">
+        <label htmlFor="execution-tool-result-mode">
+          工具结果上下文
+          <small>Auto 按剩余上下文预算动态放大工具结果</small>
+        </label>
+        <ModeField
+          id="execution-tool-result-mode"
+          value={execution.toolResultMode}
+          onChange={(toolResultMode) => onChange({ toolResultMode })}
+        />
+      </div>
+      {execution.toolResultMode === 'fixed' ? (
+        <div className="settings-row">
+          <label htmlFor="execution-tool-result-chars">
+            工具结果字符上限
+            <small>固定模式下每个工具结果注入的字符数（500–200000）</small>
+          </label>
+          <NumberField
+            id="execution-tool-result-chars"
+            value={execution.toolResultMaxChars}
+            fallback={4000}
+            min={500}
+            max={200000}
+            disabled={disabled}
+            onCommit={(value) => onChange({ toolResultMaxChars: value ?? 4000 })}
+          />
+        </div>
+      ) : null}
+
+      <details className="execution-advanced">
+        <summary>高级</summary>
+        <div className="settings-row">
+          <label htmlFor="execution-planner-attempts">
+            Planner 最大尝试
+            <small>任务规划结构化输出的尝试次数（1–5）</small>
+          </label>
+          <NumberField
+            id="execution-planner-attempts"
+            value={execution.plannerMaxAttempts}
+            fallback={2}
+            min={1}
+            max={5}
+            disabled={disabled}
+            onCommit={(value) => onChange({ plannerMaxAttempts: value ?? 2 })}
+          />
+        </div>
+        <div className="settings-row">
+          <label htmlFor="execution-planner-steps">
+            Planner 最大步骤
+            <small>单个任务计划包含的步骤上限（1–32）</small>
+          </label>
+          <NumberField
+            id="execution-planner-steps"
+            value={execution.plannerMaxSteps}
+            fallback={10}
+            min={1}
+            max={32}
+            disabled={disabled}
+            onCommit={(value) => onChange({ plannerMaxSteps: value ?? 10 })}
+          />
+        </div>
+        <div className="settings-row">
+          <label htmlFor="execution-planner-tokens">
+            Planner 输出上限
+            <small>留空 = Auto（不发送输出限制）</small>
+          </label>
+          <NumberField
+            id="execution-planner-tokens"
+            value={execution.plannerMaxTokens}
+            fallback={2048}
+            min={256}
+            max={200000}
+            disabled={disabled}
+            onCommit={(value) => onChange({ plannerMaxTokens: value ?? 2048 })}
+          />
+        </div>
+        <div className="settings-row">
+          <label htmlFor="execution-verifier-attempts">
+            Verifier 最大尝试
+            <small>完成度验证结构化输出的尝试次数（1–5）</small>
+          </label>
+          <NumberField
+            id="execution-verifier-attempts"
+            value={execution.verifierMaxAttempts}
+            fallback={2}
+            min={1}
+            max={5}
+            disabled={disabled}
+            onCommit={(value) => onChange({ verifierMaxAttempts: value ?? 2 })}
+          />
+        </div>
+        <div className="settings-row">
+          <label htmlFor="execution-verifier-evidence">
+            Verifier 最大 Evidence
+            <small>验证时展示的证据摘要条数（2–50）</small>
+          </label>
+          <NumberField
+            id="execution-verifier-evidence"
+            value={execution.verifierMaxEvidence}
+            fallback={12}
+            min={2}
+            max={50}
+            disabled={disabled}
+            onCommit={(value) => onChange({ verifierMaxEvidence: value ?? 12 })}
+          />
+        </div>
+        <div className="settings-row">
+          <label htmlFor="execution-max-replans">
+            最大 Replan 次数
+            <small>超出后任务转为阻塞（0–16）</small>
+          </label>
+          <NumberField
+            id="execution-max-replans"
+            value={execution.maxTaskReplans}
+            fallback={2}
+            min={0}
+            max={16}
+            disabled={disabled}
+            onCommit={(value) => onChange({ maxTaskReplans: value ?? 2 })}
+          />
+        </div>
+        <div className="settings-row">
+          <label htmlFor="execution-compact-transcript">
+            压缩输入字符上限
+            <small>送入压缩器的对话文本上限（2000–200000）</small>
+          </label>
+          <NumberField
+            id="execution-compact-transcript"
+            value={execution.compactMaxTranscriptChars}
+            fallback={30000}
+            min={2000}
+            max={200000}
+            disabled={disabled || !execution.compactionEnabled}
+            onCommit={(value) => onChange({ compactMaxTranscriptChars: value ?? 30000 })}
+          />
+        </div>
+      </details>
+    </>
+  )
+}
 
 export function SettingsPanel({
   settings,
@@ -202,6 +540,7 @@ export function SettingsPanel({
   onDeleteApiProfile,
   onModelChange,
   onDisabledToolsChange,
+  onExecutionSettingsChange,
   onRefreshModels,
   onFetchCloudModels,
   cloudLatency,
@@ -685,6 +1024,14 @@ export function SettingsPanel({
                   })}
                 </div>
               </>
+            ) : null}
+
+            {activePage === 'execution' ? (
+              <ExecutionPage
+                execution={settings.execution}
+                disabled={!serviceAvailable}
+                onChange={(patch) => void onExecutionSettingsChange({ ...settings.execution, ...patch })}
+              />
             ) : null}
 
             {activePage === 'runtime' ? (

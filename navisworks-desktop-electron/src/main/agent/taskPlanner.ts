@@ -107,13 +107,38 @@ export interface ReplanDecision {
 const MAX_PLANNER_ATTEMPTS = 2
 const MAX_STEPS = 10
 const MAX_CRITERIA = 10
+const MAX_PLANNER_TOKENS = 2048
 const MAX_OBJECTIVE_CHARS = 300
 const MAX_TEXT_CHARS = 200
 
+export interface PlannerOptions {
+  /** Structured-output attempts before degrading (execution settings). */
+  maxAttempts?: number
+  /** Upper bound on emitted plan steps (execution settings). */
+  maxSteps?: number
+  /** Sampling cap for the planner request; null sends no max_tokens field. */
+  maxTokens?: number | null
+}
+
+function resolvePlannerOptions(
+  options: PlannerOptions | undefined,
+): { maxAttempts: number; maxSteps: number; maxTokens: number | null } {
+  const merged = { ...options }
+  return {
+    maxAttempts: Math.min(5, Math.max(1, merged.maxAttempts ?? MAX_PLANNER_ATTEMPTS)),
+    maxSteps: Math.min(32, Math.max(1, merged.maxSteps ?? MAX_STEPS)),
+    maxTokens: merged.maxTokens === undefined
+      ? MAX_PLANNER_TOKENS
+      : merged.maxTokens === null
+        ? null
+        : Math.min(200_000, Math.max(256, merged.maxTokens)),
+  }
+}
+
 /**
  * One planner round-trip. Returns null when the model never emitted a valid
- * internal tool call (after one retry) — the caller then degrades to the
- * plain agent flow instead of blocking the user's task.
+ * internal tool call (after the configured attempts) — the caller then
+ * degrades to the plain agent flow instead of blocking the user's task.
  */
 export class TaskPlanner {
   async plan(
@@ -121,7 +146,9 @@ export class TaskPlanner {
     model: string,
     request: TaskPlanRequest,
     signal?: AbortSignal,
+    options?: PlannerOptions,
   ): Promise<TaskPlanDecision | null> {
+    const { maxAttempts, maxSteps, maxTokens } = resolvePlannerOptions(options)
     const user = [
       `用户目标：${clip(request.userGoal, 1000)}`,
       request.constraints.length > 0
@@ -133,9 +160,11 @@ export class TaskPlanner {
         .join('\n')}`,
     ].filter((entry) => entry !== undefined).join('\n\n')
 
-    for (let attempt = 0; attempt < MAX_PLANNER_ATTEMPTS; attempt += 1) {
-      const call = await emitInternalToolCall(provider, model, PLANNER_SYSTEM_PROMPT, user, TASK_PLAN_TOOL, signal)
-      const decision = call === undefined ? undefined : parsePlanArguments(call.arguments)
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const call = await emitInternalToolCall(
+        provider, model, PLANNER_SYSTEM_PROMPT, user, TASK_PLAN_TOOL, signal, maxTokens,
+      )
+      const decision = call === undefined ? undefined : parsePlanArguments(call.arguments, maxSteps)
       if (decision !== undefined) return decision
       logPlannerRetry(attempt)
     }
@@ -147,7 +176,9 @@ export class TaskPlanner {
     model: string,
     request: ReplanRequest,
     signal?: AbortSignal,
+    options?: PlannerOptions,
   ): Promise<ReplanDecision | null> {
+    const { maxAttempts, maxSteps, maxTokens } = resolvePlannerOptions(options)
     const { task } = request
     const user = [
       `任务目标：${task.objective}`,
@@ -164,9 +195,11 @@ export class TaskPlanner {
         .join('\n') || '（无）'}`,
     ].filter((entry) => entry !== undefined).join('\n\n')
 
-    for (let attempt = 0; attempt < MAX_PLANNER_ATTEMPTS; attempt += 1) {
-      const call = await emitInternalToolCall(provider, model, REPLAN_SYSTEM_PROMPT, user, TASK_PLAN_TOOL, signal)
-      const decision = call === undefined ? undefined : parseReplanArguments(call.arguments)
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const call = await emitInternalToolCall(
+        provider, model, REPLAN_SYSTEM_PROMPT, user, TASK_PLAN_TOOL, signal, maxTokens,
+      )
+      const decision = call === undefined ? undefined : parseReplanArguments(call.arguments, maxSteps)
       if (decision !== undefined) return decision
       logPlannerRetry(attempt)
     }
@@ -178,7 +211,7 @@ const MAX_EVIDENCE_CHARS = 200
 
 /** Shared internal-call mechanics: windowless request offering exactly one
  * internal tool, whose emitted arguments carry the structured decision. A
- * provider failure counts as an invalid attempt (retry once, then degrade). */
+ * provider failure counts as an invalid attempt (retry, then degrade). */
 export async function emitInternalToolCall(
   provider: ModelProvider,
   model: string,
@@ -186,6 +219,7 @@ export async function emitInternalToolCall(
   userContent: string,
   tool: { type: 'function'; function: { name: string; description: string; parameters: unknown } },
   signal?: AbortSignal,
+  maxTokens?: number | null,
 ): Promise<{ name: string; arguments: Record<string, unknown> } | undefined> {
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
@@ -198,7 +232,10 @@ export async function emitInternalToolCall(
       messages,
       tools: [tool as unknown as AgentToolContract],
       think: false,
-      sampling: { temperature: 0, maxTokens: 2048 },
+      sampling: {
+        temperature: 0,
+        ...(maxTokens === null ? {} : { maxTokens: maxTokens ?? MAX_PLANNER_TOKENS }),
+      },
       ...(signal ? { signal } : {}),
     })
   } catch (error) {
@@ -221,12 +258,15 @@ function logPlannerRetry(attempt: number): void {
   console.debug(`[task] planner response invalid (attempt ${attempt + 1})`)
 }
 
-function parsePlanArguments(arguments_: Record<string, unknown>): TaskPlanDecision | undefined {
+function parsePlanArguments(
+  arguments_: Record<string, unknown>,
+  maxSteps = MAX_STEPS,
+): TaskPlanDecision | undefined {
   if (typeof arguments_.needsTask !== 'boolean') return undefined
   if (!arguments_.needsTask) return { needsTask: false }
   const objective = typeof arguments_.objective === 'string' ? arguments_.objective.trim() : ''
   if (!objective) return undefined
-  const steps = parseSteps(arguments_.steps)
+  const steps = parseSteps(arguments_.steps, maxSteps)
   if (steps === undefined || steps.length === 0) return undefined
   const criteria = parseStringList(arguments_.completionCriteria)
   return {
@@ -241,9 +281,12 @@ function parsePlanArguments(arguments_: Record<string, unknown>): TaskPlanDecisi
   }
 }
 
-function parseReplanArguments(arguments_: Record<string, unknown>): ReplanDecision | undefined {
+function parseReplanArguments(
+  arguments_: Record<string, unknown>,
+  maxSteps = MAX_STEPS,
+): ReplanDecision | undefined {
   if (arguments_.needsTask === false) return undefined
-  const steps = parseSteps(arguments_.steps)
+  const steps = parseSteps(arguments_.steps, maxSteps)
   if (steps === undefined || steps.length === 0) return undefined
   const objective = typeof arguments_.objective === 'string' && arguments_.objective.trim()
     ? clip(arguments_.objective.trim(), MAX_OBJECTIVE_CHARS)
@@ -256,10 +299,10 @@ function parseReplanArguments(arguments_: Record<string, unknown>): ReplanDecisi
   }
 }
 
-function parseSteps(value: unknown): TaskStepInput[] | undefined {
+function parseSteps(value: unknown, maxSteps = MAX_STEPS): TaskStepInput[] | undefined {
   if (!Array.isArray(value)) return undefined
   const steps: TaskStepInput[] = []
-  for (const entry of value.slice(0, MAX_STEPS)) {
+  for (const entry of value.slice(0, maxSteps)) {
     if (typeof entry !== 'object' || entry === null) return undefined
     const record = entry as Record<string, unknown>
     const title = typeof record.title === 'string' ? record.title.trim() : ''

@@ -263,7 +263,7 @@ function adaptModelAgent(runtime: AgentRuntime, router: ModelRouter): OllamaAgen
     run: (input, options) => runAgent(runtime, input, options),
     // Title summaries stay on the local model; the method itself forces a
     // tiny budget so retitleing never competes with the main reply.
-    summarizeTitle: (text, signal) => runtime.summarizeTitle(text, signal),
+    summarizeTitle: (text, signal, api) => runtime.summarizeTitle(text, signal, api),
     // Manual /compact follows the active chat endpoint, or the local model.
     compact: (messages, input, options) =>
       runtime.compactConversation(messages, input, options?.signal),
@@ -319,6 +319,7 @@ async function runAgent(
       sessionId: input.sessionId,
       text: input.text,
       history: input.history,
+      ...(input.runtimeConfig === undefined ? {} : { runtimeConfig: input.runtimeConfig }),
       ...(input.model === undefined ? {} : { model: input.model }),
       ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
       ...(input.disabledTools === undefined ? {} : { disabledTools: input.disabledTools }),

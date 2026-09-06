@@ -140,4 +140,32 @@ describe('agent prompts', () => {
   it('routes greetings and introductions through the core prompt without Navisworks tools', () => {
     expect(NAVISWORKS_CAPABILITY_PROMPT).toContain('- follow CURI_CORE_PROMPT')
   })
+
+  it('declares the current selection live mutable state that requires a fresh read', () => {
+    expect(NAVISWORKS_CAPABILITY_PROMPT).toContain('LIVE NAVISWORKS STATE')
+    expect(NAVISWORKS_CAPABILITY_PROMPT).toContain('The current selection is live mutable state.')
+    expect(NAVISWORKS_CAPABILITY_PROMPT).toContain(
+      'A selection result from a previous user turn must never be treated\nas proof of the current selection.',
+    )
+    expect(NAVISWORKS_CAPABILITY_PROMPT).toContain(
+      'call navisworks_get_selection in the current run before\nusing item IDs or reading properties.',
+    )
+    expect(NAVISWORKS_CAPABILITY_PROMPT).toContain(
+      'This applies even if a previous\nselection result, verified fact, or reference set is available.',
+    )
+  })
+
+  it('limits historical selection reuse to explicit backward references', () => {
+    expect(NAVISWORKS_CAPABILITY_PROMPT).toContain('Historical selection sets may only be reused')
+    expect(NAVISWORKS_CAPABILITY_PROMPT).toContain('Do not interpret "当前 / 现在 /\ncurrently selected" as a historical reference.')
+  })
+
+  it('exempts live mutable state from the no-repeat-query rule', () => {
+    expect(NAVISWORKS_CAPABILITY_PROMPT).toContain(
+      'This rule never applies to live mutable state such as the current selection',
+    )
+    expect(NAVISWORKS_CAPABILITY_PROMPT).toContain(
+      'a previous selection result does not stay valid because little time has passed.',
+    )
+  })
 })

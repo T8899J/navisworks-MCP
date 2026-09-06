@@ -64,6 +64,7 @@ import {
   CURI_CORE_PROMPT,
   NAVISWORKS_CAPABILITY_PROMPT,
 } from './agent/prompts'
+import type { ApiProfileAdvancedSettings, ExecutionSettings } from '../shared/ipc'
 import { TaskManager, type TaskVerification } from './agent/taskManager'
 import { TaskPlanner } from './agent/taskPlanner'
 import { TaskVerifier } from './agent/taskVerifier'
@@ -80,8 +81,81 @@ type CompleteResult = Awaited<ReturnType<ModelProvider['complete']>>
 
 const DEFAULT_MODEL = 'qwen3.5:9b-q4_K_M'
 const MAX_TOOL_ROUNDS = 8
-const MAX_HISTORY_MESSAGES = 24
-const MAX_TOOL_RESULT_CHARS = 4_000
+
+/**
+ * Run-scoped agent execution policy. Formerly local-model hardcodes (24-message
+ * history, 4000-char tool results, fixed compaction, planner/verifier attempt
+ * caps) are user-configurable per run; every field is clamped again at the
+ * runtime boundary so a bad settings file can never disable the safety rails.
+ */
+export interface AgentRuntimeSettings {
+  maxToolRounds: number
+  compactionEnabled: boolean
+  compactionTriggerRatio: number
+  compactKeepRecentFrames: number
+  compactMaxTranscriptChars: number
+  historyMode: 'auto' | 'fixed'
+  historyMessageLimit?: number
+  toolResultMode: 'auto' | 'fixed'
+  toolResultMaxChars?: number
+  plannerMaxAttempts: number
+  plannerMaxSteps: number
+  plannerMaxTokens: number | null
+  verifierMaxAttempts: number
+  verifierMaxEvidence: number
+  maxTaskReplans: number
+}
+
+export const DEFAULT_RUNTIME_SETTINGS: AgentRuntimeSettings = {
+  maxToolRounds: MAX_TOOL_ROUNDS,
+  compactionEnabled: true,
+  compactionTriggerRatio: 0.85,
+  compactKeepRecentFrames: 1,
+  compactMaxTranscriptChars: 30_000,
+  historyMode: 'auto',
+  historyMessageLimit: undefined,
+  toolResultMode: 'auto',
+  toolResultMaxChars: undefined,
+  plannerMaxAttempts: 2,
+  plannerMaxSteps: 10,
+  plannerMaxTokens: 2048,
+  verifierMaxAttempts: 2,
+  verifierMaxEvidence: 12,
+  maxTaskReplans: MAX_TASK_REPLANS,
+}
+
+function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, Math.trunc(value)))
+}
+
+/** Map the persisted execution settings onto run-scope config with hard ceilings. */
+export function toAgentRuntimeSettings(execution: ExecutionSettings | undefined): AgentRuntimeSettings {
+  const source = execution ?? DEFAULT_RUNTIME_SETTINGS
+  return {
+    maxToolRounds: clampInt(source.maxToolRounds, DEFAULT_RUNTIME_SETTINGS.maxToolRounds, 1, 64),
+    compactionEnabled: source.compactionEnabled !== false,
+    compactionTriggerRatio: Math.min(0.98, Math.max(0.5, source.compactionTriggerRatio || 0.85)),
+    compactKeepRecentFrames: clampInt(source.compactKeepRecentFrames, 1, 0, 20),
+    compactMaxTranscriptChars: clampInt(source.compactMaxTranscriptChars, 30_000, 2_000, 200_000),
+    historyMode: source.historyMode === 'fixed' ? 'fixed' : 'auto',
+    historyMessageLimit: source.historyMode === 'fixed' && source.historyMessageLimit
+      ? clampInt(source.historyMessageLimit, 24, 4, 1_000)
+      : undefined,
+    toolResultMode: source.toolResultMode === 'fixed' ? 'fixed' : 'auto',
+    toolResultMaxChars: source.toolResultMode === 'fixed' && source.toolResultMaxChars
+      ? clampInt(source.toolResultMaxChars, 4_000, 500, 200_000)
+      : undefined,
+    plannerMaxAttempts: clampInt(source.plannerMaxAttempts, 2, 1, 5),
+    plannerMaxSteps: clampInt(source.plannerMaxSteps, 10, 1, 32),
+    plannerMaxTokens: source.plannerMaxTokens === null
+      ? null
+      : clampInt(source.plannerMaxTokens ?? 2048, 2048, 256, 200_000),
+    verifierMaxAttempts: clampInt(source.verifierMaxAttempts, 2, 1, 5),
+    verifierMaxEvidence: clampInt(source.verifierMaxEvidence, 12, 2, 50),
+    maxTaskReplans: clampInt(source.maxTaskReplans, DEFAULT_RUNTIME_SETTINGS.maxTaskReplans, 0, 16),
+  }
+}
 
 // Task System v1: stateless planning/verification callers shared across runs.
 // Both talk to the SAME provider/model the user is already using (Section 三十二)
@@ -91,6 +165,24 @@ const TASK_VERIFIER = new TaskVerifier()
 
 /** Evidence summaries stored per tool result; tasks.json keeps references, not payloads. */
 const MAX_EVIDENCE_SUMMARY_CHARS = 600
+
+/**
+ * Auto tool-result sizing: a dynamic share of the remaining context budget
+ * (~2 chars per token, conservative for CJK-mixed payloads), bounded so a
+ * 1M-token window cannot encourage unbounded dumps.
+ */
+function resolveToolResultCharLimit(
+  config: AgentRuntimeSettings,
+  contextTokensUsed: number,
+  effectiveWindow: number,
+  outputReserve: number,
+): number {
+  if (config.toolResultMode === 'fixed' && config.toolResultMaxChars) {
+    return config.toolResultMaxChars
+  }
+  const remainingTokens = Math.max(0, effectiveWindow - contextTokensUsed - outputReserve - 1_024)
+  return Math.max(2_000, Math.min(32_000, remainingTokens * 2))
+}
 
 /** The completion gate's return: either keep the agent loop running or stop the run now. */
 type TaskGateOutcome =
@@ -137,6 +229,8 @@ export interface ApiEndpointConfig {
   baseUrl?: string
   apiKey?: string
   model?: string
+  /** Profile-level compatibility & capability overrides (null fields = auto). */
+  advanced?: ApiProfileAdvancedSettings
 }
 
 export interface AgentRunInput {
@@ -149,6 +243,8 @@ export interface AgentRunInput {
   reasoningMode?: ReasoningEffort
   disabledTools?: readonly string[]
   api?: ApiEndpointConfig
+  /** Run-scope execution policy; falls back to the legacy defaults when absent. */
+  runtimeConfig?: AgentRuntimeSettings
   /** P4: durable digest of earlier (compacted) turns, injected as a leading system block. */
   compactSummary?: string
   semanticMemory?: SemanticMemory
@@ -270,7 +366,30 @@ export class AgentRuntime {
     this.#taskManager = options.taskManager
   }
 
-  async summarizeTitle(text: string, signal?: AbortSignal): Promise<string> {
+  /**
+   * Title generation follows the ACTIVELY routed provider: in API mode the
+   * current endpoint answers (so deleting Ollama someday keeps titles working);
+   * only a genuinely local run uses the local daemon.
+   */
+  async summarizeTitle(text: string, signal?: AbortSignal, api?: ApiEndpointConfig): Promise<string> {
+    const apiActive = Boolean(api?.baseUrl && api.model?.trim())
+    if (apiActive) {
+      const provider = this.#apiProvider(api!)
+      const response = await provider.complete({
+        model: api!.model!.trim(),
+        messages: [
+          { role: 'system', content: '根据用户的第一条消息生成一个简洁的会话标题：不超过 20 个字，不要标点或引号，只输出标题本身。' },
+          { role: 'user', content: text },
+        ],
+        sampling: { temperature: 0.2, maxTokens: 64 },
+        ...(signal ? { signal } : {}),
+      })
+      const title = response.content.trim()
+      if (!title) {
+        throw new AgentRuntimeError('MODEL_EMPTY_RESPONSE', '标题生成没有返回结果。')
+      }
+      return title
+    }
     const provider = this.#router.local()
     const summarize = provider.summarizeTitle
     if (!summarize) {
@@ -293,13 +412,10 @@ export class AgentRuntime {
 
     const api = input.api
     const apiActive = Boolean(api?.baseUrl && api.model?.trim())
-    const provider = apiActive
-      ? this.#router.forEndpoint({
-          kind: 'openai',
-          baseUrl: api!.baseUrl,
-          apiKey: api!.apiKey,
-        })
-      : this.#router.local()
+    // Run-scope policy: chat.start passes the FRESH settings every time, so
+    // execution changes apply on the very next message — no app restart.
+    const runtimeConfig = input.runtimeConfig ?? DEFAULT_RUNTIME_SETTINGS
+    const provider = apiActive ? this.#apiProvider(api!) : this.#router.local()
     const disabledTools = new Set(input.disabledTools ?? [])
     const model = apiActive
       ? api!.model!.trim()
@@ -312,18 +428,24 @@ export class AgentRuntime {
     // A single execution scope id for this run; the P5 ledger attributes modifying calls
     // to it so crash recovery / approval re-checks can correlate a call with its run.
     const runId = input.runId?.trim() || randomUUID()
-    // Effective context window for compaction/pressure (Section 二: finite, never Infinity).
-    // - Local Ollama: the CONFIGURED window, clamped by the provider's hard ceiling (32768).
-    //   The clamp — not capabilities.defaultContextWindow — is what Ollama actually receives.
-    // - API: no num_ctx is sent, but we budget against the provider/model capability window,
-    //   falling back to the configured window when it reports none. Never Infinity, so facts
-    //   / reference sets / compaction apply to cloud too (Invariant G).
+    // Context window priority — API: profile override → provider capability →
+    // safe fallback. The LOCAL 32768 clamp never applies to API endpoints, so a
+    // 128K profile really budgets 128K.
+    const advanced = apiActive ? api!.advanced ?? undefined : undefined
     const capabilities = provider.capabilities(model)
     const effectiveWindow = provider.kind === 'ollama'
       ? clampLocalContextWindow(this.#contextWindow)
-      : Math.max(1024, capabilities.maxContextWindow
+      : Math.max(1024, advanced?.contextWindowTokens
+        ?? capabilities.maxContextWindow
         ?? capabilities.defaultContextWindow
         ?? this.#contextWindow)
+    // Output reserve: budgeting always needs a number, but the WIRE parameter
+    // is only sent when the profile configures one — an API run with
+    // maxOutputTokens=null no longer inherits the local 2048 cap.
+    const outputReserve = apiActive
+      ? (advanced?.maxOutputTokens ?? 4_096)
+      : this.#numPredict
+    const maxToolRounds = runtimeConfig.maxToolRounds
     const contextBlocks: ContextBlock[] = [
       {
         kind: 'other',
@@ -409,7 +531,7 @@ export class AgentRuntime {
     }
     const contextManager = new ContextManager({
       systemPrompt: CURI_CORE_PROMPT,
-      history: normalizeHistory(input.history ?? []),
+      history: normalizeHistory(input.history ?? [], runtimeConfig),
       contextBlocks,
     })
     contextManager.addUserTurn({ role: 'user', content: trimmedInput })
@@ -420,6 +542,15 @@ export class AgentRuntime {
     let capturedSummary: string | undefined
 
     // --- Task System v1 run-scoped state (all no-ops without a TaskManager) ---
+    const plannerOptions = {
+      maxAttempts: runtimeConfig.plannerMaxAttempts,
+      maxSteps: runtimeConfig.plannerMaxSteps,
+      maxTokens: runtimeConfig.plannerMaxTokens,
+    }
+    const verifierOptions = {
+      maxAttempts: runtimeConfig.verifierMaxAttempts,
+      maxEvidence: runtimeConfig.verifierMaxEvidence,
+    }
     const taskContextFeedback: { verification?: TaskVerificationFeedback } = {}
     let taskDecisionMade = false
     let verificationDisabled = false
@@ -449,7 +580,7 @@ export class AgentRuntime {
           task: activeTask!,
           agentAnswer: lastAssistantText || undefined,
           recentToolOutcomes,
-        }, options.signal)
+        }, options.signal, verifierOptions)
       } catch (error) {
         if (options.signal?.aborted) throw error
         console.debug(`[task] verifier error: ${errorMessage(error)}`)
@@ -458,20 +589,22 @@ export class AgentRuntime {
     }
     try {
       // Section 一/1.3: budget-check BEFORE the first model call, not just on later rounds.
-      const initialTokens = contextManager.estimateRequestTokens(tools, this.#numPredict)
-      if (ContextManager.contextPressure(initialTokens, effectiveWindow) === 'compact') {
-        const compacted = await this.#compactMessages(contextManager, input, options)
+      const initialTokens = contextManager.estimateRequestTokens(tools, outputReserve)
+      if (runtimeConfig.compactionEnabled
+        && ContextManager.contextPressure(initialTokens, effectiveWindow, runtimeConfig.compactionTriggerRatio) === 'compact') {
+        const compacted = await this.#compactMessages(contextManager, input, options, runtimeConfig)
         if (compacted) {
           didCompactRun = true
           capturedSummary = compacted
         }
       }
-      for (let round = 0; round < this.#maxToolRounds; round += 1) {
+      for (let round = 0; round < maxToolRounds; round += 1) {
         throwIfAborted(options.signal)
         // Auto-compaction (P4): usage/effectiveWindow decides pressure — the SAME rule for
         // local and cloud (Invariant G).
-        if (ContextManager.contextPressure(latestContextTokens, effectiveWindow) === 'compact') {
-          const compacted = await this.#compactMessages(contextManager, input, options)
+        if (runtimeConfig.compactionEnabled
+          && ContextManager.contextPressure(latestContextTokens, effectiveWindow, runtimeConfig.compactionTriggerRatio) === 'compact') {
+          const compacted = await this.#compactMessages(contextManager, input, options, runtimeConfig)
           if (compacted) {
             didCompactRun = true
             capturedSummary = compacted
@@ -480,17 +613,23 @@ export class AgentRuntime {
         const built = contextManager.assembleBudgetedFrames({
           tools,
           temperature: 0.1,
-          maxTokens: this.#numPredict,
+          maxTokens: outputReserve,
           effectiveWindow,
           sendContextWindow: provider.kind === 'ollama',
         })
+        // maxOutputTokens=null (API auto) → send NO output-limit parameter at
+        // all; a configured value rides through in the profile's chosen
+        // parameter name (openaiProvider gates the wire field).
+        const requestSampling = apiActive && advanced?.maxOutputTokens == null
+          ? { ...built.sampling, maxTokens: undefined }
+          : built.sampling
         const response = await provider.complete({
           model,
           messages: built.messages,
           tools: built.tools,
           think,
           ...(effort === undefined ? {} : { reasoningEffort: effort }),
-          sampling: built.sampling,
+          sampling: requestSampling,
           signal: options.signal,
           onDelta: (delta) => {
             if (delta.text !== undefined) options.onEvent?.({ phase: 'text', delta: delta.text })
@@ -556,7 +695,7 @@ export class AgentRuntime {
             return { kind: 'stop', result: finishSuccess(blocker) }
           }
           if (verification.verdict === 'replan') {
-            if (activeTask.replanCount >= MAX_TASK_REPLANS) {
+            if (activeTask.replanCount >= runtimeConfig.maxTaskReplans) {
               activeTask = await taskManager.block(activeTask.id, REPLAN_LIMIT_REASON)
               refreshTaskContext()
               return {
@@ -568,7 +707,7 @@ export class AgentRuntime {
               task: activeTask,
               failureReason: verification.reason,
               ...(verification.missingEvidence === undefined ? {} : { missingEvidence: verification.missingEvidence }),
-            }, options.signal).catch((error) => {
+            }, options.signal, plannerOptions).catch((error) => {
               if (options.signal?.aborted) throw error
               console.debug(`[task] replanner error: ${errorMessage(error)}`)
               return null
@@ -633,7 +772,7 @@ export class AgentRuntime {
               name: call.name,
               arguments: call.arguments,
             })),
-          }, options.signal).catch((error) => {
+          }, options.signal, plannerOptions).catch((error) => {
             if (options.signal?.aborted) throw error
             console.debug(`[task] planner error: ${errorMessage(error)}`)
             return null
@@ -702,7 +841,14 @@ export class AgentRuntime {
           toolResultMessages.push({
             role: 'tool',
             toolCallId: toolCall.id,
-            content: truncateToolResult(toolCall.name, wireResult),
+            // Auto mode sizes the truncation from the remaining context budget
+            // each round; a fixed mode uses the user's value. Bigger windows
+            // are no longer pinned to the local-model 4000 chars.
+            content: truncateToolResult(
+              toolCall.name,
+              wireResult,
+              resolveToolResultCharLimit(runtimeConfig, latestContextTokens, effectiveWindow, outputReserve),
+            ),
           })
 
           // P2: mine this successful result for Verified Facts + an ordered Reference Set,
@@ -756,7 +902,7 @@ export class AgentRuntime {
       await pauseIfRunning('TOOL_ROUND_LIMIT')
       return {
         isSuccess: false,
-        message: `工具调用超过 ${this.#maxToolRounds} 轮，已停止以避免循环。请缩小指令范围后重试。`,
+        message: `工具调用超过 ${maxToolRounds} 轮，已停止以避免循环。请缩小指令范围后重试。`,
         contextTokensUsed: latestContextTokens,
         contextWindowTokens: effectiveWindow,
         ...(didCompactRun ? { compacted: true } : {}),
@@ -1026,6 +1172,7 @@ export class AgentRuntime {
     contextManager: ContextManager,
     input: AgentRunInput,
     options: RunAgentOptions,
+    runtimeConfig: AgentRuntimeSettings,
   ): Promise<string | null> {
     const summarizer = this.#router.local()
     const summarizerModel = input.model?.trim() || this.#model
@@ -1033,6 +1180,8 @@ export class AgentRuntime {
     const config: CompactConfig = {
       summarizerModel,
       signal: options.signal,
+      keepRecentFrames: runtimeConfig.compactKeepRecentFrames,
+      maxTranscriptChars: runtimeConfig.compactMaxTranscriptChars,
       // tryCompact hands back the [system, transcript] pair to summarize; send it
       // verbatim (no window) exactly as the pre-refactor auto-compaction did.
       summarize: async (summaryMessages) =>
@@ -1081,6 +1230,30 @@ export class AgentRuntime {
     })
   }
 
+  /**
+   * Build the API provider for an endpoint, carrying the profile's advanced
+   * settings (timeout, window, wire compatibility) so the request shape is
+   * profile-driven rather than hardcoded.
+   */
+  #apiProvider(api: ApiEndpointConfig): ModelProvider {
+    const advanced = api.advanced
+    return this.#router.forEndpoint({
+      kind: 'openai',
+      baseUrl: api.baseUrl,
+      apiKey: api.apiKey,
+      ...(advanced === undefined ? {} : {
+        requestTimeoutMs: advanced.requestTimeoutMs,
+        contextWindow: advanced.contextWindowTokens ?? undefined,
+        compatibility: {
+          temperature: advanced.temperature,
+          maxTokensParameter: advanced.maxTokensParameter,
+          sendReasoningEffort: advanced.sendReasoningEffort,
+          sendStreamOptions: advanced.sendStreamOptions,
+        },
+      }),
+    })
+  }
+
   dispose(): void {
     // Providers and the bridge client hold no persistent connections here.
   }
@@ -1100,7 +1273,7 @@ export class AgentRuntime {
     const api = input.api
     const apiActive = Boolean(api?.baseUrl && api.model?.trim())
     const summarizer = apiActive
-      ? this.#router.forEndpoint({ kind: 'openai', baseUrl: api!.baseUrl, apiKey: api!.apiKey })
+      ? this.#apiProvider(api!)
       : this.#router.local()
     const summarizerModel = apiActive
       ? api!.model!.trim()
@@ -1141,9 +1314,16 @@ function clip(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars)}…[已截断]`
 }
 
-function normalizeHistory(history: readonly AgentHistoryEntry[]): ChatMessage[] {
-  return history
-    .slice(-MAX_HISTORY_MESSAGES)
+/**
+ * History enters ContextManager in FULL under the default 'auto' mode: frame
+ * trimming is the ContextManager's token-budget job, not a hard message count.
+ * 'fixed' mode pre-slices for users who want the old predictability.
+ */
+function normalizeHistory(history: readonly AgentHistoryEntry[], config: AgentRuntimeSettings): ChatMessage[] {
+  const bounded = config.historyMode === 'fixed' && config.historyMessageLimit
+    ? history.slice(-config.historyMessageLimit)
+    : history
+  return bounded
     .filter((entry) => entry.content.trim().length > 0)
     .map((entry) => ({
       role: entry.role === 'user' ? ('user' as const) : ('assistant' as const),
@@ -1271,11 +1451,11 @@ function toolErrorNextActions(code: string): string[] {
   }
 }
 
-function truncateToolResult(toolName: string, result: string): string {
-  if (result.length <= MAX_TOOL_RESULT_CHARS) {
+function truncateToolResult(toolName: string, result: string, maxChars: number): string {
+  if (result.length <= maxChars) {
     return result
   }
-  let clipped = result.slice(0, MAX_TOOL_RESULT_CHARS)
+  let clipped = result.slice(0, maxChars)
   const finalCodeUnit = clipped.charCodeAt(clipped.length - 1)
   if (finalCodeUnit >= 0xD800 && finalCodeUnit <= 0xDBFF) {
     clipped = clipped.slice(0, -1)
@@ -1284,7 +1464,7 @@ function truncateToolResult(toolName: string, result: string): string {
   // blind slice — the model still sees the shape (counts / keys) of the elided payload.
   const summary = summarizeTruncatedPayload(result)
   return `${clipped}\n\n[工具 ${toolName} 的结果过大（原始 ${result.length} 字符）` +
-    `${summary ? `；${summary}` : ''}，已截断至 ${MAX_TOOL_RESULT_CHARS} 字符。完整结果仍保留在本地，` +
+    `${summary ? `；${summary}` : ''}，已截断至 ${maxChars} 字符。完整结果仍保留在本地，` +
     '需要更多时请缩小查询范围重试：降低 limit、改用 category/property 过滤参数，或减少 itemIds 数量。]'
 }
 

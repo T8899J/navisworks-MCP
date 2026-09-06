@@ -3677,3 +3677,52 @@ select:focus-visible,
     border: 1px solid ButtonText;
   }
 }
+
+/* 执行页: bounded number inputs, auto/fixed segmented choice and the folded
+   advanced area — mirroring the existing settings rows and theme choice. */
+.execution-number-input {
+  width: 96px;
+  padding: 6px 10px;
+  font-size: var(--text-label);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-elevated);
+  color: var(--text);
+  text-align: right;
+}
+
+.execution-number-input:focus {
+  outline: none;
+  border-color: var(--accent, var(--border));
+}
+
+.execution-mode-choice {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.execution-mode-choice .theme-option {
+  padding: 6px 10px;
+}
+
+.execution-advanced {
+  margin-top: 18px;
+}
+
+.execution-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.execution-advanced > summary:hover {
+  color: var(--text);
+}
+
+.execution-advanced[open] > summary {
+  margin-bottom: 10px;
+}

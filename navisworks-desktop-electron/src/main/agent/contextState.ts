@@ -1,6 +1,11 @@
 import type { DocumentIdentity } from './documentScope'
 import { DocumentScopeRegistry, documentScopeKey } from './documentScope'
-import { VerifiedFactStore, extractVerifiedFacts, type VerifiedFact } from './facts'
+import {
+  VerifiedFactStore,
+  extractVerifiedFacts,
+  withoutLiveMutableFacts,
+  type VerifiedFact,
+} from './facts'
 import {
   ReferenceSetStore,
   extractReferenceSet,
@@ -189,8 +194,17 @@ export class ContextState {
     if (set !== null) this.referenceSets.add(set, scopeKey)
   }
 
+  /**
+   * Facts for assembling a NEW model context. Live-mutable facts (selection)
+   * are deliberately excluded: the user may have changed the selection in the
+   * Navisworks UI between runs, and no TTL makes a cross-turn selection
+   * "current" again. The producing run saw the value via its own tool message;
+   * the store retains selection facts for diagnostics / historical context.
+   */
   factsForCurrentDocument(): VerifiedFact[] {
-    return this.facts.list(documentScopeKey(this.registry.current))
+    return withoutLiveMutableFacts(
+      this.facts.list(documentScopeKey(this.registry.current)),
+    )
   }
 
   lastRelevantReferenceSet(conversationId?: string): ReferenceSet | undefined {
@@ -346,6 +360,11 @@ function transitionReason(
  * injection into the agent context, so "第一个 / 第三个" resolves against machine-tracked
  * ids instead of a weak model re-reading chat text (P2-D goal). Returns '' when there is
  * no active document or no prior set.
+ *
+ * A selection set is a HISTORICAL reference: it records the order the last
+ * navisworks_get_selection returned, NOT the live selection — the user may have
+ * re-selected in the Navisworks UI at any point afterwards. The block says so
+ * explicitly; "当前 / 现在" questions must trigger a fresh get_selection.
  */
 export function renderReferenceSetBlock(set: ReferenceSet | undefined | null): string {
   if (set === undefined || set === null || set.orderedRefs.length === 0) return ''
@@ -354,7 +373,17 @@ export function renderReferenceSetBlock(set: ReferenceSet | undefined | null): s
     .map((ref, index) => `${index + 1}. ${ref}`)
     .join('\n')
   const more = set.orderedRefs.length > 50 ? `\n（共 ${set.orderedRefs.length} 项，仅列出前 50）` : ''
-  const kind = set.kind === 'viewpoints' ? '视点' : set.kind === 'selection' ? '当前选择' : '最近结果集'
+  if (set.kind === 'selection') {
+    return [
+      '【最近一次选择结果（历史引用，可用于“刚才那些 / 第 N 个”）】',
+      '以下内容不是当前实时 Selection：它只是上一次 navisworks_get_selection 返回的顺序，',
+      '用户之后可能已经在 Navisworks 中直接修改了选择。',
+      '如果用户询问“当前 / 现在”的选择状态，必须重新调用 navisworks_get_selection，不得复用本列表当作当前选择。',
+      lines,
+      more,
+    ].filter((entry) => entry !== '').join('\n')
+  }
+  const kind = set.kind === 'viewpoints' ? '视点' : '最近结果集'
   return `【${kind}（按结果顺序，可被“第 N 个”引用）】\n${lines}${more}`
 }
 

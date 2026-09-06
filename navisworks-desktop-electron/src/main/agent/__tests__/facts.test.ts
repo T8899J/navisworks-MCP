@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VerifiedFactStore, extractVerifiedFacts } from '../facts'
+import { VerifiedFactStore, extractVerifiedFacts, withoutLiveMutableFacts } from '../facts'
 
 const ctx = (documentInstanceId = 'doc-A', sourceToolCallId = 'call-1') => ({
   documentInstanceId,
@@ -56,5 +56,34 @@ describe('VerifiedFactStore — document isolation + invalidation', () => {
     store.invalidate({ documentInstanceId: 'doc-A' })
     expect(store.list('doc-A')).toEqual([])
     expect(store.list('doc-B')).toHaveLength(1) // other document survives
+  })
+})
+
+describe('Live mutable facts — selection never crosses a user turn as a current fact', () => {
+  it('a fresh selection fact (well inside the 30s TTL) is still excluded from new context', () => {
+    // Scenario: last turn's get_selection returned 6 items. Even 1ms later, a
+    // new model context must not present them as the CURRENT selection — the
+    // user may have re-selected in the Navisworks UI in between.
+    const store = new VerifiedFactStore()
+    store.addAll('doc-A', extractVerifiedFacts('navisworks_get_selection', {
+      items: [{ id: 'i-1' }, { id: 'i-2' }, { id: 'i-3' }, { id: 'i-4' }, { id: 'i-5' }, { id: 'i-6' }],
+    }, ctx('doc-A')))
+    const listed = store.list('doc-A', { now: 1000 })
+    // The store RETAINS it (diagnostics / historical context)…
+    expect(listed.some((fact) => fact.type === 'selection')).toBe(true)
+    // …but new-context assembly never hands it over as a live fact.
+    const forContext = withoutLiveMutableFacts(listed)
+    expect(forContext.some((fact) => fact.type === 'selection')).toBe(false)
+  })
+
+  it('excludes only live-mutable types; document facts pass untouched', () => {
+    const facts = [
+      ...extractVerifiedFacts('navisworks_find_items', { items: [{ id: 'i-1' }] }, ctx()),
+      ...extractVerifiedFacts('navisworks_get_selection', { items: [{ id: 'i-2' }] }, ctx()),
+    ]
+    const kept = withoutLiveMutableFacts(facts)
+    expect(kept.some((fact) => fact.type === 'selection')).toBe(false)
+    expect(kept.some((fact) => fact.type === 'item')).toBe(true)
+    expect(kept).toHaveLength(facts.length - 1)
   })
 })

@@ -22,6 +22,16 @@ import type {
   JsonSessionRepository,
   JsonSettingsRepository
 } from './sessionRepository'
+import { toAgentRuntimeSettings, type AgentRuntimeSettings, type ApiEndpointConfig } from './agentRuntime'
+import { normalizeProfileAdvanced, normalizeExecutionSettings, normalizeStorageSettings } from './sessionRepository'
+import {
+  DEFAULT_API_PROFILE_ADVANCED,
+  DEFAULT_EXECUTION_SETTINGS,
+  DEFAULT_STORAGE_SETTINGS,
+  type ApiProfileAdvancedSettings,
+  type ExecutionSettings,
+  type StorageSettings
+} from '../shared/ipc'
 import type { ToolCatalog } from './toolCatalog'
 import type {
   ContextState,
@@ -82,6 +92,8 @@ export interface OllamaRunInput {
   userMessageId: string
   text: string
   history: readonly OllamaHistoryEntry[]
+  /** Run-scope execution policy from the FRESH settings of this run. */
+  runtimeConfig?: AgentRuntimeSettings
   model?: string
   reasoningMode?: ReasoningEffort
   /** Tool names switched off in settings; honored fresh on every request. */
@@ -139,8 +151,9 @@ export interface OllamaAgentPort {
       requestToolApproval: (request: OllamaToolApprovalRequest) => Promise<boolean>
     }
   ): Promise<OllamaRunResult>
-  /** Optional: model-generated conversation title; routes fall back to truncation. */
-  summarizeTitle?(text: string, signal?: AbortSignal): Promise<string>
+  /** Optional: model-generated conversation title; routes fall back to truncation.
+   * When an `api` endpoint is supplied, the ACTIVE API provider answers. */
+  summarizeTitle?(text: string, signal?: AbortSignal, api?: ApiEndpointConfig): Promise<string>
   /** Manual /compact: summarizes a session's messages into one summary. */
   compact?(
     messages: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }>,
@@ -163,6 +176,16 @@ export interface OllamaToolApprovalRequest {
   bridgeSessionId?: string
   documentInstanceId?: string
   ambiguousRetry?: boolean
+}
+
+/**
+ * Renderer-side settings patch. The two new policy groups (and profile
+ * advanced) may arrive partial — the facade normalizes them per field.
+ */
+type SettingsPatch = Partial<Omit<AppSettings, 'apiProfiles' | 'execution' | 'storage'>> & {
+  apiProfiles?: Array<Omit<ApiProfile, 'advanced'> & { advanced?: Partial<ApiProfileAdvancedSettings> | null }>
+  execution?: Partial<ExecutionSettings> | null
+  storage?: Partial<StorageSettings> | null
 }
 
 export interface DesktopIpcDependencies {
@@ -260,11 +283,15 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
     'sessions.summarizeTitle': routeHandler<'sessions.summarizeTitle'>(async ({ text }) => {
       // Title summarization is best-effort: if the provider is off or the
       // model stalls, fall back to plain truncation so the first message
-      // always ends up with a usable sidebar label either way.
+      // always ends up with a usable sidebar label either way. The ACTIVE
+      // provider answers: API mode uses the current endpoint, only local
+      // runs fall back to Ollama.
       const fallback = { title: text.trim().slice(0, 28) }
       if (typeof dependencies.ollama.summarizeTitle !== 'function') return fallback
       try {
-        return { title: await dependencies.ollama.summarizeTitle(text) }
+        const settings = await persistence.getSettings()
+        const endpoint = await resolveChatEndpoint(persistence, settings)
+        return { title: await dependencies.ollama.summarizeTitle(text, undefined, endpoint ?? undefined) }
       } catch {
         return fallback
       }
@@ -646,6 +673,9 @@ export class ChatRunRegistry {
       }
       const disabledTools = settings.disabledTools
       const activeEndpoint = await resolveChatEndpoint(this.persistence, settings)
+      // Run-scope runtime config: read from the FRESH settings of THIS run, so
+      // execution-policy changes apply without restarting the app.
+      const runtimeConfig = toAgentRuntimeSettings(settings.execution)
       const result = await this.agent.run(
         {
           sessionId: input.sessionId,
@@ -654,6 +684,7 @@ export class ChatRunRegistry {
           userMessageId: input.messageId,
           text: input.text,
           history,
+          runtimeConfig,
           ...(input.model === undefined ? {} : { model: input.model }),
           ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
           ...(disabledTools.length === 0 ? {} : { disabledTools }),
@@ -1042,7 +1073,7 @@ export class PersistenceFacade {
     return toDesktopSettings(await this.#loadSettings())
   }
 
-  updateSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
+  updateSettings(patch: SettingsPatch): Promise<AppSettings> {
     return this.#serializeWrite(async () => {
       const current = await this.#loadSettings()
       const selectedModel = patch.selectedModel ?? current.selectedModel
@@ -1059,6 +1090,8 @@ export class PersistenceFacade {
         preferApiModel: patch.preferApiModel ?? current.preferApiModel ?? false,
         ollamaEnabled: patch.ollamaEnabled ?? current.ollamaEnabled ?? true,
         apiEnabled: patch.apiEnabled ?? current.apiEnabled ?? true,
+        execution: patch.execution ? normalizeExecutionSettings(patch.execution) : current.execution,
+        storage: patch.storage ? normalizeStorageSettings(patch.storage) : current.storage,
         activeApiProfileId: validProfileId(
           patch.activeApiProfileId,
           current.activeApiProfileId,
@@ -1095,6 +1128,11 @@ export class PersistenceFacade {
         model: input.model.trim(),
         apiKeyCiphertext,
         legacyApiKey: '',
+        // New advanced config only when supplied; editing name/URL alone keeps
+        // the profile's existing compatibility settings untouched.
+        advanced: input.advanced
+          ? normalizeProfileAdvanced(input.advanced)
+          : existing?.advanced ?? { ...DEFAULT_API_PROFILE_ADVANCED },
       }
       const apiProfiles = existing
         ? current.apiProfiles.map((candidate) => candidate.id === id ? profile : candidate)
@@ -1128,7 +1166,9 @@ export class PersistenceFacade {
     })
   }
 
-  async getApiEndpoint(profileId: string | null): Promise<(OllamaEndpointOptions & { model: string }) | null> {
+  async getApiEndpoint(
+    profileId: string | null,
+  ): Promise<(OllamaEndpointOptions & { model: string; advanced?: ApiEndpointConfig['advanced'] }) | null> {
     await this.#writeTail
     if (!profileId) return null
     const current = await this.#loadSettings()
@@ -1147,6 +1187,7 @@ export class PersistenceFacade {
       baseUrl: profile.baseUrl,
       model: profile.model,
       ...(apiKey ? { apiKey } : {}),
+      ...(profile.advanced ? { advanced: profile.advanced } : {}),
     }
   }
 
@@ -1354,7 +1395,9 @@ function defaultPersistedSettings(): PersistedSettings {
     ollamaEnabled: true,
     apiEnabled: true,
     apiProfiles: [],
-    activeApiProfileId: null
+    activeApiProfileId: null,
+    execution: { ...DEFAULT_EXECUTION_SETTINGS },
+    storage: { ...DEFAULT_STORAGE_SETTINGS }
   }
 }
 
@@ -1382,8 +1425,11 @@ function toDesktopSettings(settings: PersistedSettings): AppSettings {
       baseUrl: profile.baseUrl,
       model: profile.model,
       hasApiKey: Boolean(profile.apiKeyCiphertext || profile.legacyApiKey),
+      advanced: profile.advanced ?? { ...DEFAULT_API_PROFILE_ADVANCED },
     })),
-    activeApiProfileId: settings.activeApiProfileId ?? null
+    activeApiProfileId: settings.activeApiProfileId ?? null,
+    execution: settings.execution ?? { ...DEFAULT_EXECUTION_SETTINGS },
+    storage: settings.storage ?? { ...DEFAULT_STORAGE_SETTINGS }
   }
 }
 

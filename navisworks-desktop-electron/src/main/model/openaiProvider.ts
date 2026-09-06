@@ -50,7 +50,24 @@ export interface OpenAICompatibleProviderOptions {
    * a cloud run is never assumed to be a fixed size (never "1M by default").
    */
   contextWindow?: number
+  /**
+   * Wire-compatibility gating driven by the API profile's advanced settings.
+   * Every field defaults to the provider's long-standing behavior, so absent
+   * profile configuration reproduces the legacy request byte-for-byte.
+   */
+  compatibility?: ProviderCompatibilityOptions
   fetchImpl?: typeof fetch
+}
+
+export interface ProviderCompatibilityOptions {
+  /** Force the sampling temperature; null OMITS the field (endpoint default applies). */
+  temperature?: number | null
+  /** Which output-limit parameter to send ('omit' sends none); 'auto' → max_tokens. */
+  maxTokensParameter?: 'auto' | 'max_tokens' | 'max_completion_tokens' | 'omit'
+  /** 'auto' sends reasoning_effort only when a step was picked; 'off' strips it; 'on' forces one. */
+  sendReasoningEffort?: 'auto' | 'on' | 'off'
+  /** stream_options.include_usage — off for gateways that reject it (usage then absent). */
+  sendStreamOptions?: boolean
 }
 
 /**
@@ -68,6 +85,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
   readonly #apiKey: string
   readonly #requestTimeoutMs: number
   readonly #contextWindow: number | undefined
+  readonly #compatibility: ProviderCompatibilityOptions
   readonly #fetch: typeof fetch
 
   constructor(options: OpenAICompatibleProviderOptions) {
@@ -83,6 +101,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     this.#contextWindow = options.contextWindow === undefined
       ? undefined
       : positiveInteger(options.contextWindow, 'contextWindow')
+    this.#compatibility = options.compatibility ?? {}
     this.#fetch = options.fetchImpl ?? fetch
   }
 
@@ -104,25 +123,48 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResult> {
+    const compatibility = this.#compatibility
     const body: Record<string, unknown> = {
       model: request.model,
       messages: toOpenAIMessages(request.messages),
       stream: true,
-      temperature: request.sampling?.temperature ?? 0.2,
-      // Strict OpenAI endpoints omit usage in streams unless this is set;
-      // tolerant gateways ignore it.
-      stream_options: { include_usage: true },
     }
-    if (request.sampling?.maxTokens !== undefined) {
-      body.max_tokens = request.sampling.maxTokens
+    // Temperature: profile-forced value wins; explicit `null` omits the field
+    // entirely (endpoint default applies); absent compatibility → legacy 0.2.
+    if (compatibility.temperature === null) {
+      // omit
+    } else if (typeof compatibility.temperature === 'number') {
+      body.temperature = compatibility.temperature
+    } else {
+      body.temperature = request.sampling?.temperature ?? 0.2
+    }
+    // Strict OpenAI endpoints omit usage in streams unless this is set;
+    // tolerant gateways ignore it. Gated for gateways that reject the field.
+    if (compatibility.sendStreamOptions !== false) {
+      body.stream_options = { include_usage: true }
+    }
+    // Output limit: the profile picks the parameter name; 'omit' or a missing
+    // value sends nothing (an API run is no longer capped at local defaults).
+    const maxTokens = request.sampling?.maxTokens
+    const parameterName = compatibility.maxTokensParameter === 'omit'
+      ? undefined
+      : compatibility.maxTokensParameter === 'max_completion_tokens'
+        ? 'max_completion_tokens'
+        : 'max_tokens'
+    if (maxTokens !== undefined && parameterName !== undefined) {
+      body[parameterName] = maxTokens
     }
     // Never send an empty tools array: some gateways reject it outright.
     if (request.tools?.length) {
       body.tools = request.tools.map(({ impact: _impact, ...definition }) => definition)
     }
-    // Five-step effort picked in the composer; tolerant gateways consume it,
-    // endpoints without reasoning support ignore the unknown field.
-    if (request.reasoningEffort !== undefined) {
+    // Reasoning effort: 'auto' sends a picked step (legacy behavior), 'off'
+    // strips it for endpoints without reasoning support, 'on' always sends one.
+    if (compatibility.sendReasoningEffort === 'off') {
+      // omit
+    } else if (compatibility.sendReasoningEffort === 'on') {
+      body.reasoning_effort = request.reasoningEffort ?? 'medium'
+    } else if (request.reasoningEffort !== undefined) {
       body.reasoning_effort = request.reasoningEffort
     }
 

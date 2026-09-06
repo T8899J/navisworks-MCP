@@ -194,6 +194,28 @@ export function renderVerifiedFacts(facts: readonly VerifiedFact[], maxFacts = 2
   return `【已验证事实（来自工具结果，非摘要；如与最新工具结果冲突以最新为准）】\n${lines.join('\n')}`
 }
 
+/**
+ * Live mutable state the user can change directly in the Navisworks UI at any
+ * moment BETWEEN two agent runs — the current selection is the canonical case.
+ * A fact of these types must never cross a user turn as a "current" fact: its
+ * 30s volatile TTL says nothing about whether the UI state still matches.
+ * The run that produced it sees the value through its own tool message, so
+ * cross-run facts are simply not needed for it; the store keeps them for
+ * diagnostics / historical context only.
+ */
+export const LIVE_MUTABLE_FACT_TYPES: ReadonlySet<VerifiedFactType> = new Set<VerifiedFactType>([
+  'selection',
+])
+
+export function isLiveMutableFact(fact: VerifiedFact): boolean {
+  return LIVE_MUTABLE_FACT_TYPES.has(fact.type)
+}
+
+/** Drop live-mutable facts from a list destined for a NEW model context. */
+export function withoutLiveMutableFacts(facts: readonly VerifiedFact[]): VerifiedFact[] {
+  return facts.filter((fact) => !isLiveMutableFact(fact))
+}
+
 /** Per-document fact store. Document-bound facts are only ever held at runtime. */
 export class VerifiedFactStore {
   readonly #byDocument = new Map<string, VerifiedFact[]>()

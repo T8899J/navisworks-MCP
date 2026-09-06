@@ -276,10 +276,16 @@ export class ContextManager {
     return CONTEXT_COMPACT_TRIGGER_RATIO
   }
 
-  static contextPressure(usageTokens: number, effectiveWindow: number): ContextPressure {
+  /** Pressure check with an optional run-scoped trigger ratio (execution settings). */
+  static contextPressure(
+    usageTokens: number,
+    effectiveWindow: number,
+    triggerRatio: number = CONTEXT_COMPACT_TRIGGER_RATIO,
+  ): ContextPressure {
     if (!Number.isFinite(effectiveWindow) || effectiveWindow <= 0) return 'idle'
+    const boundedRatio = Math.min(0.98, Math.max(0.5, triggerRatio))
     const ratio = usageTokens / effectiveWindow
-    if (ratio >= CONTEXT_COMPACT_TRIGGER_RATIO) return 'compact'
+    if (ratio >= boundedRatio) return 'compact'
     if (ratio >= CONTEXT_SOFT_PRESSURE_RATIO) return 'soft'
     return 'idle'
   }
