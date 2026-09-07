@@ -154,7 +154,7 @@ export class ToolOutputStore {
       }
     }
     if (Array.isArray(data)) {
-      const page = data.slice(safeOffset, safeLimit)
+      const page = data.slice(safeOffset, safeOffset + safeLimit)
       return {
         resultRef,
         offset: safeOffset,

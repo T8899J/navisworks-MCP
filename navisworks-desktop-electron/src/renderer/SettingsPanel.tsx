@@ -117,23 +117,6 @@ function ModelPicker({
   )
 }
 
-/** Renderer-local mirror of the main-process catalog, for the settings UI. */
-const TOOL_CATALOG_UI = [
-  { name: 'navisworks_status', description: '检查插件连接与当前文档', viewState: false },
-  { name: 'navisworks_get_document', description: '读取文档、单位和选择数量', viewState: false },
-  { name: 'navisworks_get_selection', description: '读取当前选中的构件', viewState: false },
-  { name: 'navisworks_find_items', description: '搜索构件（大模型分段续扫）', viewState: false },
-  { name: 'navisworks_get_item_properties', description: '读取构件属性', viewState: false },
-  { name: 'navisworks_select_items', description: '选中或取消选中构件', viewState: true },
-  { name: 'navisworks_set_visibility', description: '隐藏、显示或隔离构件', viewState: true },
-  { name: 'navisworks_list_viewpoints', description: '列出保存的视点（可分页）', viewState: false },
-  { name: 'navisworks_activate_viewpoint', description: '切换到保存的视点', viewState: true }
-] as const
-
-const VIEW_STATE_TOOL_NAMES: readonly ToolName[] = TOOL_CATALOG_UI
-  .filter((tool) => tool.viewState)
-  .map((tool) => tool.name)
-
 /** Discrete font-size levels; the slider snaps to these so the active
  *  step is always visible. */
 const FONT_LEVELS = [

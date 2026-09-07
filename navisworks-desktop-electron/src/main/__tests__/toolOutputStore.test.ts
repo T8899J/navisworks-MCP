@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import {
   ToolOutputStore,
   TOOL_OUTPUT_MAX_INLINE_BYTES,
@@ -179,6 +180,68 @@ describe('ToolOutputStore — safety (Cases 6–7)', () => {
       // A missing directory must not throw either.
       await rm(dir, { recursive: true, force: true })
       expect(await store.cleanup(0)).toBe(0)
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+describe('ToolOutputStore — BARE ARRAY paging regression (P3.5)', () => {
+  async function storeRawArray(length: number): Promise<{ store: ToolOutputStore; ref: string; dir: string }> {
+    const dir = await mkdtemp(join(tmpdir(), 'curi-tool-output-raw-'))
+    const store = new ToolOutputStore(dir)
+    const resultRef = `tor_${randomUUID()}`
+    const data = Array.from({ length }, (_, index) => index)
+    await writeFile(
+      join(dir, `${resultRef}.json`),
+      JSON.stringify({
+        resultRef, sessionId: 's1', toolCallId: 'c1', toolName: 'navisworks_test',
+        createdAt: Date.now(), data,
+      }),
+      'utf8',
+    )
+    return { store, ref: resultRef, dir }
+  }
+
+  it('offset=50 limit=50 returns items 50…99 (slice end is offset+limit, not limit)', async () => {
+    const { store, ref, dir } = await storeRawArray(200)
+    try {
+      const page = await store.read(ref, 50, 50)
+      expect(page.error).toBeUndefined()
+      expect(page.items).toEqual(Array.from({ length: 50 }, (_, i) => 50 + i))
+      expect(page.returned).toBe(50)
+      expect(page.total).toBe(200)
+      expect(page.hasMore).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('offset=180 limit=50 clamps to 180…199 with hasMore=false', async () => {
+    const { store, ref, dir } = await storeRawArray(200)
+    try {
+      const page = await store.read(ref, 180, 50)
+      expect(page.items).toEqual(Array.from({ length: 20 }, (_, i) => 180 + i))
+      expect(page.returned).toBe(20)
+      expect(page.total).toBe(200)
+      expect(page.hasMore).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('the {items:[…]} object path keeps its correct paging', async () => {
+    const { store, dir, cleanup } = await makeStore()
+    try {
+      const bounded = await store.bound({
+        sessionId: 's1', toolCallId: 'c1', toolName: 'navisworks_find_items',
+        data: { items: Array.from({ length: 120 }, (_, index) => `条目-${index}-` + 'x'.repeat(600)) },
+      })
+      const page = await store.read(bounded.resultRef!, 50, 50)
+      expect(page.items).toHaveLength(50)
+      expect(page.items?.[0]).toContain('条目-50-')
+      expect(page.items?.[49]).toContain('条目-99-')
+      expect(page.hasMore).toBe(true)
     } finally {
       await cleanup()
     }
