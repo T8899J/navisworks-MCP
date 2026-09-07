@@ -33,6 +33,7 @@ const allowedRoutes = new Set<IpcRoute>([
   'api.profile.connection.test',
   'appearance.get',
   'appearance.update',
+  'model.info.get',
   'window.control',
   'ollama.models.list',
   'ollama.connection.test',

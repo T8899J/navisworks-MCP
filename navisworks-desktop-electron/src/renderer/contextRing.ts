@@ -44,6 +44,27 @@ function formatK(tokens: number): string {
   return `${(tokens / 1000).toFixed(tokens % 1000 === 0 ? 0 : 1)}K`
 }
 
+/**
+ * Usage labels for the popover: 1234 → "1.2K", 128000 → "128K",
+ * 1_500_000 → "1.5M", 860 → "860". Whole K/M values drop the decimal.
+ */
+export function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens % 1_000_000 === 0 ? 0 : 1)}M`
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(tokens % 1000 === 0 ? 0 : 1)}K`
+  return String(tokens)
+}
+
+/**
+ * Cache rate label — the three cases must stay STRICTLY distinct (§32):
+ * undefined = never reported ("未报告", NOT "0%"), 0 = reported-zero ("0%"),
+ * 0.5 → "50%", 0.6667 → "66.7%".
+ */
+export function formatCacheRateLabel(rate: number | undefined): string {
+  if (rate === undefined) return '未报告'
+  const percent = rate * 100
+  return Number.isInteger(percent) ? `${percent}%` : `${percent.toFixed(1)}%`
+}
+
 function measuredState(
   source: ContextWindowSource,
   window: number,

@@ -21,6 +21,10 @@ import {
   readErrorSnippet,
   requireObject,
 } from './providerUtils'
+import { ollamaUsageToModelUsage } from './usage'
+import type { ModelInfo } from '../../shared/model'
+import { calculateCacheHitRate, totalUsedTokens } from '../../shared/model'
+import type { ModelUsage } from '../../shared/model'
 
 const DEFAULT_BASE_URL = 'http://localhost:11434'
 const CONNECTION_TIMEOUT_MS = 5_000
@@ -88,6 +92,25 @@ export class OllamaProvider implements ModelProvider {
       supportsThinking: true,
       maxContextWindow: 32_768,
       defaultContextWindow: 32_768,
+    }
+  }
+
+  /**
+   * The local daemon is a real capability reporter for its own models: the
+   * 32K window is the daemon's clamp semantics (unchanged), function tools
+   * work through /api/chat, and reasoning is the `think` toggle — which only
+   * knows the two extremes. Attachment support is not wired locally, so it is
+   * an honest false rather than an assumed one.
+   */
+  modelInfo(modelId: string): ModelInfo {
+    return {
+      ref: { providerId: 'ollama', modelId },
+      displayName: modelId,
+      provider: { id: 'ollama', displayName: this.displayName, kind: 'ollama' },
+      capabilities: { tools: true, reasoning: true, temperature: true, attachments: false },
+      limits: { context: 32_768 },
+      reasoning: { modes: ['low', 'max'] },
+      metadataSource: 'local',
     }
   }
 
@@ -411,11 +434,18 @@ async function readOllamaStream(
     reader.releaseLock()
   }
 
+  // ONE usage truth: the eval counts become ModelUsage first; the legacy
+  // fields derive from it. Ollama reports no cache data, so cacheReadTokens
+  // stays absent — the UI says 未报告, never 0%.
+  const usage = ollamaUsageToModelUsage({ promptEvalCount, evalCount })
+  const cacheHitRate = calculateCacheHitRate(usage)
   return {
     content,
     thinking,
     toolCalls,
-    contextTokensUsed: promptEvalCount + evalCount,
+    ...(usage === undefined ? {} : { usage }),
+    contextTokensUsed: totalUsedTokens(usage),
+    ...(cacheHitRate === undefined ? {} : { cacheHitRate }),
   }
 }
 

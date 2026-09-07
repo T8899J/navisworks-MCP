@@ -195,3 +195,77 @@ describe('OpenAICompatibleProvider', () => {
     expect(outcome).toMatchObject({ code: 'MODEL_TIMEOUT' })
   })
 })
+
+describe('OpenAI usage normalization (P6, §54–§58)', () => {
+  async function completeWithUsage(usage: Record<string, unknown>) {
+    const fetchImpl = vi.fn(async () => sseResponse([
+      { choices: [{ delta: { content: 'ok' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }], usage },
+    ])) as unknown as typeof fetch
+    const provider = new OpenAICompatibleProvider({ baseUrl: BASE, fetchImpl })
+    return provider.complete({ model: 'm', messages: [{ role: 'user', content: 'hi' }] })
+  }
+
+  it('§54 OpenAI cached_tokens → cacheReadTokens; legacy fields derive from usage', async () => {
+    const result = await completeWithUsage({
+      prompt_tokens: 12_000,
+      completion_tokens: 1_000,
+      prompt_tokens_details: { cached_tokens: 8_000 },
+    })
+    expect(result.usage).toEqual({ inputTokens: 12_000, outputTokens: 1_000, cacheReadTokens: 8_000 })
+    expect(result.contextTokensUsed).toBe(13_000)
+    expect(result.cacheHitRate).toBeCloseTo(0.666667, 5)
+    expect(result.usage?.cacheWriteTokens).toBeUndefined()
+  })
+
+  it('§55 reasoning_tokens are recorded but NOT re-added to the total', async () => {
+    const result = await completeWithUsage({
+      prompt_tokens: 12_000,
+      completion_tokens: 1_000,
+      completion_tokens_details: { reasoning_tokens: 500 },
+    })
+    expect(result.usage?.reasoningTokens).toBe(500)
+    // completion already includes reasoning → total stays input+output.
+    expect(result.contextTokensUsed).toBe(13_000)
+  })
+
+  it('§56 DeepSeek hit/miss split: hit → cacheReadTokens; miss is NOT a cache write', async () => {
+    const result = await completeWithUsage({
+      prompt_tokens: 10_000,
+      completion_tokens: 1_000,
+      prompt_cache_hit_tokens: 7_000,
+      prompt_cache_miss_tokens: 3_000,
+    })
+    expect(result.usage).toEqual({ inputTokens: 10_000, outputTokens: 1_000, cacheReadTokens: 7_000 })
+    expect(result.usage?.cacheWriteTokens).toBeUndefined()
+    expect(result.cacheHitRate).toBeCloseTo(0.7, 5)
+  })
+
+  it('§57 no cache fields → cacheReadTokens undefined + cacheHitRate undefined (≠ 0)', async () => {
+    const result = await completeWithUsage({ prompt_tokens: 10_000, completion_tokens: 1_000 })
+    expect(result.usage).toEqual({ inputTokens: 10_000, outputTokens: 1_000 })
+    expect(result.usage?.cacheReadTokens).toBeUndefined()
+    expect(result.cacheHitRate).toBeUndefined()
+  })
+
+  it('§58 reported cached_tokens=0 stays 0 — distinct from unreported', async () => {
+    const result = await completeWithUsage({
+      prompt_tokens: 10_000,
+      completion_tokens: 1_000,
+      prompt_tokens_details: { cached_tokens: 0 },
+    })
+    expect(result.usage?.cacheReadTokens).toBe(0)
+    expect(result.cacheHitRate).toBe(0)
+  })
+
+  it('a stream with no usage line at all reports no usage (≠ zeros)', async () => {
+    const fetchImpl = vi.fn(async () => sseResponse([
+      { choices: [{ delta: { content: 'ok' } }] },
+    ])) as unknown as typeof fetch
+    const provider = new OpenAICompatibleProvider({ baseUrl: BASE, fetchImpl })
+    const result = await provider.complete({ model: 'm', messages: [] })
+    expect(result.usage).toBeUndefined()
+    expect(result.contextTokensUsed).toBe(0)
+    expect(result.cacheHitRate).toBeUndefined()
+  })
+})

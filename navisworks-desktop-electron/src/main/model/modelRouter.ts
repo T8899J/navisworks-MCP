@@ -1,6 +1,7 @@
 import { OllamaProvider } from './ollamaProvider'
 import { OpenAICompatibleProvider, type ProviderCompatibilityOptions } from './openaiProvider'
-import type { ModelProvider, ProviderEndpoint } from './types'
+import { isModelInfoProvider, type ModelProvider, type ProviderEndpoint } from './types'
+import type { ModelInfo } from '../../shared/model'
 
 /** The always-on local worker endpoint. */
 export const LOCAL_OLLAMA_BASE_URL = 'http://localhost:11434'
@@ -56,4 +57,14 @@ export class ModelRouter {
       fetchImpl: this.#options.fetchImpl,
     })
   }
+}
+
+/**
+ * Ask a provider instance for its wire-level model metadata floor, when it
+ * implements the ModelInfoProvider seam. Callers (ModelCatalog) then stamp the
+ * connection-scoped identity and overlay profile/local settings — providers
+ * only ever report what they actually know.
+ */
+export function providerModelInfo(provider: ModelProvider, modelId: string): ModelInfo | undefined {
+  return isModelInfoProvider(provider) ? provider.modelInfo(modelId) : undefined
 }

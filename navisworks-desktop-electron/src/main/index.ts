@@ -33,6 +33,7 @@ import {
   installApplicationServices,
 } from './kernel/applicationServices'
 import type { ModelRouter } from './model/modelRouter'
+import { ModelCatalogService } from './model/catalog/modelCatalogService'
 import { denyAllPermissions, installProductionContentSecurityPolicy, secureWindowNavigation } from './security/windowSecurity'
 import type { SenderTrustOptions } from './security/validateSender'
 import { DesktopIpcError, type RuntimeInfo } from '../shared/ipc'
@@ -96,6 +97,9 @@ async function startApplication(): Promise<void> {
   )
   appearance.start()
   const ollama = adaptModelAgent(runtime, modelRouter)
+  // Model System v1: one process-level catalog/resolver shared by chat.start
+  // and model.info.get, so runtime and renderer never derive the model twice.
+  const modelCatalog = new ModelCatalogService(modelRouter)
   const senderTrust: SenderTrustOptions = {
     isPackaged: app.isPackaged,
     rendererRoot,
@@ -124,6 +128,7 @@ async function startApplication(): Promise<void> {
     toolApprovals,
     instanceRegistry,
     instanceSelection,
+    modelCatalog,
     toolResultsDirectory: dataPaths.toolResultsDirectory,
     secrets: {
       encrypt(value) {
@@ -327,6 +332,7 @@ async function runAgent(
       ...(input.toolPermissions === undefined ? {} : { toolPermissions: input.toolPermissions }),
       ...(input.model === undefined ? {} : { model: input.model }),
       ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
+      ...(input.runtimeModel === undefined ? {} : { runtimeModel: input.runtimeModel }),
       ...(input.disabledTools === undefined ? {} : { disabledTools: input.disabledTools }),
       ...(input.api === undefined ? {} : { api: input.api }),
       ...(input.compactSummary === undefined ? {} : { compactSummary: input.compactSummary }),
@@ -353,6 +359,7 @@ async function runAgent(
   return {
     content: result.message,
     ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText }),
+    ...(result.usage === undefined ? {} : { usage: result.usage }),
     ...(result.cacheHitRate === undefined ? {} : { cacheHitRate: result.cacheHitRate }),
     ...(result.contextWindowTokens === undefined ? {} : { contextWindowTokens: result.contextWindowTokens }),
     ...(result.contextWindowSource === undefined

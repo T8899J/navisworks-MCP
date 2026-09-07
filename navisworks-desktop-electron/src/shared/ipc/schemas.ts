@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { REASONING_EFFORTS, type ReasoningEffort } from '../reasoning'
+import type { ModelInfo, ModelUsage } from '../model'
 
 const nonEmptyString = z.string().trim().min(1)
 const dateTimeString = z.string().trim().min(1)
@@ -243,6 +244,52 @@ export const toolDefinitionSummarySchema = z.strictObject({
 /** Where the context window a run budgeted against came from. */
 export const contextWindowSourceSchema = z.enum(['local', 'profile', 'provider', 'fallback'])
 
+/**
+ * Model System v1 shared schemas — single IPC source for model identity,
+ * capabilities and raw usage. The plain-TS twins live in src/shared/model.ts;
+ * the compile-time guards at the bottom of this file pin the two together.
+ */
+export const modelRefSchema = z.strictObject({
+  providerId: nonEmptyString,
+  modelId: nonEmptyString,
+})
+
+/** Raw provider usage. Absent field = NOT REPORTED — never a faked 0. */
+export const modelUsageSchema = z.strictObject({
+  inputTokens: z.number().int().nonnegative().optional(),
+  outputTokens: z.number().int().nonnegative().optional(),
+  reasoningTokens: z.number().int().nonnegative().optional(),
+  cacheReadTokens: z.number().int().nonnegative().optional(),
+  cacheWriteTokens: z.number().int().nonnegative().optional(),
+})
+
+export const modelInfoSchema = z.strictObject({
+  ref: modelRefSchema,
+  displayName: z.string(),
+  provider: z.strictObject({
+    id: nonEmptyString,
+    displayName: z.string(),
+    kind: z.enum(['ollama', 'openai-compatible']),
+  }),
+  capabilities: z.strictObject({
+    tools: z.boolean().optional(),
+    reasoning: z.boolean().optional(),
+    temperature: z.boolean().optional(),
+    attachments: z.boolean().optional(),
+  }),
+  limits: z.strictObject({
+    context: z.number().int().positive().optional(),
+    input: z.number().int().positive().optional(),
+    output: z.number().int().positive().optional(),
+  }),
+  reasoning: z.strictObject({
+    // .readonly() keeps the schema output mutually assignable with the
+    // shared ModelInfo type (`readonly ReasoningEffort[]`).
+    modes: z.array(reasoningEffortSchema).readonly(),
+  }),
+  metadataSource: z.enum(['local', 'profile', 'provider', 'unknown']),
+})
+
 export const navisworksStatusSchema = z.strictObject({
   connected: z.boolean(),
   status: z.string(),
@@ -343,6 +390,11 @@ export const requestSchemas = {
     input: emptyInput,
     output: z.array(toolDefinitionSummarySchema)
   },
+  /** The ACTIVE model's identity + metadata, resolved once by main (P8). */
+  'model.info.get': {
+    input: emptyInput,
+    output: modelInfoSchema
+  },
   'appearance.update': {
     input: z.strictObject({ themeMode: themeModeSchema }),
     output: appearanceStateSchema
@@ -431,6 +483,8 @@ const chatDoneEventSchema = z.strictObject({
   kind: z.literal('done'),
   content: z.string(),
   thinkingText: z.string().optional(),
+  /** P6 raw provider usage — the truth the legacy numbers below are derived from. */
+  usage: modelUsageSchema.optional(),
   contextTokensUsed: z.number().optional(),
   cacheHitRate: z.number().optional(),
   contextWindowTokens: z.number().optional(),
@@ -547,4 +601,21 @@ export type ToolDefinitionSummary = z.output<typeof toolDefinitionSummarySchema>
 export type ToolApprovalRequest = z.output<typeof eventSchemas['tool.approval.requested']>
 export type ToolPermission = z.output<typeof toolPermissionSchema>
 
+export type { ModelRef, ModelInfo, ModelUsage } from '../model'
+
 export type ContextWindowSource = z.output<typeof contextWindowSourceSchema>
+export type ModelRefSummary = z.output<typeof modelRefSchema>
+export type ModelUsageSummary = z.output<typeof modelUsageSchema>
+export type ModelInfoSummary = z.output<typeof modelInfoSchema>
+
+// Compile-time pins so the IPC schema and the shared Model System types can
+// never drift (same failure class as the old chat.done schema drift): every
+// ModelUsageSummary is a ModelUsage and vice versa.
+const _modelUsageGuard: ModelUsage = null as unknown as ModelUsageSummary
+const _modelUsageGuardBack: ModelUsageSummary = null as unknown as ModelUsage
+const _modelInfoGuard: ModelInfo = null as unknown as ModelInfoSummary
+const _modelInfoGuardBack: ModelInfoSummary = null as unknown as ModelInfo
+void _modelUsageGuard
+void _modelUsageGuardBack
+void _modelInfoGuard
+void _modelInfoGuardBack

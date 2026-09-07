@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveContextRingState } from '../contextRing'
+import { formatCacheRateLabel, formatTokenCount, resolveContextRingState } from '../contextRing'
 
 const BASE_API_INPUT = {
   usingApi: true,
@@ -115,5 +115,31 @@ describe('resolveContextRingState — pre-run states (Case 7/8 UI, 场景 D)', (
     expect(state.mode).toBe('known')
     expect(state.total).toBe(16_384)
     expect(state.sourceLabel).toBe('本地上下文窗口')
+  })
+})
+
+describe('formatTokenCount (§62)', () => {
+  it('renders K/M units with honest decimals', () => {
+    expect(formatTokenCount(1_234)).toBe('1.2K')
+    expect(formatTokenCount(860)).toBe('860')
+    expect(formatTokenCount(128_000)).toBe('128K')
+    expect(formatTokenCount(12_300)).toBe('12.3K')
+    expect(formatTokenCount(1_500_000)).toBe('1.5M')
+    expect(formatTokenCount(2_000_000)).toBe('2M')
+    expect(formatTokenCount(0)).toBe('0')
+  })
+})
+
+describe('formatCacheRateLabel — the three cases stay distinct (§32, §62)', () => {
+  it('undefined means NOT REPORTED, not 0%', () => {
+    expect(formatCacheRateLabel(undefined)).toBe('未报告')
+  })
+  it('a reported 0 shows as 0%', () => {
+    expect(formatCacheRateLabel(0)).toBe('0%')
+  })
+  it('fraction rates render with at most one decimal', () => {
+    expect(formatCacheRateLabel(0.5)).toBe('50%')
+    expect(formatCacheRateLabel(2 / 3)).toBe('66.7%')
+    expect(formatCacheRateLabel(0.6991150442)).toBe('69.9%')
   })
 })

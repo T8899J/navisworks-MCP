@@ -1384,3 +1384,131 @@ describe('ChatRunRegistry — chat.done payload survives the IPC schema', () => 
     expect(send.mock.calls.some((call) => call[1] === 'chat.error')).toBe(false)
   })
 })
+
+describe('ChatRunRegistry — Model System integration (P5/P6/P8)', () => {
+  it('carries the raw usage object through the REAL chat.done schema', async () => {
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run() {
+        return {
+          content: '回答完成。',
+          usage: { inputTokens: 1_000, outputTokens: 200, cacheReadTokens: 500 },
+          contextTokensUsed: 1_200,
+          cacheHitRate: 0.5,
+          contextWindowTokens: 32_768,
+          contextWindowSource: 'local' as const,
+        }
+      },
+    }
+    const registry = new ChatRunRegistry(agent, createFacade(createSessionStore()))
+    const sender = fakeSender()
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => {
+      expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(1)
+    })
+    const donePayload = send.mock.calls.find((call) => call[1] === 'chat.done')?.[2] as Record<string, unknown>
+    expect(donePayload.usage).toEqual({ inputTokens: 1_000, outputTokens: 200, cacheReadTokens: 500 })
+    // Legacy derived fields still ride along (compatibility round).
+    expect(donePayload.contextTokensUsed).toBe(1_200)
+    expect(donePayload.cacheHitRate).toBe(0.5)
+  })
+
+  it('fails with MODEL_NOT_CONFIGURED — before running the agent — when no provider can serve', async () => {
+    // Ollama off + active API profile with an EMPTY model: the chat run must
+    // say "尚未选择模型" and must NOT silently execute a different provider.
+    const store = createSessionStore()
+    const settings = statefulSettingsStub({
+      selectedModel: 'qwen3.5:9b-q4_K_M',
+      models: ['qwen3.5:9b-q4_K_M'],
+      reasoningMode: 'low',
+      themeMode: 'system',
+      disabledTools: [],
+      fontScale: 1,
+      contextWindowTokens: 32_768,
+      preferApiModel: true,
+      ollamaEnabled: false,
+      apiEnabled: true,
+      activeApiProfileId: 'p-empty',
+      apiProfiles: [{
+        id: 'p-empty', name: 'P', baseUrl: 'https://api.example.com/v1', model: '',
+        apiKeyCiphertext: '', legacyApiKey: '',
+      }],
+    })
+    const facade = new PersistenceFacade(
+      store as unknown as JsonSessionRepository,
+      settings,
+    )
+    const runSpy = vi.fn(async () => ({ content: 'never' }))
+    const registry = new ChatRunRegistry({ ...stubAgent(), run: runSpy }, facade)
+    const sender = fakeSender()
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+    registry.start(chatStartInput(), sender)
+    await vi.waitFor(() => {
+      const errorCall = send.mock.calls.find((call) => call[1] === 'chat.error')
+      if (!errorCall) throw new Error('chat.error not emitted yet')
+      expect(errorCall[2]).toMatchObject({ error: { code: 'MODEL_NOT_CONFIGURED' } })
+    })
+    expect(runSpy).not.toHaveBeenCalled()
+    expect(send.mock.calls.some((call) => call[1] === 'chat.done')).toBe(false)
+  })
+
+  it('model.info.get answers with the resolved ollama ModelInfo (P8)', async () => {
+    const harness = createHarness({
+      ollama: stubAgent(),
+      settings: statefulSettingsStub({
+        selectedModel: 'qwen3.5:9b-q4_K_M',
+        models: ['qwen3.5:9b-q4_K_M'],
+        reasoningMode: 'low',
+        themeMode: 'system',
+        disabledTools: [],
+        fontScale: 1,
+        contextWindowTokens: 32_768,
+        preferApiModel: false,
+        ollamaEnabled: true,
+        apiEnabled: false,
+        activeApiProfileId: null,
+        apiProfiles: [],
+      }),
+    })
+    try {
+      const response = await harness.invoke('model.info.get')
+      expect(response.ok).toBe(true)
+      const info = (response as { data: Record<string, unknown> }).data
+      expect(info.ref).toEqual({ providerId: 'ollama', modelId: 'qwen3.5:9b-q4_K_M' })
+      expect(info.reasoning).toEqual({ modes: ['low', 'max'] })
+      expect((info.limits as Record<string, unknown>).context).toBe(32_768)
+      expect(info.metadataSource).toBe('local')
+      expect(JSON.stringify(info)).not.toMatch(/apiKey|secret/i)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('model.info.get errors MODEL_NOT_CONFIGURED for an empty selection (no crash)', async () => {
+    const harness = createHarness({
+      ollama: stubAgent(),
+      settings: statefulSettingsStub({
+        selectedModel: '',
+        models: [],
+        reasoningMode: 'low',
+        themeMode: 'system',
+        disabledTools: [],
+        fontScale: 1,
+        contextWindowTokens: 32_768,
+        preferApiModel: false,
+        ollamaEnabled: true,
+        apiEnabled: true,
+        activeApiProfileId: null,
+        apiProfiles: [],
+      }),
+    })
+    try {
+      const response = await harness.invoke('model.info.get')
+      if (response.ok !== false) throw new Error('expected model.info.get to fail')
+      expect(response.error.code).toBe('MODEL_NOT_CONFIGURED')
+    } finally {
+      await harness.dispose()
+    }
+  })
+})

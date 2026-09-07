@@ -20,6 +20,9 @@ import {
   readErrorSnippet,
   requireObject,
 } from './providerUtils'
+import { openAiUsageToModelUsage } from './usage'
+import { calculateCacheHitRate, totalUsedTokens, type ModelUsage } from '../../shared/model'
+import type { ModelInfo } from '../../shared/model'
 
 const CONNECTION_TIMEOUT_MS = 5_000
 
@@ -115,6 +118,30 @@ export class OpenAICompatibleProvider implements ModelProvider {
       ...(this.#contextWindow === undefined
         ? {}
         : { maxContextWindow: this.#contextWindow, defaultContextWindow: this.#contextWindow }),
+    }
+  }
+
+  /**
+   * Wire-protocol floor for a model served by this endpoint. The /models list
+   * proves the model EXISTS, not what it supports — so capabilities and the
+   * context window stay `undefined` unless the profile configured a window.
+   */
+  modelInfo(modelId: string): ModelInfo {
+    return {
+      ref: { providerId: 'openai-compatible', modelId },
+      displayName: modelId,
+      provider: {
+        id: 'openai-compatible',
+        displayName: this.displayName,
+        kind: 'openai-compatible',
+      },
+      // The two claims this wire format itself guarantees (same facts its
+      // capabilities() reports). Reasoning/attachments stay unknown — the
+      // profile's compatibility policy and per-model reality are not known.
+      capabilities: { tools: true, temperature: true },
+      limits: this.#contextWindow === undefined ? {} : { context: this.#contextWindow },
+      reasoning: { modes: [] },
+      metadataSource: this.#contextWindow === undefined ? 'unknown' : 'provider',
     }
   }
 
@@ -373,7 +400,9 @@ interface OpenAIStreamChunk {
     completion_tokens?: number
     /** OpenAI style cached-token detail. */
     prompt_tokens_details?: { cached_tokens?: number } | null
-    /** DeepSeek style cache split. */
+    /** Reasoning tokens are usually INCLUDED in completion_tokens — track, never re-add. */
+    completion_tokens_details?: { reasoning_tokens?: number } | null
+    /** DeepSeek style cache split. A miss is NOT a cache write. */
     prompt_cache_hit_tokens?: number
     prompt_cache_miss_tokens?: number
   } | null
@@ -390,8 +419,7 @@ async function readOpenAIStream(
   let buffer = ''
   let content = ''
   let thinking = ''
-  let contextTokensUsed = 0
-  let cacheHitRate: number | undefined
+  let usage: ModelUsage | undefined
   const mergedCalls = new Map<number, MergedToolCall>()
 
   const handleLine = (line: string): void => {
@@ -411,18 +439,9 @@ async function readOpenAIStream(
     }
     const root = requireObject(parsed, 'OpenAI compatible stream chunk')
     const chunk = root as unknown as OpenAIStreamChunk
-    const usage = chunk.usage
-    if (usage && typeof usage === 'object') {
-      const promptTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : 0
-      const completionTokens = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : 0
-      contextTokensUsed = promptTokens + completionTokens
-      // Cache hit rate: OpenAI cached_tokens detail or the DeepSeek split.
-      const cached = usage.prompt_tokens_details?.cached_tokens
-        ?? usage.prompt_cache_hit_tokens
-      if (typeof cached === 'number' && promptTokens > 0) {
-        cacheHitRate = Math.max(0, Math.min(1, cached / promptTokens))
-      }
-    }
+    // ONE usage truth: normalize the wire object; legacy fields derive from it below.
+    const normalized = openAiUsageToModelUsage(chunk.usage)
+    if (normalized !== undefined) usage = normalized
 
     const choice = chunk.choices?.[0]
     const delta = choice?.delta
@@ -477,12 +496,16 @@ async function readOpenAIStream(
     }))
     .filter((call) => call.name.trim().length > 0)
 
+  // Legacy fields are DERIVED from the one usage truth — never computed
+  // independently, or the two would drift.
+  const cacheHitRate = calculateCacheHitRate(usage)
   return {
     content,
     thinking,
     toolCalls,
-    contextTokensUsed,
-    ...(cacheHitRate === undefined ? {} : { cacheHitRate })
+    ...(usage === undefined ? {} : { usage }),
+    contextTokensUsed: totalUsedTokens(usage),
+    ...(cacheHitRate === undefined ? {} : { cacheHitRate }),
   }
 }
 import { randomUUID } from 'node:crypto'

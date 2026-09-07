@@ -1,6 +1,7 @@
 import type { BridgeCallOptions } from '../bridgeClient'
 import type { AgentToolContract } from '../toolCatalog'
 import type { ReasoningEffort } from '../../shared/reasoning'
+import type { ModelInfo } from '../../shared/model'
 
 /**
  * Provider-neutral chat message. Each provider maps this onto its own wire
@@ -71,10 +72,36 @@ export interface CompletionResult {
   content: string
   thinking: string
   toolCalls: ParsedToolCall[]
-  /** Prompt + completion tokens when reported; 0 when the backend is silent. */
+  /**
+   * The single source of truth for token accounting (P6). Absent only when
+   * the backend reported nothing.
+   */
+  usage?: import('../../shared/model').ModelUsage
+  /**
+   * @deprecated Derived compatibility field: `totalUsedTokens(usage)`. Providers
+   * must never compute this independently of `usage` — drift is a bug.
+   */
   contextTokensUsed: number
-  /** Cached prompt tokens / prompt tokens, when the backend reports it. */
+  /**
+   * @deprecated Derived compatibility field: `calculateCacheHitRate(usage)`;
+   * undefined = the backend did not report cache info (NOT 0%).
+   */
   cacheHitRate?: number
+}
+
+/**
+ * Optional provider seam: a provider that knows model metadata implements
+ * this. `ModelInfo.ref.providerId` is a PLACEHOLDER connection family id here
+ * — the connection-scoped identity (`ollama` / `api:<profileId>`) is assigned
+ * by ModelResolver/ModelCatalog, which is the only place that knows which
+ * profile an endpoint belongs to.
+ */
+export interface ModelInfoProvider {
+  modelInfo(modelId: string): ModelInfo
+}
+
+export function isModelInfoProvider(provider: unknown): provider is ModelInfoProvider {
+  return typeof (provider as ModelInfoProvider | undefined)?.modelInfo === 'function'
 }
 
 export type ProviderKind = 'ollama' | 'openai'
@@ -123,6 +150,8 @@ export type AgentErrorCode =
   | 'MODEL_EMPTY_RESPONSE'
   | 'EMPTY_INPUT'
   | 'TOOL_ROUND_LIMIT'
+  /** The active provider has no usable model configured (P5 explicit failure). */
+  | 'MODEL_NOT_CONFIGURED'
 
 export class AgentRuntimeError extends Error {
   readonly code: AgentErrorCode

@@ -5,9 +5,11 @@ import {
   type ChatSession,
   type ChatStreamEvent,
   type DesktopSettings,
+  type ModelInfo,
   type NavisworksStatus,
   type SessionSummary,
   type ToolApprovalRequest,
+  normalizeModelInfo,
   normalizeSession,
   normalizeSettings,
   normalizeStatus,
@@ -105,6 +107,14 @@ export const desktopGateway = {
   /** Registry tool summaries (with resolved permissions) for the settings UI. */
   async listTools() {
     return await requireApi().request('tools.list')
+  },
+
+  /**
+   * The ACTIVE model (ModelRef + capabilities + limits + reasoning modes) as
+   * resolved by the main-process Model System — never re-derived here.
+   */
+  async getActiveModel(): Promise<ModelInfo | null> {
+    return normalizeModelInfo(await requireApi().request('model.info.get'))
   },
 
   async testOllama(

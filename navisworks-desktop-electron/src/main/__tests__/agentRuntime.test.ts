@@ -133,6 +133,9 @@ describe('AgentRuntime streaming tool loop', () => {
     expect(result).toEqual({
       isSuccess: true,
       message: 'Navisworks 已连接。',
+      // P6: raw usage is the truth; contextTokensUsed derives from it
+      // (30 prompt + 8 eval). Ollama reports no cache → cache fields absent.
+      usage: { inputTokens: 30, outputTokens: 8 },
       contextTokensUsed: 38,
       // No contextWindow was configured, so the local clamp's ceiling is the
       // budget this run reported back for the UI's usage ring.

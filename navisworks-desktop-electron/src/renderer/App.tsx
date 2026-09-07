@@ -13,9 +13,12 @@ import type {
   RuntimeInfo,
   ThemeMode,
 } from '../shared/ipc'
+import { nearestReasoningEffort } from '../shared/reasoning'
 import {
   type ChatMessage,
   type ChatRunPhase,
+  type ModelInfo,
+  type ModelUsage,
   type ToolDefinitionSummary,
   type ChatSession,
   type ChatStreamEvent,
@@ -26,7 +29,8 @@ import {
   type ToolApprovalRequest,
   createId,
   navisworksInstanceDisplay,
-  navisworksStatusBadge
+  navisworksStatusBadge,
+  normalizeModelUsage
 } from './chatTypes'
 import { Composer } from './Composer'
 import {
@@ -223,8 +227,18 @@ export default function App() {
     used: number
     window?: number
     source?: ContextWindowSource
+    usage?: ModelUsage
     cacheHitRate?: number
   } | null>(null)
+  // P8: the ACTIVE model as resolved by the main-process Model System.
+  // Never derived in the renderer — this is the one copy the UI reads.
+  const [activeModel, setActiveModel] = useState<ModelInfo | null>(null)
+  const refreshActiveModel = useCallback(() => {
+    if (!serviceAvailable) return
+    void desktopGateway.getActiveModel()
+      .then((info) => setActiveModel(info))
+      .catch(() => setActiveModel(null))
+  }, [serviceAvailable])
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo>()
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   // A structured run record instead of a boolean: it names WHICH session is
@@ -633,11 +647,15 @@ export default function App() {
         // The context ring is session-scoped: a BACKGROUND session finishing
         // must never repaint the ring of the session on screen.
         if (shouldApplyContextUsage(done.sessionId, activeSessionIdRef.current)) {
+          // P6: the raw usage object rides along for the detail lines —
+          // re-validated, because event payloads are runtime data.
+          const doneUsage = normalizeModelUsage(done.usage)
           if (typeof done.contextTokensUsed === 'number') {
             setContextUsage({
               used: done.contextTokensUsed,
               ...(typeof done.contextWindowTokens === 'number' ? { window: done.contextWindowTokens } : {}),
               ...(typeof done.contextWindowSource === 'string' ? { source: done.contextWindowSource } : {}),
+              ...(doneUsage === undefined ? {} : { usage: doneUsage }),
               ...(typeof done.cacheHitRate === 'number' ? { cacheHitRate: done.cacheHitRate } : {})
             })
           }
@@ -678,6 +696,28 @@ export default function App() {
   useEffect(() => {
     refreshToolDefinitions()
   }, [refreshToolDefinitions, settings.toolPermissions, settings.disabledTools])
+
+  // P8: the active model re-resolves whenever anything that routes it changes
+  // — provider switches, profile edits, model picks, profile deletion.
+  useEffect(() => {
+    refreshActiveModel()
+  }, [
+    refreshActiveModel,
+    settings.selectedModel,
+    settings.preferApiModel,
+    settings.activeApiProfileId,
+    settings.ollamaEnabled,
+    settings.apiEnabled,
+    settings.apiProfiles,
+  ])
+
+  // P7: after switching models, a persisted step outside the new model's
+  // allowed modes snaps to the nearest legal one — the UI never shows (and
+  // chat.start never sends) an illegal step. No write until the user acts.
+  const allowedReasoningModes = activeModel?.reasoning.modes
+  const effectiveReasoningMode = allowedReasoningModes === undefined
+    ? settings.reasoningMode
+    : nearestReasoningEffort(settings.reasoningMode, allowedReasoningModes) ?? settings.reasoningMode
 
   // Escape dismisses the in-app delete confirmation; clicking the dimmed
   // backdrop cancels too.
@@ -779,7 +819,9 @@ export default function App() {
         messageId: userMessage.id,
         text: trimmed,
         model: settings.selectedModel,
-        reasoningMode: settings.reasoningMode
+        // P7: send the mode snapped to the active model's legal steps, so an
+        // illegal persisted value can never reach the request schema.
+        reasoningMode: effectiveReasoningMode
       })
       setActiveRun((currentRun) => currentRun?.sessionId === current.id
         ? { ...currentRun, turnId: started.turnId }
@@ -1304,6 +1346,7 @@ export default function App() {
             settings={settings}
             serviceAvailable={serviceAvailable}
             contextUsage={contextUsage}
+            activeModel={activeModel}
             approval={pendingToolApproval}
             approvalResolving={approvalResolving}
             onDraftChange={setDraft}

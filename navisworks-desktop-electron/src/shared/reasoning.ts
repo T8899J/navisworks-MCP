@@ -31,3 +31,27 @@ export function localThinkForEffort(effort: ReasoningEffort): boolean {
 export function localDisplayEffort(effort: ReasoningEffort): ReasoningEffort {
   return effort === 'low' || effort === 'medium' ? 'low' : 'max'
 }
+
+/**
+ * Snap a persisted/selected effort onto a model's allowed step list, so an
+ * illegal mode (e.g. xhigh against Ollama's low/max) can never reach a request
+ * schema. The five-step scale is ordered, so the nearest ranked step wins:
+ * xhigh on ['low','max'] → max.
+ */
+export function nearestReasoningEffort(
+  effort: ReasoningEffort,
+  allowed: readonly ReasoningEffort[],
+): ReasoningEffort | undefined {
+  if (allowed.includes(effort)) return effort
+  const rank = REASONING_EFFORTS.indexOf(effort)
+  let best: ReasoningEffort | undefined
+  let bestDistance = Number.POSITIVE_INFINITY
+  for (const candidate of allowed) {
+    const distance = Math.abs(REASONING_EFFORTS.indexOf(candidate) - rank)
+    if (distance < bestDistance) {
+      best = candidate
+      bestDistance = distance
+    }
+  }
+  return best
+}

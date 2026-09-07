@@ -1955,6 +1955,22 @@ body.message-nav-scrubbing * {
   padding: 3px 0;
 }
 
+/* 本轮使用 group header in the context popover (P8). */
+.context-popover-usage-title {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Reasoning-off notice when the active model exposes no effort steps. */
+.composer-picker-effort-off {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .composer-menu-trigger {
   display: flex;
   max-width: 240px;

@@ -14,10 +14,12 @@ import {
   type ToolApprovalRequest,
   type ToolName,
 } from '../shared/ipc'
-import { normalizeReasoningEffort, type ReasoningEffort } from '../shared/reasoning'
+import { normalizeReasoningEffort, REASONING_EFFORTS, type ReasoningEffort } from '../shared/reasoning'
+import type { ModelInfo, ModelUsage } from '../shared/model'
 
 export type { ApiProfile, ContextWindowSource, ToolApprovalRequest, ToolDefinitionSummary, ToolPermission }
 export type { ReasoningEffort }
+export type { ModelInfo, ModelUsage }
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'error'
 
@@ -150,6 +152,8 @@ export interface ChatStreamEvent {
   arguments?: unknown
   result?: unknown
   contextTokensUsed?: number
+  /** P6: raw provider usage of the finished run's last round. */
+  usage?: ModelUsage
   cacheHitRate?: number
   /** Finite context window the finished run budgeted against. */
   contextWindowTokens?: number
@@ -453,5 +457,87 @@ export function displayValue(value: unknown): string {
     return JSON.stringify(value, null, 2)
   } catch {
     return String(value)
+  }
+}
+
+/** IPC usage payload: keep only well-reported numbers (absent ≠ 0). */
+export function normalizeModelUsage(value: unknown): ModelUsage | undefined {
+  const usage = asRecord(value)
+  const result: ModelUsage = {}
+  for (const key of [
+    'inputTokens',
+    'outputTokens',
+    'reasoningTokens',
+    'cacheReadTokens',
+    'cacheWriteTokens',
+  ] as const) {
+    const field = usage[key]
+    if (typeof field === 'number' && Number.isFinite(field) && field >= 0) {
+      result[key] = field
+    }
+  }
+  return Object.keys(result).length === 0 ? undefined : result
+}
+
+/**
+ * Active ModelInfo from `model.info.get`. Malformed / missing pieces degrade
+ * field by field — the UI must still render with an honest empty metadata set
+ * rather than crash or invent values.
+ */
+export function normalizeModelInfo(value: unknown): ModelInfo | null {
+  const source = asRecord(value)
+  const ref = asRecord(source.ref)
+  const providerId = typeof ref.providerId === 'string' ? ref.providerId : ''
+  const modelId = typeof ref.modelId === 'string' ? ref.modelId : ''
+  if (!providerId || !modelId) return null
+  const provider = asRecord(source.provider)
+  const capabilities = asRecord(source.capabilities)
+  const limits = asRecord(source.limits)
+  const reasoning = asRecord(source.reasoning)
+  const rawModes = Array.isArray(reasoning.modes) ? reasoning.modes : []
+  const modes = rawModes.filter((mode): mode is ReasoningEffort =>
+    REASONING_EFFORTS.includes(mode as ReasoningEffort))
+  const positiveInt = (field: unknown): number | undefined =>
+    typeof field === 'number' && Number.isFinite(field) && field > 0 ? field : undefined
+  const optionalBool = (field: unknown): boolean | undefined =>
+    typeof field === 'boolean' ? field : undefined
+  return {
+    ref: { providerId, modelId },
+    displayName: typeof source.displayName === 'string' && source.displayName.trim()
+      ? source.displayName
+      : modelId,
+    provider: {
+      id: providerId,
+      displayName: typeof provider.displayName === 'string' ? provider.displayName : providerId,
+      kind: provider.kind === 'ollama' ? 'ollama' : 'openai-compatible',
+    },
+    capabilities: (() => {
+      const tools = optionalBool(capabilities.tools)
+      const reasoning = optionalBool(capabilities.reasoning)
+      const temperature = optionalBool(capabilities.temperature)
+      const attachments = optionalBool(capabilities.attachments)
+      return {
+        ...(tools === undefined ? {} : { tools }),
+        ...(reasoning === undefined ? {} : { reasoning }),
+        ...(temperature === undefined ? {} : { temperature }),
+        ...(attachments === undefined ? {} : { attachments }),
+      }
+    })(),
+    limits: (() => {
+      const context = positiveInt(limits.context)
+      const input = positiveInt(limits.input)
+      const output = positiveInt(limits.output)
+      return {
+        ...(context === undefined ? {} : { context }),
+        ...(input === undefined ? {} : { input }),
+        ...(output === undefined ? {} : { output }),
+      }
+    })(),
+    reasoning: { modes },
+    metadataSource: source.metadataSource === 'local'
+      || source.metadataSource === 'profile'
+      || source.metadataSource === 'provider'
+      ? source.metadataSource
+      : 'unknown',
   }
 }

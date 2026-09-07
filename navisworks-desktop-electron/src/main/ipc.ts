@@ -49,6 +49,9 @@ import { externalizeResult, isExternalizedResult, resolveResult } from './agent/
 import type { SemanticMemory } from './agent/semanticMemory'
 import { validateSender, type SenderTrustOptions } from './security/validateSender'
 import { normalizeReasoningEffort } from '../shared/reasoning'
+import { resolveActiveModel, type ModelResolution, type ResolvedChatEndpoint } from './model/catalog/modelResolver'
+import type { ModelCatalogService } from './model/catalog/modelCatalogService'
+import type { ModelUsage } from '../shared/model'
 import {
   DesktopIpcError,
   IPC_EVENT_CHANNEL,
@@ -103,6 +106,8 @@ export interface OllamaRunInput {
   toolPermissions?: Record<string, ToolPermission>
   model?: string
   reasoningMode?: ReasoningEffort
+  /** P5/P7: ModelSystem-resolved active model for this run (modes floor). */
+  runtimeModel?: import('../shared/model').ModelInfo
   /** Tool names switched off in settings; honored fresh on every request. */
   disabledTools?: readonly string[]
   /** API endpoint, read fresh from settings on every run. */
@@ -129,6 +134,8 @@ export interface OllamaRunResult {
   thinkingText?: string
   /** Prompt + completion tokens of the last model round, when reported. */
   contextTokensUsed?: number
+  /** P6: raw provider usage of the last round (the truth behind the numbers above). */
+  usage?: ModelUsage
   cacheHitRate?: number
   /** Finite context window the run budgeted against; drives the UI usage ring. */
   contextWindowTokens?: number
@@ -217,6 +224,8 @@ export interface DesktopIpcDependencies {
   toolResultsDirectory?: string
   instanceRegistry?: NavisworksInstanceRegistry
   instanceSelection?: NavisworksInstanceSelection
+  /** P4/P5 Model System seam; absent → pure settings-based resolution (unit tests). */
+  modelCatalog?: ModelCatalogService
 }
 
 export interface SecretProtector {
@@ -273,6 +282,7 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
     dependencies.instanceRegistry,
     dependencies.instanceSelection,
     dependencies.bridge,
+    dependencies.modelCatalog,
   )
 
   const handlers = {
@@ -346,6 +356,21 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
         permissions: settings.toolPermissions,
         legacyDisabled: settings.disabledTools,
       })
+    }),
+    'model.info.get': routeHandler<'model.info.get'>(async () => {
+      // P8: the Renderer never re-derives provider switches — main resolves
+      // the active model exactly once, with the same ModelSystem chat.runs
+      // will use on the next message.
+      const settings = await persistence.getSettings()
+      const endpoint = await resolveChatEndpoint(persistence, settings)
+      const resolution = chatRuns.resolveActiveModel(settings, endpoint)
+      if (resolution.status === 'not-configured') {
+        throw new DesktopIpcError(
+          'MODEL_NOT_CONFIGURED',
+          '当前提供方尚未配置可用模型，请在设置 → 模型 中选择。',
+        )
+      }
+      return resolution.info
     }),
     'appearance.get': routeHandler<'appearance.get'>(() => dependencies.appearance.getState()),
     'appearance.update': routeHandler<'appearance.update'>(async ({ themeMode }) => {
@@ -540,7 +565,26 @@ export class ChatRunRegistry {
     private readonly instanceRegistry?: NavisworksInstanceRegistry,
     private readonly instanceSelection?: NavisworksInstanceSelection,
     private readonly bridge?: NavisworksBridgeClient,
+    private readonly modelCatalog?: ModelCatalogService,
   ) {}
+
+  /**
+   * THE active-model resolution — used by both chat.start and `model.info.get`
+   * so the UI can never disagree with what the next run will execute. The
+   * endpoint arrives exactly as resolveChatEndpoint produced it (or null =
+   * local serves); an empty model name is NOT filtered here, it resolves to
+   * MODEL_NOT_CONFIGURED (§71: a chosen-but-empty profile must never silently
+   * run a different provider).
+   */
+  resolveActiveModel(
+    settings: AppSettings,
+    endpoint: (OllamaEndpointOptions & { model: string }) | null,
+  ): ModelResolution {
+    const casted = endpoint as ResolvedChatEndpoint | null
+    return this.modelCatalog
+      ? this.modelCatalog.resolveActive(settings, casted)
+      : resolveActiveModel(settings, casted)
+  }
 
   start(
     input: InputFor<'chat.start'>,
@@ -719,6 +763,15 @@ export class ChatRunRegistry {
       }
       const disabledTools = settings.disabledTools
       const activeEndpoint = await resolveChatEndpoint(this.persistence, settings)
+      // Model System: ONE resolution per run, shared with model.info.get.
+      const resolution = this.resolveActiveModel(settings, activeEndpoint)
+      if (resolution.status === 'not-configured') {
+        throw new DesktopIpcError(
+          'MODEL_NOT_CONFIGURED',
+          '尚未选择可用模型，请在设置 → 模型 中完成配置。',
+        )
+      }
+      const runtimeModel = resolution.info
       // Run-scope runtime config: read from the FRESH settings of THIS run, so
       // execution-policy changes apply without restarting the app.
       const runtimeConfig = toAgentRuntimeSettings(settings.execution)
@@ -732,6 +785,7 @@ export class ChatRunRegistry {
           history,
           runtimeConfig,
           toolPermissions: settings.toolPermissions,
+          runtimeModel,
           ...(input.model === undefined ? {} : { model: input.model }),
           ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
           ...(disabledTools.length === 0 ? {} : { disabledTools }),
@@ -781,6 +835,8 @@ export class ChatRunRegistry {
         messageId: result.messageId ?? messageId,
         content: result.content,
         ...(result.thinkingText === undefined ? {} : { thinkingText: result.thinkingText }),
+        // P6: raw usage rides alongside the legacy derived numbers.
+        ...(result.usage === undefined ? {} : { usage: result.usage }),
         ...(result.contextTokensUsed === undefined ? {} : { contextTokensUsed: result.contextTokensUsed }),
         ...(result.cacheHitRate === undefined ? {} : { cacheHitRate: result.cacheHitRate }),
         ...(result.contextWindowTokens === undefined ? {} : { contextWindowTokens: result.contextWindowTokens }),

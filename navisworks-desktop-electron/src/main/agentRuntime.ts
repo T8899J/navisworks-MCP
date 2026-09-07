@@ -50,7 +50,8 @@ import {
   type DocumentChangeNotice,
 } from './agent/contextState'
 import { renderVerifiedFacts } from './agent/facts'
-import { localThinkForEffort, type ReasoningEffort } from '../shared/reasoning'
+import { localThinkForEffort, nearestReasoningEffort, type ReasoningEffort } from '../shared/reasoning'
+import type { ModelInfo, ModelUsage } from '../shared/model'
 import {
   DocumentOperationCoordinator,
   ToolExecutionLedger,
@@ -259,6 +260,12 @@ export interface AgentRunInput {
   /** Explicit per-tool permission overrides (allow/ask/deny) for this run. */
   toolPermissions?: Record<string, ToolPermission>
   api?: ApiEndpointConfig
+  /**
+   * P5/P7: the runtime-resolved ModelInfo for THIS run (ModelResolver output).
+   * Carries the reasoning-mode floor so an illegal persisted step can never
+   * reach the request schema. Absent → every previous behavior unchanged.
+   */
+  runtimeModel?: ModelInfo
   /** Run-scope execution policy; falls back to the legacy defaults when absent. */
   runtimeConfig?: AgentRuntimeSettings
   /** P4: durable digest of earlier (compacted) turns, injected as a leading system block. */
@@ -293,10 +300,18 @@ export interface ToolApprovalRequest {
 export interface AgentRunResult {
   isSuccess: boolean
   message: string
+  /** @deprecated Derived from `usage` — kept for legacy IPC/renderer fields. */
   contextTokensUsed: number
   thinkingText?: string
+  /**
+   * P6: the last model round's RAW provider usage — the single source of
+   * truth. Absent only when the provider reported nothing (≠ reported zero).
+   */
+  usage?: ModelUsage
   /** Cached prompt tokens / prompt tokens of the last round, when reported. */
   cacheHitRate?: number
+  /** P5: the model this run actually resolved to, for renderer-side display. */
+  activeModel?: ModelInfo
   /**
    * The finite context window this run actually budgeted against — the local
    * clamp for Ollama, the provider/model capability window (or the configured
@@ -462,6 +477,9 @@ export class AgentRuntime {
 
     const api = input.api
     const apiActive = Boolean(api?.baseUrl && api.model?.trim())
+    console.debug(
+      `[model] resolved provider=${apiActive ? 'api' : 'ollama'} model=${apiActive ? api!.model!.trim() : (input.model?.trim() || this.#model)}`,
+    )
     // Run-scope policy: chat.start passes the FRESH settings every time, so
     // execution changes apply on the very next message — no app restart.
     const runtimeConfig = input.runtimeConfig ?? DEFAULT_RUNTIME_SETTINGS
@@ -476,7 +494,17 @@ export class AgentRuntime {
     const model = apiActive
       ? api!.model!.trim()
       : (input.model?.trim() || this.#model)
-    const effort = input.reasoningMode
+    // P7 capability floor: a persisted/selected step the active model does not
+    // support (e.g. xhigh against Ollama's low/max, or any step when the API
+    // profile sends no reasoning_effort) snaps to the nearest legal one, so an
+    // illegal mode can never reach the request schema or the wire.
+    const modeFloor = input.runtimeModel?.reasoning.modes
+    const rawEffort = input.reasoningMode
+    const effort: ReasoningEffort | undefined = rawEffort === undefined || modeFloor === undefined
+      ? rawEffort
+      : modeFloor.length === 0
+        ? undefined
+        : nearestReasoningEffort(rawEffort, modeFloor) ?? modeFloor[0]
     const think = apiActive
       ? false
       : (effort === undefined ? this.#think : localThinkForEffort(effort))
@@ -598,6 +626,7 @@ export class AgentRuntime {
     })
     contextManager.addUserTurn({ role: 'user', content: trimmedInput })
     let latestContextTokens = 0
+    let latestUsage: ModelUsage | undefined
     let latestCacheHitRate: number | undefined
     let lastAssistantText = ''
     let didCompactRun = false
@@ -701,6 +730,7 @@ export class AgentRuntime {
           },
         })
         latestContextTokens = response.contextTokensUsed
+        latestUsage = response.usage
         latestCacheHitRate = response.cacheHitRate
         lastAssistantText = response.content.trim()
 
@@ -708,6 +738,8 @@ export class AgentRuntime {
           isSuccess: true,
           message,
           contextTokensUsed: latestContextTokens,
+          ...(latestUsage === undefined ? {} : { usage: latestUsage }),
+          ...(input.runtimeModel === undefined ? {} : { activeModel: input.runtimeModel }),
           contextWindowTokens: effectiveWindow,
           contextWindowSource,
           ...(response.thinking.trim() ? { thinkingText: response.thinking } : {}),

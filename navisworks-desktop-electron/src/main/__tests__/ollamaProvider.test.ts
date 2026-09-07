@@ -90,3 +90,31 @@ describe('OllamaProvider', () => {
     expect(outcome).toMatchObject({ name: 'AbortError' })
   })
 })
+
+describe('Ollama usage normalization (P6, §59)', () => {
+  it('eval counts become ModelUsage; cache stays UNDEFINED (never a fabricated 0)', async () => {
+    const fetchImpl = vi.fn(async () => ndjsonResponse([
+      { message: { role: 'assistant', content: '好' } },
+      { done: true, prompt_eval_count: 3_000, eval_count: 500 },
+    ])) as unknown as typeof fetch
+    const provider = new OllamaProvider({ fetchImpl })
+    const result = await provider.complete({ model: 'm', messages: [{ role: 'user', content: 'hi' }] })
+    expect(result.usage).toEqual({ inputTokens: 3_000, outputTokens: 500 })
+    expect(result.usage?.cacheReadTokens).toBeUndefined()
+    expect(result.usage?.reasoningTokens).toBeUndefined()
+    expect(result.cacheHitRate).toBeUndefined()
+    expect(result.contextTokensUsed).toBe(3_500)
+  })
+
+  it('silent counters → no usage object at all', async () => {
+    const fetchImpl = vi.fn(async () => ndjsonResponse([
+      { message: { role: 'assistant', content: '好' }, done: true },
+    ])) as unknown as typeof fetch
+    const provider = new OllamaProvider({ fetchImpl })
+    const result = await provider.complete({ model: 'm', messages: [] })
+    // Ollama always answers with (at least) zero counters; a zero-both usage
+    // is reported honestly and yields total 0 with cache unreported.
+    expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0 })
+    expect(result.cacheHitRate).toBeUndefined()
+  })
+})

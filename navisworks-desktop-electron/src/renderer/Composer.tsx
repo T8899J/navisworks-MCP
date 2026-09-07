@@ -3,12 +3,13 @@ import { type KeyboardEvent, type RefObject, useEffect, useLayoutEffect, useRef,
 import {
   REASONING_EFFORTS,
   REASONING_EFFORT_LABEL,
-  localDisplayEffort,
+  nearestReasoningEffort,
   type ReasoningEffort,
 } from '../shared/reasoning'
+import { calculateCacheHitRate, type ModelInfo, type ModelUsage } from '../shared/model'
 import type { DesktopSettings, ToolApprovalRequest } from './chatTypes'
 import { ConversationColumn } from './ConversationColumn'
-import { resolveContextRingState } from './contextRing'
+import { formatCacheRateLabel, formatTokenCount, resolveContextRingState } from './contextRing'
 import { EffortSlider } from './EffortSlider'
 import { pickHeroTitle } from './heroTitles'
 
@@ -49,8 +50,17 @@ interface ComposerProps {
     used: number
     window?: number
     source?: import('../shared/ipc').ContextWindowSource
+    /** P6: raw usage of the last round — drives the input/output/cache lines. */
+    usage?: ModelUsage
+    /** @deprecated Derived helper; the truth is `usage` now. */
     cacheHitRate?: number
   } | null
+  /**
+   * P7/P8: the active model as resolved by main's Model System. Drives the
+   * reasoning step list (capability), and never re-derives provider switches
+   * in here. Absent (no data yet) → the legacy API/local switch fallback.
+   */
+  activeModel?: ModelInfo | null
   approval?: ToolApprovalRequest | null
   approvalResolving?: boolean
   onDraftChange(value: string): void
@@ -74,6 +84,7 @@ export function Composer({
   settings,
   serviceAvailable,
   contextUsage,
+  activeModel,
   approval,
   approvalResolving = false,
   onDraftChange,
@@ -98,15 +109,24 @@ export function Composer({
     && activeApiProfile?.baseUrl.trim()
     && activeApiProfile.model.trim()
   )
-  const activeModel = usingApi ? activeApiProfile!.model : settings.selectedModel
-  // Effort slider steps: five for API models, only the two extremes for the
-  // local daemon (Low → fast, Max → deep). A middle step persisted from an
-  // API run displays as its local equivalent while local is active.
-  const effortTicks: readonly ReasoningEffort[] = usingApi
-    ? REASONING_EFFORTS
-    : (['low', 'max'] as const)
-  const activeEffort = usingApi ? settings.reasoningMode : localDisplayEffort(settings.reasoningMode)
-  const effortIndex = Math.max(0, effortTicks.indexOf(activeEffort))
+  // The model name shown: main's resolved ModelInfo when it has landed, the
+  // legacy switch-derived name only until the first model.info.get response.
+  const activeModelName = activeModel?.displayName
+    ?? (usingApi ? activeApiProfile!.model : settings.selectedModel)
+  // P7: effort steps come from the MODEL's capability (ModelInfo.reasoning
+  // .modes) — Ollama only ever shows Low/Max, an 'off' API profile shows none
+  // (the selector hides entirely), an 'on'/'auto' profile keeps the five-step
+  // UX. Without model data yet, fall back to the historical API/local split.
+  const effortTicks: readonly ReasoningEffort[] = activeModel
+    ? activeModel.reasoning.modes
+    : (usingApi ? REASONING_EFFORTS : (['low', 'max'] as const))
+  const reasoningDisabled = effortTicks.length === 0
+  // An illegal persisted step (e.g. xhigh against low/max) snaps to the
+  // nearest legal one — the UI must never display a step the model cannot run.
+  const activeEffort = reasoningDisabled
+    ? undefined
+    : (nearestReasoningEffort(settings.reasoningMode, effortTicks) ?? effortTicks[0])
+  const effortIndex = activeEffort === undefined ? 0 : Math.max(0, effortTicks.indexOf(activeEffort))
   // Context-window ring semantics (contextRing.ts): the runtime reports BOTH
   // the window and WHERE it came from, and the ring never presents a fallback
   // budget as the model's real limit. API Auto with no finished run shows an
@@ -124,6 +144,9 @@ export function Composer({
   const contextLabel = ring.total === null ? 'Auto' : formatContextLabel(ring.total)
   const usedTokens = ring.usedTokens
   const contextPct = ring.percent
+  // Cache reuse: derived from the RAW usage when present; the legacy
+  // cacheHitRate number only serves events that predate the usage field.
+  const cachedReuseRate = calculateCacheHitRate(contextUsage?.usage) ?? contextUsage?.cacheHitRate
   const ringCircumference = 2 * Math.PI * 9
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const controlsRef = useRef<HTMLDivElement>(null)
@@ -196,12 +219,12 @@ export function Composer({
   }, [menuOpen])
 
   // The local daemon only knows two effort steps (Low → fast, Max → deep).
-  // Switching to a local model writes the two-step equivalent of any middle
-  // step so the persisted value always matches what the runtime applies.
+  // Switching to a local model snaps any middle step to the nearest local one
+  // so the persisted value always matches what the runtime can apply (§39).
   const pickModel = (model: string) => {
     onModelChange(model)
-    const compatible = localDisplayEffort(settings.reasoningMode)
-    if (compatible !== settings.reasoningMode) onReasoningChange(compatible)
+    const compatible = nearestReasoningEffort(settings.reasoningMode, ['low', 'max'])
+    if (compatible !== undefined && compatible !== settings.reasoningMode) onReasoningChange(compatible)
     setPickerMode('effort')
   }
   const pickApiModel = (profileId: string) => {
@@ -344,15 +367,36 @@ export function Composer({
                     <span>窗口来源</span>
                     <span>{ring.sourceLabel}</span>
                   </div>
+                  {/* P6: this round's raw usage. Absent numbers render as
+                      未报告 — a provider that says nothing is NEVER shown as 0. */}
+                  <div className="context-popover-usage-title">本轮使用</div>
                   <div className="context-popover-row">
-                    <span>缓存命中率</span>
-                    <span>
-                      {contextUsage?.cacheHitRate !== undefined
-                        ? `${(contextUsage.cacheHitRate * 100).toFixed(1)}%`
-                        : usingApi
-                          ? '端点未上报'
-                          : 'Ollama 未上报'}
-                    </span>
+                    <span>输入</span>
+                    <span>{contextUsage?.usage?.inputTokens !== undefined
+                      ? formatTokenCount(contextUsage.usage.inputTokens)
+                      : '未报告'}</span>
+                  </div>
+                  <div className="context-popover-row">
+                    <span>输出</span>
+                    <span>{contextUsage?.usage?.outputTokens !== undefined
+                      ? formatTokenCount(contextUsage.usage.outputTokens)
+                      : '未报告'}</span>
+                  </div>
+                  {contextUsage?.usage?.reasoningTokens !== undefined ? (
+                    <div className="context-popover-row">
+                      <span>推理</span>
+                      <span>{formatTokenCount(contextUsage.usage.reasoningTokens)}</span>
+                    </div>
+                  ) : null}
+                  <div className="context-popover-row">
+                    <span>缓存读取</span>
+                    <span>{contextUsage?.usage?.cacheReadTokens !== undefined
+                      ? formatTokenCount(contextUsage.usage.cacheReadTokens)
+                      : '未报告'}</span>
+                  </div>
+                  <div className="context-popover-row">
+                    <span>缓存复用</span>
+                    <span>{formatCacheRateLabel(cachedReuseRate)}</span>
                   </div>
                 </div>
               </span>
@@ -361,11 +405,15 @@ export function Composer({
                 className="composer-menu-trigger"
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
-                title={`${activeModel} · ${REASONING_EFFORT_LABEL[activeEffort]}`}
+                title={reasoningDisabled || activeEffort === undefined
+                  ? activeModelName
+                  : `${activeModelName} · ${REASONING_EFFORT_LABEL[activeEffort]}`}
                 onClick={() => setMenuOpen((open) => !open)}>
-                <span className="composer-menu-trigger-model">{activeModel}</span>
-                <span className="composer-menu-trigger-sep" aria-hidden="true">·</span>
-                <span className="composer-menu-trigger-mode">{REASONING_EFFORT_LABEL[activeEffort]}</span>
+                <span className="composer-menu-trigger-model">{activeModelName}</span>
+                {!reasoningDisabled && activeEffort !== undefined ? <>
+                  <span className="composer-menu-trigger-sep" aria-hidden="true">·</span>
+                  <span className="composer-menu-trigger-mode">{REASONING_EFFORT_LABEL[activeEffort]}</span>
+                </> : null}
               </button>
 
               <div
@@ -377,28 +425,34 @@ export function Composer({
                     <button
                       type="button"
                       className="composer-picker-chip"
-                      title={activeModel}
+                      title={activeModelName}
                       onClick={() => setPickerMode('model')}>
-                      <span className="composer-picker-chip-name">{activeModel}</span>
-                      <span className="composer-picker-chip-sep" aria-hidden="true">·</span>
-                      <span
-                        key={activeEffort}
-                        className="composer-picker-chip-mode"
-                        data-effort={activeEffort}>
-                        {REASONING_EFFORT_LABEL[activeEffort]}
-                      </span>
+                      <span className="composer-picker-chip-name">{activeModelName}</span>
+                      {!reasoningDisabled && activeEffort !== undefined ? <>
+                        <span className="composer-picker-chip-sep" aria-hidden="true">·</span>
+                        <span
+                          key={activeEffort}
+                          className="composer-picker-chip-mode"
+                          data-effort={activeEffort}>
+                          {REASONING_EFFORT_LABEL[activeEffort]}
+                        </span>
+                      </> : null}
                       <ChevronRight aria-hidden="true" size={12} className="composer-picker-chip-chev" />
                     </button>
-                    <EffortSlider
-                      value={effortIndex}
-                      max={Math.max(0, effortTicks.length - 1)}
-                      ariaLabel="推理强度"
-                      ariaValueText={REASONING_EFFORT_LABEL[activeEffort]}
-                      onChange={(next) => {
-                        const effort = effortTicks[next]
-                        if (effort !== undefined) pickEffort(effort)
-                      }}
-                    />
+                    {!reasoningDisabled && activeEffort !== undefined ? (
+                      <EffortSlider
+                        value={effortIndex}
+                        max={Math.max(0, effortTicks.length - 1)}
+                        ariaLabel="推理强度"
+                        ariaValueText={REASONING_EFFORT_LABEL[activeEffort]}
+                        onChange={(next) => {
+                          const effort = effortTicks[next]
+                          if (effort !== undefined) pickEffort(effort)
+                        }}
+                      />
+                    ) : (
+                      <p className="composer-picker-effort-off">当前模型不支持推理强度选择</p>
+                    )}
                   </div>
                 ) : (
                   <div className="composer-model-pane" role="menu" aria-label="可选模型">

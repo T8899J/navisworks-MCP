@@ -10,6 +10,8 @@ export const ipcErrorCodes = [
   'DOCUMENT_CHANGED',
   'INSTANCE_CHANGED',
   'TARGET_CHANGED',
+  /** The active provider has no usable model configured (Model System v1). */
+  'MODEL_NOT_CONFIGURED',
   'INTERNAL'
 ] as const
 
