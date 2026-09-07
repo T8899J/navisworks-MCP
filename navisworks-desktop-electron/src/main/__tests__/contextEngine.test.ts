@@ -9,6 +9,7 @@ import { contextRegistry } from '../context/contextRegistry'
 import { canonicalFingerprint, canonicalJson, computePrefixHash } from '../context/contextHash'
 import { documentSource } from '../context/sources/documentSource'
 import { ContextState } from '../agent/contextState'
+import { ContextManager } from '../agent/contextManager'
 import type { ContextSourceEnvironment } from '../context/types'
 import { CURI_CORE_PROMPT, NAVISWORKS_CAPABILITY_PROMPT } from '../agent/prompts'
 
@@ -411,3 +412,43 @@ function sampleTask(status: 'running' | 'paused'): CuriTask {
     updatedAt: 0,
   } as unknown as CuriTask
 }
+
+describe('ContextManager still owns HOW MUCH under the engine (§29/§73)', () => {
+  it('counts epoch-seed + context-update blocks in the report buckets and still trims to budget', async () => {
+    const { dir, cleanup } = await tempDir()
+    try {
+      const store = new ContextEpochStore(dir)
+      const engine = makeEngine(store)
+      const assembly = await engine.prepare('s1', docEnv(
+        { connected: true, documentInstanceId: 'A', documentName: 'A.nwd' },
+        { compactSummary: '既有摘要' },
+      ))
+      const manager = new ContextManager({
+        systemPrompt: assembly.baseline,
+        history: [],
+        contextBlocks: [...assembly.blocks, {
+          kind: 'recall',
+          message: { role: 'system', content: 'x'.repeat(4_000) },
+        }],
+      })
+      manager.addUserTurn({ role: 'user', content: '你好' })
+      const built = manager.assembleBudgetedFrames({
+        tools: [],
+        temperature: 0.1,
+        maxTokens: 2_048,
+        effectiveWindow: 4_000,
+        sendContextWindow: false,
+      })
+      // Engine durable blocks land in the existing token buckets…
+      expect(built.report.workingStateTokens).toBeGreaterThan(0)
+      expect(built.report.semanticMemoryTokens).toBeGreaterThan(0)
+      // The only frame is the protected current user turn — ContextManager
+      // never trims it, even when the oversized system blocks blow the budget.
+      expect(built.report.framesIncluded).toBe(1)
+      expect(built.report.framesDropped).toBe(0)
+      expect(built.messages.at(-1)?.role).toBe('user')
+    } finally {
+      await cleanup()
+    }
+  })
+})
