@@ -55,9 +55,11 @@ export class ContextEngine {
       epoch = this.newEpoch(sessionId, baseline, baselineVersions, undefined, seedFromEnvironment)
       status = 'rolled-over'
     } else if (persisted.epoch.baseline !== baseline.text
-      || persisted.epoch.baselineHash !== baseline.hash) {
-      // Baseline source text changed (e.g. a prompt release): rollover with
-      // reason=baseline-changed — never rewrite the old epoch's baseline (§17).
+      || persisted.epoch.baselineHash !== baseline.hash
+      || !sameBaselineVersions(persisted.epoch.baselineVersions, baselineVersions)) {
+      // A baseline source TEXT or VERSION changed (e.g. a prompt release or a
+      // source-semantics bump): rollover with reason=baseline-changed — never
+      // rewrite the old epoch's baseline in place (§17/§67).
       console.debug(`[context] ROLLOVER session=${sessionId} reason=baseline-changed`)
       epoch = this.newEpoch(sessionId, baseline, baselineVersions, persisted.epoch, seedFromEnvironment)
       status = 'rolled-over'
@@ -388,6 +390,21 @@ function blockKindFor(key: string): ContextBlockKind {
 
 function randomId(): string {
   return Math.random().toString(36).slice(2, 10)
+}
+
+/** Every baseline key has the same recorded version (order-insensitive). */
+function sameBaselineVersions(
+  recorded: Record<string, number>,
+  current: Record<string, number>,
+): boolean {
+  const recordedKeys = Object.keys(recorded).sort()
+  const currentKeys = Object.keys(current).sort()
+  if (recordedKeys.length !== currentKeys.length) return false
+  for (let index = 0; index < recordedKeys.length; index += 1) {
+    const key = recordedKeys[index]
+    if (key === undefined || current[key] !== recorded[key]) return false
+  }
+  return true
 }
 
 function errorMessageOf(error: unknown): string {
