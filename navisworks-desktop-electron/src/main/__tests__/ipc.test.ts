@@ -34,6 +34,7 @@ import type {
 import type { NavisworksBridgeClient } from '../bridgeClient'
 import type { ToolCatalog } from '../toolCatalog'
 import { ContextState } from '../agent/contextState'
+import { QuestionService } from '../question/questionService'
 import type { AgentScopeManager } from '../kernel/agentScopes'
 import type { NavisworksInstanceRegistry } from '../navisworks/instanceRegistry'
 import { NavisworksInstanceSelection } from '../navisworks/instanceSelection'
@@ -194,6 +195,7 @@ function createHarness(options: {
   ollama: OllamaAgentPort
   store?: SessionStore
   settings?: JsonSettingsRepository
+  questions?: import('../question/questionService').QuestionService
   secrets?: { encrypt(value: string): string; decrypt(value: string): string }
   bridge?: NavisworksBridgeClient
   tools?: ToolCatalog
@@ -203,6 +205,7 @@ function createHarness(options: {
 }): IpcHarness {
   const store = options.store ?? createSessionStore()
   const dependencies: DesktopIpcDependencies = {
+    questions: options.questions,
     runtimeInfo: {
       version: '0.0.0-test',
       platform: 'win32',
@@ -1507,6 +1510,163 @@ describe('ChatRunRegistry — Model System integration (P5/P6/P8)', () => {
       const response = await harness.invoke('model.info.get')
       if (response.ok !== false) throw new Error('expected model.info.get to fail')
       expect(response.error.code).toBe('MODEL_NOT_CONFIGURED')
+    } finally {
+      await harness.dispose()
+    }
+  })
+})
+
+describe('ChatRunRegistry — pending questions across session switches (§85)', () => {
+  it('A suspends, B runs to completion, A restores via pending.list and resumes', async () => {
+    const questions = new QuestionService()
+    const facade = createFacade(createSessionStore())
+    let askedA = 0
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run(input, options) {
+        if (input.sessionId === 'session-a') {
+          askedA += 1
+          const outcome = await options.requestQuestion({
+            source: 'tool',
+            questions: [{
+              question: '范围？',
+              kind: 'single',
+              options: [{ label: '整个模型' }, { label: '当前选择' }],
+            }],
+          })
+          return { content: 'A 继续完成：' + outcome.kind }
+        }
+        return { content: 'B 已完成' }
+      },
+    }
+    const registry = new ChatRunRegistry(
+      agent, facade, new ToolApprovalRegistry(), undefined, undefined,
+      async () => ({ connected: false, status: 'Navisworks 未连接' }),
+      undefined, undefined, undefined, undefined, questions,
+    )
+    const senderA = fakeSender()
+    const senderB = fakeSender()
+    const sendA = senderA.send as unknown as ReturnType<typeof vi.fn>
+    const sendB = senderB.send as unknown as ReturnType<typeof vi.fn>
+
+    registry.start({ sessionId: 'session-a', messageId: 'm-a', text: '帮我查支架' }, senderA)
+    await vi.waitFor(() => {
+      const asked = sendA.mock.calls.find((call) => call[1] === 'question.requested')
+      if (!asked) throw new Error('question.requested not delivered yet')
+    })
+    // The event passed the REAL schema (emitTo drops invalid payloads).
+    const questionPayload = sendA.mock.calls.find((call) => call[1] === 'question.requested')?.[2] as {
+      requestId: string
+      sessionId: string
+    }
+    expect(questionPayload.sessionId).toBe('session-a')
+    // A is suspended; B runs the SAME registry concurrently and finishes.
+    registry.start({ sessionId: 'session-b', messageId: 'm-b', text: '你好' }, senderB)
+    await vi.waitFor(() => {
+      expect(sendB.mock.calls.some((call) => call[1] === 'chat.done')).toBe(true)
+    })
+    expect(askedA).toBe(1)
+    // Session switch restore: pending.list(sessionId) finds A's question —
+    // the UI never depends on having CAUGHT the event live (§18).
+    expect(questions.listPending('session-a')).toHaveLength(1)
+    expect(questions.listPending('session-b')).toHaveLength(0)
+    // ...and answering it resumes A's ORIGINAL run (Invariant B).
+    expect(questions.answer(questionPayload.requestId, [{ questionIndex: 0, values: ['当前选择'] }])).toBe(true)
+    await vi.waitFor(() => {
+      const done = sendA.mock.calls.find((call) => call[1] === 'chat.done')
+      if (!done) throw new Error('A never resumed')
+      expect((done[2] as { content: string }).content).toContain('A 继续完成：answered')
+    })
+    expect(questions.pendingCount).toBe(0)
+  })
+
+  it('aborting a suspended run rejects the question promise (Invariant D)', async () => {
+    const questions = new QuestionService()
+    const facade = createFacade(createSessionStore())
+    const agent: OllamaAgentPort = {
+      ...stubAgent(),
+      async run(_input, options) {
+        await options.requestQuestion({
+          source: 'tool',
+          questions: [{ question: 'q?', kind: 'single', options: [{ label: 'a' }, { label: 'b' }] }],
+        })
+        return { content: 'unreachable' }
+      },
+    }
+    const registry = new ChatRunRegistry(
+      agent, facade, new ToolApprovalRegistry(), undefined, undefined,
+      async () => ({ connected: false, status: 'Navisworks 未连接' }),
+      undefined, undefined, undefined, undefined, questions,
+    )
+    const sender = fakeSender()
+    const send = sender.send as unknown as ReturnType<typeof vi.fn>
+    const started = registry.start({ sessionId: 'session-c', messageId: 'm-c', text: 'x' }, sender)
+    await vi.waitFor(() => {
+      expect(questions.listPending('session-c')).toHaveLength(1)
+    })
+    registry.abort(started.sessionId, started.turnId)
+    await vi.waitFor(() => {
+      expect(questions.pendingCount).toBe(0)
+    })
+    await vi.waitFor(() => {
+      expect(send.mock.calls.some((call) => call[1] === 'chat.error')).toBe(true)
+    })
+  })
+})
+
+describe('question routes — renderer answer validation via the REAL handlers (§101/§16)', () => {
+  const PROMPTS = [{
+    question: '范围？',
+    kind: 'single' as const,
+    options: [{ label: '整个模型' }, { label: '当前选择' }],
+  }]
+  const VALID = {
+    runId: 'r1',
+    sessionId: 's1',
+    turnId: undefined,
+    messageId: undefined,
+    toolCallId: undefined,
+    source: 'tool' as const,
+    questions: PROMPTS,
+  }
+
+  it('question.answer rejects unknown ids, invented labels, bad indexes, multi-single, empty required; accepts valid', async () => {
+    const questions = new QuestionService()
+    let pendingId = ''
+    const promise = questions.ask(VALID, (request) => {
+      pendingId = request.requestId
+    })
+    const harness = createHarness({ ollama: stubAgent(), questions })
+    try {
+      const attempts: Array<[() => string, unknown[], boolean]> = [
+        [() => 'no-such-id', [{ questionIndex: 0, values: ['整个模型'] }], false],
+        [() => pendingId, [{ questionIndex: 0, values: ['我自己编的选项'] }], false],
+        [() => pendingId, [{ questionIndex: 5, values: ['整个模型'] }], false],
+        [() => pendingId, [{ questionIndex: 0, values: ['整个模型', '当前选择'] }], false],
+        [() => pendingId, [{ questionIndex: 0, values: [] }], false],
+        [() => pendingId, [{ questionIndex: 0, values: ['当前选择'] }], true],
+      ]
+      for (const [pick, answers, expected] of attempts) {
+        const response = await harness.invoke('question.answer', { requestId: pick(), answers })
+        expect(response).toMatchObject({ ok: true, data: { resolved: expected } })
+      }
+      await expect(promise).resolves.toEqual({ kind: 'answered', answers: [{ questionIndex: 0, values: ['当前选择'] }] })
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('question.pending.list filters by session through the real route', async () => {
+    const questions = new QuestionService()
+    void questions.ask({ ...VALID, sessionId: 'sA' }, () => undefined)
+    const harness = createHarness({ ollama: stubAgent(), questions })
+    try {
+      const mine = await harness.invoke('question.pending.list', { sessionId: 'sA' })
+      const list = (mine as { data: unknown[] }).data
+      expect(list).toHaveLength(1)
+      expect((list[0] as { sessionId: string }).sessionId).toBe('sA')
+      const none = await harness.invoke('question.pending.list', { sessionId: 'sB' })
+      expect((none as { data: unknown[] }).data).toHaveLength(0)
     } finally {
       await harness.dispose()
     }
