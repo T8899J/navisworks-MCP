@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -175,8 +175,14 @@ describe('ToolOutputStore — safety (Cases 6–7)', () => {
       })
       // Nothing expired yet.
       expect(await store.cleanup(7 * 24 * 60 * 60 * 1000)).toBe(0)
-      // Everything expired now.
-      expect(await store.cleanup(0)).toBe(1)
+      // Force the age past the window deterministically: a same-millisecond
+      // mtime would make `now - mtime > 0` flaky on fast filesystems.
+      const entries = await readdir(dir)
+      const epoch = new Date(1)
+      for (const entry of entries) {
+        await utimes(join(dir, entry), epoch, epoch)
+      }
+      expect(await store.cleanup(1_000)).toBe(entries.length)
       // A missing directory must not throw either.
       await rm(dir, { recursive: true, force: true })
       expect(await store.cleanup(0)).toBe(0)

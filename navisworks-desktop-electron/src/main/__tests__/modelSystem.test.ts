@@ -148,8 +148,8 @@ describe('ModelInfo metadata (§15–§17, §53)', () => {
   })
 })
 
-describe('Reasoning modes by provider policy (§60)', () => {
-  it('API sendReasoningEffort=off → modes [] and reasoning capability false', () => {
+describe('Reasoning modes by provider policy (§60, §56 P8.5)', () => {
+  it('§56 Case C: sendReasoningEffort=off → requestPolicy off, modes [], capability NOT false', () => {
     const settings = profileSettings({
       preferApiModel: true,
       apiProfiles: [profileOf('p1', 'glm-x', { sendReasoningEffort: 'off' })],
@@ -158,10 +158,12 @@ describe('Reasoning modes by provider policy (§60)', () => {
     const result = resolveActiveModel(settings, { baseUrl: 'https://x/v1', model: 'glm-x' })
     if (result.status !== 'resolved') throw new Error('expected resolved')
     expect(result.info.reasoning.modes).toEqual([])
-    expect(result.info.capabilities.reasoning).toBe(false)
+    expect(result.info.reasoning.requestPolicy).toBe('off')
+    // A compatibility switch never proves the model CANNOT reason.
+    expect(result.info.capabilities.reasoning).toBeUndefined()
   })
 
-  it('API sendReasoningEffort=on → five modes and capability true', () => {
+  it('§56 Case D: sendReasoningEffort=on → requestPolicy on, capability stays undefined', () => {
     const settings = profileSettings({
       preferApiModel: true,
       apiProfiles: [profileOf('p1', 'glm-x', { sendReasoningEffort: 'on' })],
@@ -170,7 +172,21 @@ describe('Reasoning modes by provider policy (§60)', () => {
     const result = resolveActiveModel(settings, { baseUrl: 'https://x/v1', model: 'glm-x' })
     if (result.status !== 'resolved') throw new Error('expected resolved')
     expect(result.info.reasoning.modes).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
-    expect(result.info.capabilities.reasoning).toBe(true)
+    expect(result.info.reasoning.requestPolicy).toBe('on')
+    expect(result.info.capabilities.reasoning).toBeUndefined()
+  })
+
+  it('auto policy: five modes offered, requestPolicy auto, capability undefined', () => {
+    const settings = profileSettings({
+      preferApiModel: true,
+      apiProfiles: [profileOf('p1', 'glm-x', { sendReasoningEffort: 'auto' })],
+      activeApiProfileId: 'p1',
+    })
+    const result = resolveActiveModel(settings, { baseUrl: 'https://x/v1', model: 'glm-x' })
+    if (result.status !== 'resolved') throw new Error('expected resolved')
+    expect(result.info.reasoning.modes).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(result.info.reasoning.requestPolicy).toBe('auto')
+    expect(result.info.capabilities.reasoning).toBeUndefined()
   })
 
   it('empty active profile (model="") → MODEL_NOT_CONFIGURED signal, never a crash', () => {

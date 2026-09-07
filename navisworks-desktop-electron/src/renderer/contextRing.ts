@@ -3,7 +3,12 @@ import type { ContextWindowSource } from '../shared/ipc'
 export type { ContextWindowSource }
 
 export interface ContextRingInput {
-  usingApi: boolean
+  /**
+   * `null` = the active model's provider is NOT yet known (main has not
+   * resolved it): the ring must show a neutral Auto state and NEVER guess by
+   * re-deriving provider routing from settings (P8.5).
+   */
+  usingApi: boolean | null
   usedTokens: number
   /** Window the last finished run budgeted against (chat.done). */
   reportedWindow?: number
@@ -98,6 +103,16 @@ export function resolveContextRingState(input: ContextRingInput): ContextRingSta
   }
 
   // No finished run reported a window for this session yet.
+  if (input.usingApi === null) {
+    return {
+      mode: 'auto',
+      total: null,
+      usedTokens: used,
+      percent: 0,
+      title: '上下文窗口：未确定（等待模型解析完成）',
+      sourceLabel: '未确定',
+    }
+  }
   if (input.usingApi) {
     if (input.profileContextWindowTokens != null) {
       return measuredState('profile', input.profileContextWindowTokens, used)

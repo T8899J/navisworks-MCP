@@ -533,7 +533,12 @@ export function normalizeModelInfo(value: unknown): ModelInfo | null {
         ...(output === undefined ? {} : { output }),
       }
     })(),
-    reasoning: { modes },
+    reasoning: {
+      modes,
+      ...(reasoning.requestPolicy === 'auto' || reasoning.requestPolicy === 'on' || reasoning.requestPolicy === 'off'
+        ? { requestPolicy: reasoning.requestPolicy }
+        : {}),
+    },
     metadataSource: source.metadataSource === 'local'
       || source.metadataSource === 'profile'
       || source.metadataSource === 'provider'

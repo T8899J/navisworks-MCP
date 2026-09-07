@@ -96,31 +96,24 @@ export function Composer({
   onSlashCommand,
   onReasoningChange
 }: ComposerProps) {
-  // The model actually in effect: either the selected local Ollama model or
-  // the API-connected cloud model.
-  const activeApiProfile = settings.apiProfiles.find(
-    (profile) => profile.id === settings.activeApiProfileId
-  )
-  // Mirror the main-process routing (ipc.ts resolveChatEndpoint) so the shown
-  // model is the one that will actually serve the next run.
-  const usingApi = Boolean(
-    settings.apiEnabled
-    && (settings.preferApiModel || !settings.ollamaEnabled)
-    && activeApiProfile?.baseUrl.trim()
-    && activeApiProfile.model.trim()
-  )
-  // The model name shown: main's resolved ModelInfo when it has landed, the
-  // legacy switch-derived name only until the first model.info.get response.
-  const activeModelName = activeModel?.displayName
-    ?? (usingApi ? activeApiProfile!.model : settings.selectedModel)
+  // P8.5: the active model's IDENTITY is a fact main resolves
+  // (ModelResolver → model.info.get) — never re-derived here from
+  // preferApiModel / activeApiProfileId / ollamaEnabled. Until main answers,
+  // the composer shows a neutral '未确定' state instead of guessing.
+  const usingApi: boolean | null = activeModel
+    ? activeModel.provider.kind === 'openai-compatible'
+    : null
+  // The model name shown: main's resolved ModelInfo, or the honest unknown.
+  const activeModelName = activeModel?.displayName ?? '未确定'
   // P7: effort steps come from the MODEL's capability (ModelInfo.reasoning
   // .modes) — Ollama only ever shows Low/Max, an 'off' API profile shows none
   // (the selector hides entirely), an 'on'/'auto' profile keeps the five-step
-  // UX. Without model data yet, fall back to the historical API/local split.
+  // UX. Before main resolves: the neutral five-step list (the runtime floors
+  // the final value per request, so an offered step is never a false promise).
   const effortTicks: readonly ReasoningEffort[] = activeModel
     ? activeModel.reasoning.modes
-    : (usingApi ? REASONING_EFFORTS : (['low', 'max'] as const))
-  const reasoningDisabled = effortTicks.length === 0
+    : REASONING_EFFORTS
+  const reasoningDisabled = activeModel !== undefined && activeModel !== null && effortTicks.length === 0
   // An illegal persisted step (e.g. xhigh against low/max) snaps to the
   // nearest legal one — the UI must never display a step the model cannot run.
   const activeEffort = reasoningDisabled
@@ -131,6 +124,9 @@ export function Composer({
   // the window and WHERE it came from, and the ring never presents a fallback
   // budget as the model's real limit. API Auto with no finished run shows an
   // honest "Auto / waiting for the runtime" state instead of a number.
+  const activeApiProfile = settings.apiProfiles.find(
+    (profile) => profile.id === activeModel?.ref.providerId.slice('api:'.length)
+  )
   const ring = resolveContextRingState({
     usingApi,
     usedTokens: contextUsage?.used ?? 0,

@@ -286,6 +286,9 @@ export const modelInfoSchema = z.strictObject({
     // .readonly() keeps the schema output mutually assignable with the
     // shared ModelInfo type (`readonly ReasoningEffort[]`).
     modes: z.array(reasoningEffortSchema).readonly(),
+    // Wire request policy (compatibility), deliberately distinct from
+    // capabilities.reasoning (the capability truth). Absent = no policy stated.
+    requestPolicy: z.enum(['auto', 'on', 'off']).optional(),
   }),
   metadataSource: z.enum(['local', 'profile', 'provider', 'unknown']),
 })

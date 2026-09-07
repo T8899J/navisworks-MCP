@@ -86,29 +86,20 @@ export function buildApiModelInfo(
   const providerId = apiProfileProviderId(profile.id)
   const modelId = profile.model.trim()
   const configuredWindow = profile.advanced.contextWindowTokens
-  // sendReasoningEffort is a REQUEST-COMPATIBILITY policy, not a model
-  // capability. 'on' = the user asserts the endpoint takes reasoning_effort
-  // (modes offered, capability true); 'off' = strip it (capability false);
-  // 'auto' = compatibility unknown → capability undefined, and the five
-  // steps stay offered only for backward-compatible UX.
+  // sendReasoningEffort is a REQUEST-COMPATIBILITY policy — it decides what
+  // rides on the WIRE (requestPolicy) and which steps the UI may offer (modes:
+  // 'off' → none). It is NEVER a capability statement: capabilities.reasoning
+  // stays whatever the floor proves (nothing for OpenAI-compatible endpoints),
+  // so it remains undefined no matter how the user configures the profile.
   const sendEffort = endpoint.advanced?.sendReasoningEffort ?? profile.advanced.sendReasoningEffort
-  const reasoningCapability: boolean | undefined =
-    sendEffort === 'on' ? true : sendEffort === 'off' ? false : undefined
   const modes: readonly ReasoningEffort[] = sendEffort === 'off' ? [] : REASONING_EFFORTS
-  // Capabilities ride the wire floor — the provider states what its protocol
-  // guarantees (tools/temperature for openai-compatible); reasoning is stamped
-  // from the profile's COMPATIBILITY choice, which is not a capability claim.
-  const capabilities: ModelInfo['capabilities'] = {
-    ...(floor?.capabilities ?? { tools: true, temperature: true }),
-    ...(reasoningCapability === undefined ? {} : { reasoning: reasoningCapability }),
-  }
   return {
     ref: { providerId, modelId },
     displayName: modelId,
     provider: { id: providerId, displayName: profile.name, kind: 'openai-compatible' },
-    capabilities,
+    capabilities: { ...(floor?.capabilities ?? { tools: true, temperature: true }) },
     limits: configuredWindow != null && configuredWindow > 0 ? { context: configuredWindow } : {},
-    reasoning: { modes },
+    reasoning: { modes, requestPolicy: sendEffort },
     metadataSource: configuredWindow != null && configuredWindow > 0 ? 'profile' : 'unknown',
   }
 }

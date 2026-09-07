@@ -64,6 +64,15 @@ export interface ModelLimits {
 export type ModelMetadataSourceId = 'local' | 'profile' | 'provider' | 'unknown'
 
 /**
+ * How Curi should treat `reasoning_effort` on the WIRE for this model — a
+ * REQUEST-COMPATIBILITY policy (from the API profile), NOT a capability claim.
+ * A model can support reasoning while the endpoint rejects the field
+ * ('off'), and vice versa; `capabilities.reasoning` answers the capability
+ * question alone and stays `undefined` until something actually proves it.
+ */
+export type ModelRequestPolicy = 'auto' | 'on' | 'off'
+
+/**
  * The unified model identity + metadata consumed by runtime and renderer, so
  * neither guesses "who is this model / what does it support / what is its
  * window / which reasoning steps does it have".
@@ -78,9 +87,14 @@ export interface ModelInfo {
   }
   capabilities: ModelCapabilities
   limits: ModelLimits
-  /** The effort steps this model actually supports (Ollama: low/max only). */
+  /**
+   * The effort steps the UI may offer (Ollama: low/max only), plus the WIRE
+   * request policy that governs reasoning_effort (kept separate from
+   * `capabilities.reasoning`, which only states what is actually known).
+   */
   reasoning: {
     modes: readonly ReasoningEffort[]
+    requestPolicy?: ModelRequestPolicy
   }
   metadataSource: ModelMetadataSourceId
 }
