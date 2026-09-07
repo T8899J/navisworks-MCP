@@ -5,6 +5,9 @@ import { ToolOutputStore } from '../toolOutputStore'
 import type { DesktopDataPaths } from '../dataPaths'
 import { ToolApprovalRegistry } from '../ipc'
 import { ModelRouter } from '../model/modelRouter'
+import { ContextEngine } from '../context/contextEngine'
+import { ContextEpochStore } from '../context/contextEpochStore'
+import { contextRegistry } from '../context/contextRegistry'
 import {
   JsonSessionRepository,
   JsonSettingsRepository,
@@ -33,6 +36,7 @@ export const CompactionServiceToken = token<Pick<AgentRuntime, 'compactConversat
 export const ApprovalServiceToken = token<ToolApprovalRegistry>('app.approvals')
 export const NavisworksInstanceRegistryToken = token<NavisworksInstanceRegistry>('app.navisworksInstances')
 export const NavisworksInstanceSelectionToken = token<NavisworksInstanceSelection>('app.navisworksSelection')
+export const ContextEngineToken = token<ContextEngine>('app.contextEngine')
 
 /** Composition root: instantiate once, register once, and resolve everywhere else. */
 export async function installApplicationServices(
@@ -49,7 +53,15 @@ export async function installApplicationServices(
   const modelRouter = new ModelRouter()
   const approvals = new ToolApprovalRegistry()
   await installAgentServices(appScope, paths)
+  // Context Engine v1: the WHAT of context, durable per-session epochs. One
+  // process-level engine shared by the runtime (assembly) and IPC (session
+  // cleanup + compaction rollover).
+  const contextEngine = new ContextEngine(
+    contextRegistry,
+    new ContextEpochStore(paths.contextEpochsDirectory),
+  )
   const runtime = new AgentRuntime({
+    contextEngine,
     bridgeClient: bridge,
     model: persistedSettings?.selectedModel,
     think: localThinkForEffort(normalizeReasoningEffort(persistedSettings?.reasoningMode)),
@@ -73,6 +85,7 @@ export async function installApplicationServices(
     .register(ModelRouterToken, modelRouter)
     .register(AgentRuntimeToken, runtime)
     .register(CompactionServiceToken, runtime)
+    .register(ContextEngineToken, contextEngine)
     .register(ApprovalServiceToken, approvals)
   appScope.onDispose(() => runtime.dispose())
   return persistedSettings

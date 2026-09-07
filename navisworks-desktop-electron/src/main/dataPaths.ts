@@ -15,6 +15,8 @@ export interface DesktopDataPaths {
   startupLogFile: string
   toolResultsDirectory: string
   toolOutputDirectory: string
+  /** Context Engine v1: per-session durable context-epoch JSON files (§13). */
+  contextEpochsDirectory: string
   executionLedgerFile: string
   executionLedgerBackupFile: string
   tasksFile: string
@@ -173,6 +175,7 @@ function buildPaths(
     startupLogFile: path.join(rootDirectory, 'startup.log'),
     toolResultsDirectory: path.join(rootDirectory, 'tool-results'),
     toolOutputDirectory: path.join(rootDirectory, 'tool-output'),
+    contextEpochsDirectory: path.join(rootDirectory, 'context-epochs'),
     executionLedgerFile: path.join(rootDirectory, 'execution-ledger.json'),
     executionLedgerBackupFile: path.join(rootDirectory, 'execution-ledger.backup.json'),
     tasksFile: path.join(rootDirectory, 'tasks.json'),

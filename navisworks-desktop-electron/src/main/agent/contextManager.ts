@@ -1,5 +1,6 @@
 import type { ChatMessage } from '../model/types'
 import type { AgentToolContract } from '../toolCatalog'
+import { COMPACT_SYSTEM_PROMPT } from '../context/compactPrompt'
 import type { BuiltAgentRequest } from './contextTypes'
 import {
   contextFramesToMessages,
@@ -16,17 +17,31 @@ export const COMPACT_MAX_TRANSCRIPT_CHARS = 30_000
 export const LOCAL_MAX_CONTEXT_TOKENS = 32_768
 
 export type ContextPressure = 'idle' | 'soft' | 'compact'
-export type ContextBlockKind = 'document-transition' | 'semantic-memory' | 'compact-summary' | 'verified-facts' | 'reference-set' | 'recall' | 'task-state' | 'other'
+/**
+ * 'epoch-seed' / 'context-update' are the Context Engine v1 kinds: the durable
+ * prefix parts the ContextBuildReport measures separately (baseline vs updates
+ * vs working state). The legacy kinds remain for every non-engine caller.
+ */
+export type ContextBlockKind =
+  | 'document-transition'
+  | 'semantic-memory'
+  | 'compact-summary'
+  | 'verified-facts'
+  | 'reference-set'
+  | 'recall'
+  | 'task-state'
+  | 'epoch-seed'
+  | 'context-update'
+  | 'other'
 
 export interface ContextBlock {
   message: ChatMessage
   kind: ContextBlockKind
 }
 
-const DEFAULT_COMPACT_SYSTEM_PROMPT =
-  '你是会话压缩器。把提供的对话与工具过程压缩为一份简洁的工作摘要，必须保留：用户目标、'
-  + '已验证的关键事实（构件 ID、名称、数量、属性要点）、已执行的操作及结果、重要错误、未完成的步骤。'
-  + '不要编造，不要添加建议，只输出摘要本身。'
+// P14: single-source summary prompt. The automatic path here and the manual
+// /compact path both render from this one constant (no second summary rule).
+const DEFAULT_COMPACT_SYSTEM_PROMPT = COMPACT_SYSTEM_PROMPT
 
 const DEFAULT_PROVIDER_OVERHEAD = 256
 const DEFAULT_SAFETY_MARGIN = 512

@@ -50,6 +50,12 @@ import {
   type DocumentChangeNotice,
 } from './agent/contextState'
 import { renderVerifiedFacts } from './agent/facts'
+import type { ContextEngine } from './context/contextEngine'
+import {
+  COMPACT_SYSTEM_PROMPT,
+  renderConversationTranscript,
+} from './context/compactionService'
+import type { ContextAssembly } from './context/types'
 import { localThinkForEffort, nearestReasoningEffort, type ReasoningEffort } from '../shared/reasoning'
 import type { ModelInfo, ModelUsage } from '../shared/model'
 import {
@@ -325,6 +331,16 @@ export interface AgentRunResult {
   compacted?: boolean
   /** P4: the compact summary produced this run (if any), for durable persistence. */
   compactSummary?: string
+  /**
+   * Context Engine (P11/P15): epoch metadata of THIS run when the engine
+   * assembled the context. Persisted on the session by the facade; surfaced
+   * on chat.done so diagnostics can confirm prefix stability across turns.
+   */
+  contextEpochId?: string
+  contextGeneration?: number
+  contextBaselineHash?: string
+  contextPrefixHash?: string
+  contextUpdatesAdded?: number
   semanticMemory?: SemanticMemory
   errorCode?: string
 }
@@ -355,6 +371,14 @@ export interface AgentRuntimeOptions {
   resolveToolResult?: (value: unknown) => Promise<unknown>
   /** Bounded tool-output store: large results become preview + resultRef. */
   toolOutputStore?: ToolOutputStore
+  /**
+   * P9–P13: Context Engine. When present AND a run carries a sessionId, the
+   * WHAT of context (baseline / durable updates / volatile working blocks) is
+   * assembled by registered sources through a durable per-session Epoch.
+   * Absent (unit tests, session-less drafts) → the legacy in-runtime assembly,
+   * byte-for-byte as before.
+   */
+  contextEngine?: ContextEngine
   /**
    * Task System v1: durable task lifecycle (plan/evidence/verify). Optional —
    * omitted in unit tests and every behavior stays exactly as before.
@@ -409,6 +433,7 @@ export class AgentRuntime {
   readonly #operationCoordinator: DocumentOperationCoordinator | undefined
   readonly #resolveToolResult: ((value: unknown) => Promise<unknown>) | undefined
   readonly #taskManager: TaskManager | undefined
+  readonly #contextEngine: ContextEngine | undefined
 
   constructor(options: AgentRuntimeOptions) {
     this.#bridgeClient = options.bridgeClient
@@ -429,6 +454,7 @@ export class AgentRuntime {
     this.#operationCoordinator = options.operationCoordinator
     this.#resolveToolResult = options.resolveToolResult
     this.#taskManager = options.taskManager
+    this.#contextEngine = options.contextEngine
   }
 
   /**
@@ -536,91 +562,118 @@ export class AgentRuntime {
       ? (advanced?.maxOutputTokens ?? 4_096)
       : this.#numPredict
     const maxToolRounds = runtimeConfig.maxToolRounds
-    const contextBlocks: ContextBlock[] = [
-      {
-        kind: 'other',
-        message: {
-          role: 'system',
-          content: NAVISWORKS_CAPABILITY_PROMPT,
-        },
-      },
-    ]
     // Task System v1: resume the session's latest unfinished task as Active
-    // Task Context (block order: capability → task-state → document…). A paused
-    // task never auto-executes — it re-enters running only when the model
-    // produces tool calls again during THIS run (Section 十四).
+    // Task Context. A paused task never auto-executes — it re-enters running
+    // only when the model produces tool calls again during THIS run (§14).
     const taskManager = this.#taskManager
     const sessionId = input.sessionId
     let activeTask: CuriTask | undefined
     if (taskManager !== undefined && sessionId !== undefined) {
       activeTask = taskManager.getResumableTaskForSession(sessionId)
+    }
+    const semanticMemory = input.sessionId === undefined
+      ? input.semanticMemory
+      : updateSemanticMemory(input.semanticMemory, trimmedInput)
+    const currentDocumentBlock = renderCurrentDocumentContext(
+      input.currentDocument ?? this.#contextState?.currentDocument,
+    )
+
+    // Context Engine v1 (P9–P13): the WHAT of the model context — baseline,
+    // durable append-only updates, volatile working blocks — is assembled by
+    // registered sources through a durable per-session Epoch. ContextManager
+    // keeps the HOW MUCH (token budget). Without an engine or a session id
+    // (unit tests, drafts) the legacy manual assembly below runs unchanged —
+    // this seam is why the runtime no longer hand-pushes context blocks.
+    let contextAssembly: ContextAssembly | undefined
+    let baseline = CURI_CORE_PROMPT
+    let contextBlocks: ContextBlock[]
+    if (this.#contextEngine !== undefined && sessionId !== undefined) {
+      contextAssembly = await this.#contextEngine.prepare(sessionId, {
+        sessionId,
+        document: input.currentDocument ?? this.#contextState?.currentDocument,
+        ...(input.documentNotice === undefined ? {} : { documentNotice: input.documentNotice }),
+        ...(this.#contextState === undefined ? {} : { documentRevision: this.#contextState.documentRevision }),
+        ...(activeTask === undefined ? {} : { activeTask }),
+        ...(semanticMemory === undefined ? {} : { semanticMemory }),
+        ...(input.compactSummary?.trim()
+          ? { compactSummary: input.compactSummary.trim() }
+          : {}),
+        ...(this.#contextState === undefined ? {} : { contextState: this.#contextState }),
+        ...(this.#resolveToolResult === undefined ? {} : { resolveToolResult: this.#resolveToolResult }),
+      })
+      baseline = contextAssembly.baseline
+      contextBlocks = [...contextAssembly.blocks]
+    } else {
+      contextBlocks = [
+        {
+          kind: 'other',
+          message: {
+            role: 'system',
+            content: NAVISWORKS_CAPABILITY_PROMPT,
+          },
+        },
+      ]
       if (activeTask !== undefined) {
         contextBlocks.push({
           kind: 'task-state',
           message: { role: 'system', content: renderTaskContext(activeTask) },
         })
       }
-    }
-    const currentDocumentBlock = renderCurrentDocumentContext(
-      input.currentDocument ?? this.#contextState?.currentDocument,
-    )
-    if (currentDocumentBlock) contextBlocks.push({
-      kind: 'document-transition',
-      message: { role: 'system', content: currentDocumentBlock },
-    })
-    const documentTransitionBlock = renderDocumentTransition(input.documentNotice)
-    if (documentTransitionBlock) contextBlocks.push({
-      kind: 'document-transition',
-      message: { role: 'system', content: documentTransitionBlock },
-    })
-    const semanticMemory = input.sessionId === undefined
-      ? input.semanticMemory
-      : updateSemanticMemory(input.semanticMemory, trimmedInput)
-    const semanticMemoryBlock = renderSemanticMemory(semanticMemory)
-    if (semanticMemoryBlock) contextBlocks.push({
-      kind: 'semantic-memory',
-      message: { role: 'system', content: semanticMemoryBlock },
-    })
-    if (input.compactSummary?.trim()) {
-      contextBlocks.push({
-        kind: 'compact-summary',
-        message: {
-          role: 'system',
-          content: `早期对话摘要（供参考，非实时事实）：\n${input.compactSummary.trim()}`,
-        },
+      if (currentDocumentBlock) contextBlocks.push({
+        kind: 'document-transition',
+        message: { role: 'system', content: currentDocumentBlock },
       })
-    }
-    if (this.#contextState !== undefined) {
-      const factsBlock = renderVerifiedFacts(this.#contextState.factsForCurrentDocument())
-      if (factsBlock) contextBlocks.push({
-        kind: 'verified-facts',
-        message: { role: 'system', content: factsBlock },
+      const documentTransitionBlock = renderDocumentTransition(input.documentNotice)
+      if (documentTransitionBlock) contextBlocks.push({
+        kind: 'document-transition',
+        message: { role: 'system', content: documentTransitionBlock },
       })
-      const referenceSet = this.#contextState.lastRelevantReferenceSet(input.sessionId)
-      const referenceBlock = renderReferenceSetBlock(referenceSet)
-      if (referenceBlock) contextBlocks.push({
-        kind: 'reference-set',
-        message: { role: 'system', content: referenceBlock },
+      const semanticMemoryBlock = renderSemanticMemory(semanticMemory)
+      if (semanticMemoryBlock) contextBlocks.push({
+        kind: 'semantic-memory',
+        message: { role: 'system', content: semanticMemoryBlock },
       })
-      if (referenceSet !== undefined && input.sessionId !== undefined) {
-        const recalled = await this.#contextState.recallToolResult(
-          input.sessionId,
-          referenceSet.sourceToolCallId,
-          this.#resolveToolResult,
-        )
-        if (recalled !== undefined) {
-          contextBlocks.push({
-            kind: 'recall',
-            message: {
-              role: 'system',
-              content: `【最近引用集的持久化来源（内部召回）】\n${clip(JSON.stringify(recalled), 4_000)}`,
-            },
-          })
+      if (input.compactSummary?.trim()) {
+        contextBlocks.push({
+          kind: 'compact-summary',
+          message: {
+            role: 'system',
+            content: `早期对话摘要（供参考，非实时事实）：\n${input.compactSummary.trim()}`,
+          },
+        })
+      }
+      if (this.#contextState !== undefined) {
+        const factsBlock = renderVerifiedFacts(this.#contextState.factsForCurrentDocument())
+        if (factsBlock) contextBlocks.push({
+          kind: 'verified-facts',
+          message: { role: 'system', content: factsBlock },
+        })
+        const referenceSet = this.#contextState.lastRelevantReferenceSet(input.sessionId)
+        const referenceBlock = renderReferenceSetBlock(referenceSet)
+        if (referenceBlock) contextBlocks.push({
+          kind: 'reference-set',
+          message: { role: 'system', content: referenceBlock },
+        })
+        if (referenceSet !== undefined && input.sessionId !== undefined) {
+          const recalled = await this.#contextState.recallToolResult(
+            input.sessionId,
+            referenceSet.sourceToolCallId,
+            this.#resolveToolResult,
+          )
+          if (recalled !== undefined) {
+            contextBlocks.push({
+              kind: 'recall',
+              message: {
+                role: 'system',
+                content: `【最近引用集的持久化来源（内部召回）】\n${clip(JSON.stringify(recalled), 4_000)}`,
+              },
+            })
+          }
         }
       }
     }
     const contextManager = new ContextManager({
-      systemPrompt: CURI_CORE_PROMPT,
+      systemPrompt: baseline,
       history: normalizeHistory(input.history ?? [], runtimeConfig),
       contextBlocks,
     })
@@ -631,6 +684,28 @@ export class AgentRuntime {
     let lastAssistantText = ''
     let didCompactRun = false
     let capturedSummary: string | undefined
+    // One commit per successful settlement; the compact-rollover replaces the
+    // commit (new seeded epoch is persisted by rollOverForCompaction itself).
+    let contextEpochSettled = false
+    const settleContextEpoch = async (): Promise<void> => {
+      if (contextEpochSettled) return
+      contextEpochSettled = true
+      if (this.#contextEngine === undefined || contextAssembly === undefined || sessionId === undefined) {
+        return
+      }
+      try {
+        if (didCompactRun && capturedSummary !== undefined && capturedSummary !== '') {
+          // Auto compaction succeeded AND the run completes: the summary becomes
+          // the new epoch's seed, generation +1, fresh durable snapshots (§38/§39).
+          await this.#contextEngine.rollOverForCompaction(sessionId, capturedSummary, contextAssembly.epoch)
+        } else {
+          await this.#contextEngine.commit(contextAssembly.epoch)
+        }
+      } catch (commitError) {
+        // Commit failure is durability-degrade, not user-visible (§9).
+        console.debug(`[context] epoch persist failed: ${errorMessage(commitError)}`)
+      }
+    }
 
     // --- Task System v1 run-scoped state (all no-ops without a TaskManager) ---
     const plannerOptions = {
@@ -734,20 +809,34 @@ export class AgentRuntime {
         latestCacheHitRate = response.cacheHitRate
         lastAssistantText = response.content.trim()
 
-        const finishSuccess = (message: string = lastAssistantText): AgentRunResult => ({
-          isSuccess: true,
-          message,
-          contextTokensUsed: latestContextTokens,
-          ...(latestUsage === undefined ? {} : { usage: latestUsage }),
-          ...(input.runtimeModel === undefined ? {} : { activeModel: input.runtimeModel }),
-          contextWindowTokens: effectiveWindow,
-          contextWindowSource,
-          ...(response.thinking.trim() ? { thinkingText: response.thinking } : {}),
-          ...(latestCacheHitRate === undefined ? {} : { cacheHitRate: latestCacheHitRate }),
-          ...(didCompactRun ? { compacted: true } : {}),
-          ...(capturedSummary === undefined || capturedSummary === '' ? {} : { compactSummary: capturedSummary }),
-          ...(semanticMemory === undefined ? {} : { semanticMemory }),
-        })
+        // Success settlement is the ONLY point the working epoch is committed
+        // (§40): a later abort/error returns through the catch/round-limit
+        // paths which never call finishSuccess, so the durable epoch stays the
+        // pre-run one and the next prepare() re-reconciles from it unchanged.
+        const finishSuccess = async (message: string = lastAssistantText): Promise<AgentRunResult> => {
+          await settleContextEpoch()
+          return {
+            isSuccess: true,
+            message,
+            contextTokensUsed: latestContextTokens,
+            ...(latestUsage === undefined ? {} : { usage: latestUsage }),
+            ...(input.runtimeModel === undefined ? {} : { activeModel: input.runtimeModel }),
+            contextWindowTokens: effectiveWindow,
+            contextWindowSource,
+            ...(response.thinking.trim() ? { thinkingText: response.thinking } : {}),
+            ...(latestCacheHitRate === undefined ? {} : { cacheHitRate: latestCacheHitRate }),
+            ...(didCompactRun ? { compacted: true } : {}),
+            ...(capturedSummary === undefined || capturedSummary === '' ? {} : { compactSummary: capturedSummary }),
+            ...(semanticMemory === undefined ? {} : { semanticMemory }),
+            ...(contextAssembly === undefined ? {} : {
+              contextEpochId: contextAssembly.epochId,
+              contextGeneration: contextAssembly.generation,
+              contextBaselineHash: contextAssembly.baselineHash,
+              contextPrefixHash: contextAssembly.prefixHash,
+              contextUpdatesAdded: contextAssembly.updatesAdded,
+            }),
+          }
+        }
 
         // The Completion Gate (Sections 二十/二十三): judge the ACTIVE task
         // against its completion criteria — with the agent's draft answer as
@@ -767,7 +856,7 @@ export class AgentRuntime {
             return response.toolCalls.length === 0
               ? {
                   kind: 'stop',
-                  result: finishSuccess(
+                  result: await finishSuccess(
                     `${lastAssistantText}\n\n（任务完成状态暂时无法确认，任务已暂停；需要时让 Curi 继续该任务以完成验证。）`,
                   ),
                 }
@@ -784,7 +873,7 @@ export class AgentRuntime {
             activeTask = await taskManager.complete(activeTask.id)
             refreshTaskContext()
             return response.toolCalls.length === 0
-              ? { kind: 'stop', result: finishSuccess() }
+              ? { kind: 'stop', result: await finishSuccess() }
               : { kind: 'continue' }
           }
           if (verification.verdict === 'blocked') {
@@ -792,7 +881,7 @@ export class AgentRuntime {
             refreshTaskContext()
             const blocker = `任务已阻塞：${verification.reason}`
               + (verification.nextAction ? ` 下一步：${verification.nextAction}` : '')
-            return { kind: 'stop', result: finishSuccess(blocker) }
+            return { kind: 'stop', result: await finishSuccess(blocker) }
           }
           if (verification.verdict === 'replan') {
             if (activeTask.replanCount >= runtimeConfig.maxTaskReplans) {
@@ -800,7 +889,7 @@ export class AgentRuntime {
               refreshTaskContext()
               return {
                 kind: 'stop',
-                result: finishSuccess(`任务已阻塞（重规划次数已达上限）：${verification.reason}`),
+                result: await finishSuccess(`任务已阻塞（重规划次数已达上限）：${verification.reason}`),
               }
             }
             const replan = await TASK_PLANNER.replan(provider, model, {
@@ -818,7 +907,7 @@ export class AgentRuntime {
               return response.toolCalls.length === 0
                 ? {
                     kind: 'stop',
-                    result: finishSuccess(
+                    result: await finishSuccess(
                       `${lastAssistantText}\n\n（重新规划暂时失败，任务已暂停；需要时让 Curi 继续该任务。）`,
                     ),
                   }
@@ -857,7 +946,7 @@ export class AgentRuntime {
             // the next model round — skip tool processing for THIS response.
             continue
           } else {
-            return finishSuccess()
+            return await finishSuccess()
           }
         }
 
@@ -1475,9 +1564,9 @@ export class AgentRuntime {
       : Math.max(1024, summarizerCapabilities.maxContextWindow
         ?? summarizerCapabilities.defaultContextWindow
         ?? this.#contextWindow)
-    const transcript = messages
-      .map((message) => `[${message.role}] ${message.content}`)
-      .join('\n\n')
+    // P14: the SAME transcript shape + summary prompt as the automatic path —
+    // manual /compact never maintains a second summarization rule (§41/§66).
+    const transcript = renderConversationTranscript(messages)
     const built = buildAgentRequest({
       systemPrompt: COMPACT_SYSTEM_PROMPT,
       history: [],
@@ -1703,4 +1792,3 @@ function unwrapWire(value: unknown): unknown {
   return value
 }
 
-const COMPACT_SYSTEM_PROMPT = '你是会话压缩器。把提供的对话与工具过程压缩为一份简洁的工作摘要，必须保留：用户目标、已验证的关键事实（构件 ID、名称、数量、属性要点）、已执行的操作及结果、重要错误、未完成的步骤。不要编造，不要添加建议，只输出摘要本身。'

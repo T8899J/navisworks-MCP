@@ -51,6 +51,7 @@ import { validateSender, type SenderTrustOptions } from './security/validateSend
 import { normalizeReasoningEffort } from '../shared/reasoning'
 import { resolveActiveModel, type ModelResolution, type ResolvedChatEndpoint } from './model/catalog/modelResolver'
 import type { ModelCatalogService } from './model/catalog/modelCatalogService'
+import type { ContextEngine } from './context/contextEngine'
 import type { ModelUsage } from '../shared/model'
 import {
   DesktopIpcError,
@@ -226,6 +227,13 @@ export interface DesktopIpcDependencies {
   instanceSelection?: NavisworksInstanceSelection
   /** P4/P5 Model System seam; absent → pure settings-based resolution (unit tests). */
   modelCatalog?: ModelCatalogService
+  /**
+   * Context Engine v1: owns durable per-session context epochs. Session
+   * deletion cleans the epoch best-effort; manual /compact rolls the epoch
+   * over with the new summary as seed. Absent (unit tests) → the runtime's
+   * legacy in-memory assembly.
+   */
+  contextEngine?: ContextEngine
 }
 
 export interface SecretProtector {
@@ -325,6 +333,9 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       await dependencies.scopeManager?.forgetConversation(sessionId)
       // Tasks reference the session by id only — drop them with it.
       await dependencies.taskManager?.deleteBySession(sessionId)
+      // A deleted session's durable context epoch goes with it, best-effort:
+      // an epoch-delete failure must NEVER resurrect the session (§15/§70).
+      await dependencies.contextEngine?.forgetSession(sessionId).catch(() => undefined)
     }),
     'settings.get': routeHandler<'settings.get'>(() => persistence.getSettings()),
     'settings.update': routeHandler<'settings.update'>(async ({ settings }) => {
@@ -438,6 +449,13 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
             tools: []
           }]
         })
+      }
+      // P14: manual /compact uses the SAME compaction seam the auto path
+      // commits with — the summary becomes the new epoch's seed and the
+      // generation advances (§39). Best-effort: an epoch-rollover failure
+      // degrades to the session summary alone, it never blocks /compact.
+      if (summary.trim()) {
+        await dependencies.contextEngine?.rollOverForCompaction(sessionId, summary).catch(() => undefined)
       }
       return { summary }
     }),
