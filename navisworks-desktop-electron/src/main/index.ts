@@ -33,6 +33,8 @@ import {
   installApplicationServices,
 } from './kernel/applicationServices'
 import type { ModelRouter } from './model/modelRouter'
+import type { RuntimeQuestionRequest } from './agentRuntime'
+import type { QuestionOutcome } from './question/types'
 import { ModelCatalogService } from './model/catalog/modelCatalogService'
 import { denyAllPermissions, installProductionContentSecurityPolicy, secureWindowNavigation } from './security/windowSecurity'
 import type { SenderTrustOptions } from './security/validateSender'
@@ -285,6 +287,9 @@ async function runAgent(
     requestToolApproval: (
       request: OllamaToolApprovalRequest
     ) => Promise<boolean>
+    requestQuestion: (
+      request: RuntimeQuestionRequest
+    ) => Promise<QuestionOutcome>
   }
 ): Promise<OllamaRunResult> {
   const onAgentEvent = (event: AgentRunEvent): void => {
@@ -296,7 +301,8 @@ async function runAgent(
       options.onEvent({ kind: 'thinking', delta: event.delta })
       return
     }
-    if (event.phase === 'verifying' || event.phase === 'generating') {
+    if (event.phase === 'verifying' || event.phase === 'generating'
+      || event.phase === 'awaiting-user-input') {
       options.onEvent({ kind: 'phase', phase: event.phase })
       return
     }
@@ -347,6 +353,7 @@ async function runAgent(
     {
       signal: options.signal,
       requestToolApproval: options.requestToolApproval,
+      requestQuestion: options.requestQuestion,
       onEvent: onAgentEvent
     }
   )

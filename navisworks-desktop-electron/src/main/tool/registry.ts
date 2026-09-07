@@ -69,6 +69,118 @@ const READ_TOOL_RESULT_DEFINITION: AgentToolDefinition = {
   },
 }
 
+/** P16 internal tool: ask the user for missing decision-critical information. */
+const QUESTION_DEFINITION: AgentToolDefinition = {
+  name: 'question',
+  label: '向用户提问',
+  description: '缺少完成任务所需的关键信息时，向用户提出 1–4 个问题并等待回答。',
+  parameters: {
+    type: 'object',
+    properties: {
+      questions: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 4,
+        description: '要问用户的问题（1–4 个）。single/multiple 必须给 2–8 个 options，text 不给。',
+        items: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: '问题文本（≤500 字符）。' },
+            kind: { type: 'string', enum: ['single', 'multiple', 'text'] },
+            options: {
+              type: 'array',
+              minItems: 2,
+              maxItems: 8,
+              items: {
+                type: 'object',
+                properties: {
+                  label: { type: 'string', description: '选项文案（≤200 字符）。' },
+                  description: { type: 'string' },
+                },
+                required: ['label'],
+              },
+            },
+            required: { type: 'boolean' },
+          },
+          required: ['question', 'kind'],
+        },
+      },
+    },
+    required: ['questions'],
+  },
+  category: 'internal',
+  impact: 'read-only',
+  defaultPermission: 'allow',
+  contract: {
+    type: 'function',
+    function: {
+      name: 'question',
+      description: '缺少完成任务所需的关键信息时，向用户提出 1–4 个问题并等待回答；这不是执行授权确认，也不改变任何状态。',
+      parameters: {
+        type: 'object',
+        properties: {
+          questions: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 4,
+            items: {
+              type: 'object',
+              properties: {
+                question: { type: 'string' },
+                kind: { type: 'string', enum: ['single', 'multiple', 'text'] },
+                options: {
+                  type: 'array',
+                  minItems: 2,
+                  maxItems: 8,
+                  items: {
+                    type: 'object',
+                    properties: { label: { type: 'string' }, description: { type: 'string' } },
+                    required: ['label'],
+                  },
+                },
+                required: { type: 'boolean' },
+              },
+              required: ['question', 'kind'],
+            },
+          },
+        },
+        required: ['questions'],
+      },
+    },
+    impact: 'read-only',
+  },
+}
+
+/** P19 internal tool: load one Skill's full instructions on demand. */
+const SKILL_DEFINITION: AgentToolDefinition = {
+  name: 'skill',
+  label: '加载 Skill',
+  description: '按名称加载已在 Available Skills 列出的工作流说明。',
+  parameters: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'Skill 名称（来自上下文中的 Available Skills 清单）。' },
+    },
+    required: ['name'],
+  },
+  category: 'internal',
+  impact: 'read-only',
+  defaultPermission: 'allow',
+  contract: {
+    type: 'function',
+    function: {
+      name: 'skill',
+      description: '按名称加载一个已在 Available Skills 中列出的工作流说明。只在任务与该 Skill 描述匹配时调用。',
+      parameters: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    },
+    impact: 'read-only',
+  },
+}
+
 const LABELS: Record<string, string> = {
   navisworks_status: '检查插件连接状态',
   navisworks_get_document: '读取当前文档',
@@ -80,6 +192,8 @@ const LABELS: Record<string, string> = {
   navisworks_list_viewpoints: '列出保存视点',
   navisworks_activate_viewpoint: '激活保存视点',
   read_tool_result: '读取历史工具结果',
+  question: '向用户提问',
+  skill: '加载 Skill',
 }
 
 function buildDefinition(contract: AgentToolContract): AgentToolDefinition {
@@ -207,7 +321,7 @@ export class ToolRegistry {
 
 function buildDefaultRegistry(): ToolRegistry {
   const navisworksDefinitions = toolCatalog.definitions.map(buildDefinition)
-  return new ToolRegistry([...navisworksDefinitions, READ_TOOL_RESULT_DEFINITION])
+  return new ToolRegistry([...navisworksDefinitions, READ_TOOL_RESULT_DEFINITION, QUESTION_DEFINITION, SKILL_DEFINITION])
 }
 
 /** The process-wide registry singleton. */

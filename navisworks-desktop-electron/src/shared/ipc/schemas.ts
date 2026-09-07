@@ -98,6 +98,10 @@ export const appearanceStateSchema = z.strictObject({
 
 export const toolNameSchema = z.enum([
   'read_tool_result',
+  // P16/P19 internal runtime tools — materializable + approvable types only;
+  // they never execute through navisworks.tool.execute (the catalog rejects them).
+  'question',
+  'skill',
   'navisworks_status',
   'navisworks_get_document',
   'navisworks_get_selection',
@@ -243,6 +247,53 @@ export const toolDefinitionSummarySchema = z.strictObject({
 
 /** Where the context window a run budgeted against came from. */
 export const contextWindowSourceSchema = z.enum(['local', 'profile', 'provider', 'fallback'])
+
+/**
+ * P16 Question System — the single source for question identity so the IPC
+ * schema, the main-service state and the renderer UI can never drift (§16).
+ * Question ≠ Tool Approval: a question means the Agent LACKS information.
+ * Answers are indexed by ARRAY POSITION (§5: never trust a model-supplied id).
+ */
+export const questionKindSchema = z.enum(['single', 'multiple', 'text'])
+export const questionSourceSchema = z.enum(['tool', 'doom-loop'])
+
+export const questionOptionSchema = z.strictObject({
+  label: z.string().trim().min(1).max(200),
+  description: z.string().max(500).optional(),
+})
+
+/** One prompt. `single`/`multiple` require 2–8 options; `text` forbids options. */
+export const questionPromptSchema = z.strictObject({
+  question: z.string().trim().min(1).max(500),
+  kind: questionKindSchema,
+  options: z.array(questionOptionSchema).min(2).max(8).optional(),
+  required: z.boolean().optional(),
+}).superRefine((prompt, ctx) => {
+  if ((prompt.kind === 'single' || prompt.kind === 'multiple') && prompt.options === undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'single/multiple 必须提供 2–8 个 options', path: ['options'] })
+  }
+  if (prompt.kind === 'text' && prompt.options !== undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'text 不允许提供 options', path: ['options'] })
+  }
+})
+
+export const questionAnswerSchema = z.strictObject({
+  questionIndex: z.number().int().min(0),
+  values: z.array(z.string().max(500)).max(8),
+})
+
+/** A question the model raised for the user (wire shape; no resolvers). */
+export const questionRequestSchema = z.strictObject({
+  requestId: nonEmptyString,
+  runId: nonEmptyString,
+  sessionId: nonEmptyString,
+  turnId: nonEmptyString.optional(),
+  messageId: nonEmptyString.optional(),
+  toolCallId: nonEmptyString.optional(),
+  source: questionSourceSchema,
+  questions: z.array(questionPromptSchema).min(1).max(4),
+  createdAt: z.number().int().nonnegative(),
+})
 
 /**
  * Model System v1 shared schemas — single IPC source for model identity,
@@ -398,6 +449,24 @@ export const requestSchemas = {
     input: emptyInput,
     output: modelInfoSchema
   },
+  /** Answer a pending question; must belong to this session (Main verifies §101). */
+  'question.answer': {
+    input: z.strictObject({
+      requestId: nonEmptyString,
+      answers: z.array(questionAnswerSchema).min(1).max(4),
+    }),
+    output: z.strictObject({ resolved: z.boolean() })
+  },
+  /** User declines to answer — the model gets question_rejected, the run continues. */
+  'question.reject': {
+    input: z.strictObject({ requestId: nonEmptyString }),
+    output: z.strictObject({ resolved: z.boolean() })
+  },
+  /** Re-attach pending questions after a session switch (§18) — never event-only UI. */
+  'question.pending.list': {
+    input: z.strictObject({ sessionId: nonEmptyString.optional() }),
+    output: z.array(questionRequestSchema)
+  },
   'appearance.update': {
     input: z.strictObject({ themeMode: themeModeSchema }),
     output: appearanceStateSchema
@@ -528,7 +597,7 @@ export const chatEventSchema = z.discriminatedUnion('kind', [
 const chatChunkEventSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...chatEventBase, kind: z.literal('thinking'), delta: z.string() }),
   z.strictObject({ ...chatEventBase, kind: z.literal('text'), delta: z.string() }),
-  z.strictObject({ ...chatEventBase, kind: z.literal('phase'), phase: z.enum(['generating', 'verifying']) }),
+  z.strictObject({ ...chatEventBase, kind: z.literal('phase'), phase: z.enum(['generating', 'verifying', 'awaiting-user-input']) }),
   z.strictObject({
     ...chatEventBase,
     kind: z.literal('tool-start'),
@@ -557,6 +626,8 @@ export const eventSchemas = {
   'chat.chunk': chatChunkEventSchema,
   'chat.done': chatDoneEventSchema,
   'chat.error': chatErrorEventSchema,
+  /** P16: the Agent needs information — a pending question for the renderer. */
+  'question.requested': questionRequestSchema,
   'tool.approval.requested': z.strictObject({
     approvalId: nonEmptyString,
     runId: nonEmptyString,
@@ -607,6 +678,12 @@ export type ToolPermission = z.output<typeof toolPermissionSchema>
 export type { ModelRef, ModelInfo, ModelUsage } from '../model'
 
 export type ContextWindowSource = z.output<typeof contextWindowSourceSchema>
+export type QuestionKind = z.output<typeof questionKindSchema>
+export type QuestionSource = z.output<typeof questionSourceSchema>
+export type QuestionOption = z.output<typeof questionOptionSchema>
+export type QuestionPrompt = z.output<typeof questionPromptSchema>
+export type QuestionAnswer = z.output<typeof questionAnswerSchema>
+export type QuestionRequest = z.output<typeof questionRequestSchema>
 export type ModelRefSummary = z.output<typeof modelRefSchema>
 export type ModelUsageSummary = z.output<typeof modelUsageSchema>
 export type ModelInfoSummary = z.output<typeof modelInfoSchema>

@@ -52,7 +52,14 @@ import { normalizeReasoningEffort } from '../shared/reasoning'
 import { resolveActiveModel, type ModelResolution, type ResolvedChatEndpoint } from './model/catalog/modelResolver'
 import type { ModelCatalogService } from './model/catalog/modelCatalogService'
 import type { ContextEngine } from './context/contextEngine'
-import type { ModelUsage } from '../shared/model'
+import type { QuestionService } from './question/questionService'
+import type { QuestionOutcome } from './question/types'
+import type { ModelUsage, QuestionRequest } from '../shared/ipc/schemas'
+type RuntimeQuestionRequest = {
+  source: 'tool' | 'doom-loop'
+  questions: QuestionRequest['questions']
+  toolCallId?: string
+}
 import {
   DesktopIpcError,
   IPC_EVENT_CHANNEL,
@@ -83,7 +90,7 @@ import {
 export type OllamaStreamEvent =
   | { kind: 'thinking'; delta: string }
   | { kind: 'text'; delta: string }
-  | { kind: 'phase'; phase: 'generating' | 'verifying' }
+  | { kind: 'phase'; phase: 'generating' | 'verifying' | 'awaiting-user-input' }
   | { kind: 'tool-start'; toolCallId: string; toolName: string; arguments: unknown }
   | {
       kind: 'tool-result'
@@ -166,6 +173,8 @@ export interface OllamaAgentPort {
       signal: AbortSignal
       onEvent: (event: OllamaStreamEvent) => void
       requestToolApproval: (request: OllamaToolApprovalRequest) => Promise<boolean>
+      /** P16/P17: suspend the run on a question (tool or doom-loop) (§9). */
+      requestQuestion: (request: RuntimeQuestionRequest) => Promise<QuestionOutcome>
     }
   ): Promise<OllamaRunResult>
   /** Optional: model-generated conversation title; routes fall back to truncation.
@@ -225,6 +234,8 @@ export interface DesktopIpcDependencies {
   toolResultsDirectory?: string
   instanceRegistry?: NavisworksInstanceRegistry
   instanceSelection?: NavisworksInstanceSelection
+  /** P16: the pending-question registry (ask/answer/reject lifecycle). */
+  questions?: QuestionService
   /** P4/P5 Model System seam; absent → pure settings-based resolution (unit tests). */
   modelCatalog?: ModelCatalogService
   /**
@@ -291,6 +302,7 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
     dependencies.instanceSelection,
     dependencies.bridge,
     dependencies.modelCatalog,
+    dependencies.questions,
   )
 
   const handlers = {
@@ -383,6 +395,31 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       }
       return resolution.info
     }),
+    'question.answer': routeHandler<'question.answer'>(({ requestId, answers }) => {
+      const service = dependencies.questions
+      if (service === undefined) return { resolved: false }
+      const request = service.getRequest(requestId)
+      if (request === undefined) return { resolved: false }
+      // Answer indexes must line up with the registered prompts (§5: positions,
+      // never model-authored ids) and every required question needs a value.
+      if (request.questions.length < answers.length) return { resolved: false }
+      for (const answer of answers) {
+        const prompt = request.questions[answer.questionIndex]
+        if (prompt === undefined) return { resolved: false }
+        if (prompt.required !== false && answer.values.length === 0) return { resolved: false }
+        if (prompt.kind === 'single' && answer.values.length > 1) return { resolved: false }
+        if (prompt.kind !== 'text') {
+          const labels = new Set((prompt.options ?? []).map((option) => option.label))
+          if (answer.values.some((value) => !labels.has(value))) return { resolved: false }
+        }
+      }
+      return { resolved: service.answer(requestId, answers) === true }
+    }),
+    'question.reject': routeHandler<'question.reject'>(({ requestId }) => ({
+      resolved: dependencies.questions?.reject(requestId) === true,
+    })),
+    'question.pending.list': routeHandler<'question.pending.list'>(({ sessionId }) =>
+      [...dependencies.questions?.listPending(sessionId) ?? []]),
     'appearance.get': routeHandler<'appearance.get'>(() => dependencies.appearance.getState()),
     'appearance.update': routeHandler<'appearance.update'>(async ({ themeMode }) => {
       const updated = await persistence.updateSettings({ themeMode })
@@ -584,6 +621,7 @@ export class ChatRunRegistry {
     private readonly instanceSelection?: NavisworksInstanceSelection,
     private readonly bridge?: NavisworksBridgeClient,
     private readonly modelCatalog?: ModelCatalogService,
+    private readonly questions?: QuestionService,
   ) {}
 
   /**
@@ -832,6 +870,26 @@ export class ChatRunRegistry {
               : { documentInstanceId: request.documentInstanceId }),
             ...(request.ambiguousRetry ? { ambiguousRetry: true } : {})
           }, sender, controller.signal),
+          requestQuestion: (request) => {
+            if (this.questions === undefined) {
+              return Promise.reject(new DesktopIpcError('SERVICE_UNAVAILABLE', '当前版本不支持向用户提问。'))
+            }
+            return this.questions.ask(
+              {
+                runId,
+                sessionId: input.sessionId,
+                turnId,
+                messageId,
+                source: request.source,
+                questions: request.questions,
+                ...(request.toolCallId === undefined ? {} : { toolCallId: request.toolCallId }),
+              },
+              (pending) => {
+                emitTo(sender, 'question.requested', pending)
+              },
+              controller.signal,
+            )
+          },
           onEvent: (event) => {
             if (controller.signal.aborted) return
             emitTo(sender, 'chat.chunk', { ...base, ...event })

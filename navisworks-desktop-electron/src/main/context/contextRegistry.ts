@@ -1,6 +1,7 @@
 import type { ContextSource, ContextSourceMode } from './types'
 import { coreSource } from './sources/coreSource'
 import { navisworksPolicySource } from './sources/navisworksPolicySource'
+import { skillManifestSource } from './sources/skillManifestSource'
 import { documentSource } from './sources/documentSource'
 import { compactSummarySource } from './sources/compactSummarySource'
 import { taskSource } from './sources/taskSource'
@@ -15,12 +16,14 @@ import { recallSource } from './sources/recallSource'
  * working context — never Object.keys order, never Map insertion accidents,
  * never filesystem scan order. The runtime must not re-sort it.
  *
+ * Baseline order (§54): core/identity → policy/navisworks → skills/manifest.
  * Volatile order matches the pre-engine runtime's block order so existing
  * behavior is reproduced byte-for-byte where the content is unchanged.
  */
 const ORDERED_SOURCES: readonly ContextSource<unknown>[] = [
   coreSource,
   navisworksPolicySource,
+  skillManifestSource,
   documentSource,
   compactSummarySource,
   taskSource,
@@ -62,3 +65,14 @@ export class ContextRegistry {
 
 /** The process-wide registry singleton (the default source set). */
 export const contextRegistry = new ContextRegistry()
+
+/**
+ * Factory seam (§54): build a registry from an explicit, ordered source list.
+ * Callers compose sources themselves — the runtime never mutates the global
+ * array at run time; order is what the constructor was handed.
+ */
+export function createContextRegistry(
+  sources: readonly ContextSource<unknown>[] = ORDERED_SOURCES,
+): ContextRegistry {
+  return new ContextRegistry(sources)
+}

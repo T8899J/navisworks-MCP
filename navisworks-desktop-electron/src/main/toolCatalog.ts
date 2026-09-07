@@ -18,6 +18,10 @@ export interface AgentToolContract {
 
 export type AgentToolName =
   | 'read_tool_result'
+  // P16/P19 internal runtime tools (never Bridge-dispatched, hidden from the
+  // tool-permission UI): the question service + the skill loader.
+  | 'question'
+  | 'skill'
   | 'navisworks_status'
   | 'navisworks_get_document'
   | 'navisworks_get_selection'

@@ -6,6 +6,10 @@ import type { DesktopDataPaths } from '../dataPaths'
 import { ToolApprovalRegistry } from '../ipc'
 import { ModelRouter } from '../model/modelRouter'
 import { ContextEngine } from '../context/contextEngine'
+import { QuestionService } from '../question/questionService'
+import { SkillRegistry } from '../skill/skillRegistry'
+import { skillRoots } from '../skill/paths'
+import { InternalToolExecutor } from '../agent/internalToolExecutor'
 import { ContextEpochStore } from '../context/contextEpochStore'
 import { contextRegistry } from '../context/contextRegistry'
 import {
@@ -37,6 +41,7 @@ export const ApprovalServiceToken = token<ToolApprovalRegistry>('app.approvals')
 export const NavisworksInstanceRegistryToken = token<NavisworksInstanceRegistry>('app.navisworksInstances')
 export const NavisworksInstanceSelectionToken = token<NavisworksInstanceSelection>('app.navisworksSelection')
 export const ContextEngineToken = token<ContextEngine>('app.contextEngine')
+export const QuestionServiceToken = token<QuestionService>('app.questions')
 
 /** Composition root: instantiate once, register once, and resolve everywhere else. */
 export async function installApplicationServices(
@@ -60,8 +65,23 @@ export async function installApplicationServices(
     contextRegistry,
     new ContextEpochStore(paths.contextEpochsDirectory),
   )
+  // P19 Skills: discover once at startup (no file watching, §50); a broken
+  // skill is skipped with a warning, never a failed boot.
+  const skillRegistry = new SkillRegistry(skillRoots(paths.rootDirectory))
+  try {
+    await skillRegistry.discover()
+  } catch (error) {
+    console.warn(`[skill] discovery failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  // P16 Question service: pending questions are process-memory state; the
+  // ChatRunRegistry dispatches `question.requested` to the originating window.
+  const questions = new QuestionService()
+  const toolOutputStore = new ToolOutputStore(paths.toolOutputDirectory)
+  const internalToolExecutor = new InternalToolExecutor(toolOutputStore, skillRegistry)
   const runtime = new AgentRuntime({
     contextEngine,
+    internalToolExecutor,
+    skillRegistry,
     bridgeClient: bridge,
     model: persistedSettings?.selectedModel,
     think: localThinkForEffort(normalizeReasoningEffort(persistedSettings?.reasoningMode)),
@@ -71,7 +91,7 @@ export async function installApplicationServices(
     executionLedger: appScope.require(ExecutionLedgerToken),
     operationCoordinator: appScope.require(OperationCoordinatorToken),
     taskManager: appScope.require(TaskManagerToken),
-    toolOutputStore: new ToolOutputStore(paths.toolOutputDirectory),
+    toolOutputStore,
     resolveToolResult: (value) => resolveResult(paths.toolResultsDirectory, value),
   })
 
@@ -86,6 +106,7 @@ export async function installApplicationServices(
     .register(AgentRuntimeToken, runtime)
     .register(CompactionServiceToken, runtime)
     .register(ContextEngineToken, contextEngine)
+    .register(QuestionServiceToken, questions)
     .register(ApprovalServiceToken, approvals)
   appScope.onDispose(() => runtime.dispose())
   return persistedSettings

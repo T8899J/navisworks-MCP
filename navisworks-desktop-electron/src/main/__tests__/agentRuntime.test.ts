@@ -125,9 +125,9 @@ describe('AgentRuntime streaming tool loop', () => {
     const result = await runtime.run('检查连接', {
       onEvent: (event) => events.push(event.phase === 'started' || event.phase === 'completed'
         ? `${event.phase}:${event.tool}`
-        : event.phase === 'verifying' || event.phase === 'generating'
+        : event.phase === 'verifying' || event.phase === 'generating' || event.phase === 'awaiting-user-input'
           ? event.phase
-          : `${event.phase}:${event.delta}`),
+          : `${event.phase}:${(event as { delta: string }).delta}`),
     })
 
     expect(result).toEqual({

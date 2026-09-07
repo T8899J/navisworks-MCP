@@ -3,6 +3,7 @@ import type { SemanticMemory } from '../agent/semanticMemory'
 import type { TaskVerificationFeedback } from '../agent/taskContext'
 import type { CuriTask } from '../agent/taskTypes'
 import type { ContextState } from '../agent/contextState'
+import type { SkillManifestEntry } from '../skill/types'
 
 /**
  * Context Engine v1 — the WHAT of context assembly (Invariant H):
@@ -40,6 +41,8 @@ export interface ContextSourceEnvironment {
   readonly contextState?: ContextState
   /** Resolve an externalized persisted tool result for runtime-internal recall. */
   readonly resolveToolResult?: (value: unknown) => Promise<unknown>
+  /** P19: the discovered skill manifest source (name + description only). */
+  readonly skillManifestProvider?: { manifest(): readonly SkillManifestEntry[] }
 }
 
 /**

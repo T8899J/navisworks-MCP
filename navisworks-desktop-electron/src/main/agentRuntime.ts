@@ -55,6 +55,17 @@ import {
   COMPACT_SYSTEM_PROMPT,
   renderConversationTranscript,
 } from './context/compactionService'
+import {
+  DoomLoopGuard,
+  resultFingerprint,
+  toolCallSignature,
+  type DoomLoopDecision,
+  type DoomLoopScope,
+} from './agent/doomLoopGuard'
+import type { InternalToolExecutor } from './agent/internalToolExecutor'
+import type { SkillRegistry } from './skill/skillRegistry'
+import type { QuestionOutcome, QuestionPrompt } from './question/types'
+import type { SkillManifestEntry } from './skill/types'
 import type { ContextAssembly } from './context/types'
 import { localThinkForEffort, nearestReasoningEffort, type ReasoningEffort } from '../shared/reasoning'
 import type { ModelInfo, ModelUsage } from '../shared/model'
@@ -90,6 +101,13 @@ import {
 
 type AgentRequest = Omit<CompletionRequest, 'sampling'> & { sampling?: SamplingOptions }
 type CompleteResult = Awaited<ReturnType<ModelProvider['complete']>>
+
+/** The model-visible outcome of executing one tool call (bridge or internal). */
+interface ToolExecutionResult {
+  result?: unknown
+  error?: { code: string; message: string; ambiguousOutcome?: boolean }
+  wire: Record<string, unknown>
+}
 
 const DEFAULT_MODEL = 'qwen3.5:9b-q4_K_M'
 const MAX_TOOL_ROUNDS = 8
@@ -229,6 +247,11 @@ export type AgentRunEvent =
   | { phase: 'verifying' }
   /** Back to normal generation after a gate verdict kept the loop running. */
   | { phase: 'generating' }
+  /**
+   * P17: the run is SUSPENDED awaiting a user question answer (§14). The run
+   * does not end — it resumes `generating` the moment the answer lands.
+   */
+  | { phase: 'awaiting-user-input' }
   | {
       phase: 'started'
       runId: string
@@ -283,12 +306,28 @@ export interface AgentRunInput {
   currentDocument?: CurrentDocumentContext
   navisworksBinding?: NavisworksRunBinding
   navisworksUnavailable?: { code: 'TARGET_INSTANCE_DISCONNECTED'; message: string }
+  /** P19: the discovered skill manifest feeds the skills/manifest baseline source. */
+  skillManifestProvider?: { manifest(): readonly SkillManifestEntry[] }
 }
 
 export interface RunAgentOptions {
   signal?: AbortSignal
   onEvent?: (event: AgentRunEvent) => void
   requestToolApproval?: (request: ToolApprovalRequest) => Promise<boolean>
+  /**
+   * P16: suspend the run on a `question` tool call (or a doom-loop
+   * escalation). The chat.runs facade implements it as "register a pending
+   * question, push the event to THIS run's sender, await the answer".
+   * Absent → the question/skill tools report unavailable, never a crash.
+   */
+  requestQuestion?: (request: RuntimeQuestionRequest) => Promise<QuestionOutcome>
+}
+
+/** One question raised mid-run; identity fields filled by the run facade. */
+export interface RuntimeQuestionRequest {
+  source: 'tool' | 'doom-loop'
+  questions: QuestionPrompt[]
+  toolCallId?: string
 }
 
 export interface ToolApprovalRequest {
@@ -372,6 +411,18 @@ export interface AgentRuntimeOptions {
   /** Bounded tool-output store: large results become preview + resultRef. */
   toolOutputStore?: ToolOutputStore
   /**
+   * P17: seam that runs the internal (non-Bridge) tools read_tool_result /
+   * question / skill. Absent → those tool calls report unavailable, and the
+   * legacy inline read_tool_result path is not used (runtime never branches
+   * on internal-tool names itself).
+   */
+  internalToolExecutor?: InternalToolExecutor
+  /**
+   * P19: discovered skills — doubles as the skills/manifest baseline provider
+   * so the model sees name + description only (§52). Absent → no manifest.
+   */
+  skillRegistry?: SkillRegistry
+  /**
    * P9–P13: Context Engine. When present AND a run carries a sessionId, the
    * WHAT of context (baseline / durable updates / volatile working blocks) is
    * assembled by registered sources through a durable per-session Epoch.
@@ -434,6 +485,8 @@ export class AgentRuntime {
   readonly #resolveToolResult: ((value: unknown) => Promise<unknown>) | undefined
   readonly #taskManager: TaskManager | undefined
   readonly #contextEngine: ContextEngine | undefined
+  readonly #internalToolExecutor: InternalToolExecutor | undefined
+  readonly #skillRegistry: SkillRegistry | undefined
 
   constructor(options: AgentRuntimeOptions) {
     this.#bridgeClient = options.bridgeClient
@@ -455,6 +508,8 @@ export class AgentRuntime {
     this.#resolveToolResult = options.resolveToolResult
     this.#taskManager = options.taskManager
     this.#contextEngine = options.contextEngine
+    this.#internalToolExecutor = options.internalToolExecutor
+    this.#skillRegistry = options.skillRegistry
   }
 
   /**
@@ -538,6 +593,20 @@ export class AgentRuntime {
     // A single execution scope id for this run; the P5 ledger attributes modifying calls
     // to it so crash recovery / approval re-checks can correlate a call with its run.
     const runId = input.runId?.trim() || randomUUID()
+    // P18: the Doom Loop Guard is RUN-scoped (§36) — a fresh instance per user
+    // turn, so a legitimate cross-turn repeat (e.g. the user re-selected in
+    // the Navisworks UI) is never blocked by the previous turn's history.
+    const doomLoop = new DoomLoopGuard()
+    const doomScope: DoomLoopScope = {
+      instanceId: input.navisworksBinding?.instanceId ?? this.#contextState?.instanceId ?? null,
+      bridgeSessionId: input.navisworksBinding?.bridgeSessionId ?? null,
+      documentInstanceId: input.navisworksBinding?.documentInstanceId
+        ?? this.#contextState?.documentInstanceId ?? null,
+      documentRevision: this.#contextState?.documentRevision ?? null,
+    }
+    // The question channel: ChatRunRegistry supplies it (pending registry +
+    // the run's sender); absent → internal question tools report unavailable.
+    const askQuestion = options.requestQuestion
     // Context window + its SOURCE. API priority: profile override → provider
     // capability → safe fallback. The LOCAL 32768 clamp never applies to API
     // endpoints, and the fallback is budget accounting — never presented as
@@ -600,6 +669,9 @@ export class AgentRuntime {
           : {}),
         ...(this.#contextState === undefined ? {} : { contextState: this.#contextState }),
         ...(this.#resolveToolResult === undefined ? {} : { resolveToolResult: this.#resolveToolResult }),
+        ...(input.skillManifestProvider === undefined && this.#skillRegistry === undefined
+          ? {}
+          : { skillManifestProvider: input.skillManifestProvider ?? this.#skillRegistry }),
       })
       baseline = contextAssembly.baseline
       contextBlocks = [...contextAssembly.blocks]
@@ -1009,7 +1081,95 @@ export class AgentRuntime {
             arguments: toolCall.arguments,
           })
 
-          let toolResult = await this.#executeTool(
+          // P17/§75: internal (non-Bridge) tools run through the executor
+          // seam. `question` raises the awaiting-user-input phase and (via
+          // askQuestion) SUSPENDS this run without ending it (§2/§14). It is
+          // NEVER doom-loop checked (§82) — a question suspends, it can't spin.
+          const executor = this.#internalToolExecutor
+          let toolResult: ToolExecutionResult
+          if (executor !== undefined && executor.canExecute(toolCall.name)) {
+            const isQuestion = toolCall.name === 'question'
+            if (isQuestion) options.onEvent?.({ phase: 'awaiting-user-input' })
+            try {
+              const executed = await executor.execute(
+                toolCall.name,
+                toolRegistry.normalizeArguments(toolCall.name, toolCall.arguments),
+                {
+                  runId,
+                  sessionId: input.sessionId ?? '',
+                  toolCallId: toolCall.id,
+                  ...(askQuestion === undefined
+                    ? {
+                      askQuestion: async () => {
+                        throw new Error('question channel unavailable')
+                      },
+                    }
+                    : { askQuestion: (req: Parameters<NonNullable<RunAgentOptions['requestQuestion']>>[0]) => askQuestion(req) }),
+                  ...(options.signal === undefined ? {} : { signal: options.signal }),
+                },
+              )
+              toolResult = executed.ok
+                ? { result: executed.result, wire: buildToolSuccessObservation(toolCall.name, executed.result) }
+                : { error: { code: executed.code, message: executed.message }, wire: buildToolErrorObservation(toolCall.name, executed.code, executed.message) }
+            } finally {
+              if (isQuestion) options.onEvent?.({ phase: 'generating' })
+            }
+            // question/skill/read results are small; no ToolOutputStore bounding.
+            options.onEvent?.({
+              phase: 'completed',
+              runId,
+              toolCallId: toolCall.id,
+              tool: toolCall.name,
+              arguments: toolCall.arguments,
+              result: toolResult.result,
+              error: toolResult.error,
+            })
+            toolResultMessages.push({
+              role: 'tool',
+              toolCallId: toolCall.id,
+              content: JSON.stringify(toolResult.wire),
+            })
+            continue
+          }
+
+          // P18: the Doom Loop pre-check runs AFTER permission resolution but
+          // BEFORE approval (§37) — a call the guard will recover/escalate must
+          // never pop a Tool Approval the user would then "approve" for nothing.
+          const doomSignature = toolCallSignature({
+            toolName: toolCall.name,
+            normalizedArguments: toolRegistry.normalizeArguments(toolCall.name, toolCall.arguments),
+            scope: doomScope,
+          })
+          const doomDecision = doomLoop.beforeCall(doomSignature)
+          if (doomDecision.action !== 'execute') {
+            const synthetic = await this.#handleDoomLoop(
+              doomDecision,
+              toolCall,
+              doomLoop,
+              doomSignature,
+              askQuestion,
+            )
+            options.onEvent?.({
+              phase: 'completed',
+              runId,
+              toolCallId: toolCall.id,
+              tool: toolCall.name,
+              arguments: toolCall.arguments,
+              result: synthetic.result,
+              error: synthetic.error,
+            })
+            toolResultMessages.push({
+              role: 'tool',
+              toolCallId: toolCall.id,
+              content: JSON.stringify(synthetic.wire),
+            })
+            if (synthetic.error?.code === 'DOOM_LOOP_TERMINATED') {
+              roundHadToolFailure = true
+            }
+            continue
+          }
+
+          toolResult = await this.#executeTool(
             toolCall,
             runId,
             toolRegistry.resolvePermission(toolCall.name, {
@@ -1022,6 +1182,11 @@ export class AgentRuntime {
             input.navisworksBinding,
             input.navisworksUnavailable,
           )
+          // Record the real result's fingerprint so a REPEAT with no new
+          // information is detectable (§29); different results reset nothing.
+          if (toolResult.error === undefined) {
+            doomLoop.recordResult(doomSignature, resultFingerprint(toolResult.wire))
+          }
           // Bound large tool results ONCE: full data goes to the
           // ToolOutputStore, the model/session receive preview + resultRef.
           if (toolResult.error === undefined && this.#toolOutputStore !== undefined) {
@@ -1161,6 +1326,75 @@ export class AgentRuntime {
     }
   }
 
+  /**
+   * P18: turn a non-execute DoomLoop decision into a SYNTHETIC tool
+   * observation — never the bridge, never a ledger entry, never a Navisworks
+   * side effect (§32). 'recover' warns; 'escalate' asks the user (Question,
+   * source 'doom-loop') and records their replan/stop decision; 'terminate'
+   * ends the run with a DOOM_LOOP error (§35, runtime safety over tokens).
+   */
+  async #handleDoomLoop(
+    decision: Extract<DoomLoopDecision, { action: 'recover' | 'escalate' | 'terminate' }>,
+    toolCall: { id: string; name: string },
+    doomLoop: DoomLoopGuard,
+    signature: string,
+    askQuestion: RunAgentOptions['requestQuestion'],
+  ): Promise<ToolExecutionResult> {
+    if (decision.action === 'terminate') {
+      const message = '检测到对同一操作的无休止重复调用，已停止本次运行以避免失控。请换一种问法或缩小指令范围。'
+      return {
+        error: { code: 'DOOM_LOOP_TERMINATED', message },
+        wire: buildToolErrorObservation(toolCall.name, 'DOOM_LOOP', message),
+      }
+    }
+    if (decision.action === 'recover') {
+      doomLoop.recordRecovery(signature)
+      const result = {
+        type: 'doom_loop_detected',
+        tool: toolCall.name,
+        message: '你正在重复完全相同的工具调用，并且前两次没有获得新的信息。请改变参数、使用其他工具，或向用户提问。',
+      }
+      return { result, wire: buildToolSuccessObservation(toolCall.name, result) }
+    }
+    // escalate — ask the user how to proceed (换一种方法 / 停止当前任务).
+    let decisionValue: 'replan' | 'stop' = 'stop'
+    if (askQuestion !== undefined) {
+      try {
+        const outcome = await askQuestion({
+          source: 'doom-loop',
+          questions: [{
+            question: 'Curi 正在重复同一操作，但没有获得新信息。接下来怎么处理？',
+            kind: 'single',
+            options: [
+              { label: '换一种方法', description: '不要用完全相同的调用，改用其他参数或工具。' },
+              { label: '停止当前任务', description: '结束本次任务并给出简短说明。' },
+            ],
+          }],
+          toolCallId: toolCall.id,
+        })
+        decisionValue = outcome.kind === 'answered'
+          && outcome.answers.some((a) => a.values.includes('换一种方法'))
+          ? 'replan' : 'stop'
+      } catch {
+        decisionValue = 'stop'
+      }
+    }
+    doomLoop.applyUserDecision(signature, decisionValue)
+    const result = decisionValue === 'replan'
+      ? {
+        type: 'doom_loop_user_decision',
+        decision: 'replan',
+        message: '用户要求换一种方法，不要重复此前完全相同的工具调用。',
+      }
+      : {
+        type: 'doom_loop_user_decision',
+        decision: 'stop',
+        message: '用户要求停止当前任务。不要再调用工具，请简短结束。',
+      }
+    doomLoop.recordRecovery(signature)
+    return { result, wire: buildToolSuccessObservation(toolCall.name, result) }
+  }
+
   async #executeTool(
     toolCall: { id: string; name: string; arguments: Record<string, unknown> },
     runId: string,
@@ -1170,7 +1404,7 @@ export class AgentRuntime {
     allowAmbiguousRetry = false,
     navisworksBinding?: NavisworksRunBinding,
     navisworksUnavailable?: AgentRunInput['navisworksUnavailable'],
-  ): Promise<{ result?: unknown; error?: { code: string; message: string; ambiguousOutcome?: boolean }; wire: Record<string, unknown> }> {
+  ): Promise<ToolExecutionResult> {
     const ledger = this.#executionLedger
     const isModifying = toolRegistry.get(toolCall.name)?.impact === 'view-state-change'
     let documentAtRequest: string | undefined
