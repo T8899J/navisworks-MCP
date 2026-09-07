@@ -60,6 +60,15 @@ interface MessageListProps {
   sessionId?: string
   sessionTitle?: string
   composerClearance: number
+  /**
+   * P16: in-flow footer (the QuestionCard) rendered between the last message
+   * and the bottom spacer — inside the SAME scroll container so bottom-follow
+   * treats it as content (§24: no absolute overlays, no forced pull-back when
+   * the user has scrolled away).
+   */
+  footer?: ReactNode
+  /** Changes (e.g. footer presence) that must re-arm the follow check. */
+  followKey?: unknown
   onRetryLast?(): void
 }
 
@@ -357,7 +366,7 @@ function navItemStepClass(hoveredIndex: number | null, index: number): string {
   return ''
 }
 
-export function MessageList({ messages, sessionId, sessionTitle, composerClearance, onRetryLast }: MessageListProps) {
+export function MessageList({ messages, sessionId, sessionTitle, composerClearance, onRetryLast, footer, followKey }: MessageListProps) {
   const scrollerRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<HTMLElement>(null)
   const navRef = useRef<HTMLDivElement>(null)
@@ -641,7 +650,7 @@ export function MessageList({ messages, sessionId, sessionTitle, composerClearan
     }
     if (!follow.following) return
     anchorToBottomInstant()
-  }, [messages, composerClearance, sessionId])
+  }, [messages, composerClearance, sessionId, followKey])
 
   // Content height changes that don't ride on a messages-array update — tool
   // details expanding, thinking blocks growing, font reflow — must also keep
@@ -751,6 +760,7 @@ export function MessageList({ messages, sessionId, sessionTitle, composerClearan
               />
             ))}
           </div>
+          {footer ? <div className="message-flow-footer">{footer}</div> : null}
           {/* Content end marker: the last REAL content pixel — diagnostics
               measure against it to prove nothing hides behind the Composer. */}
           <div ref={contentEndRef} className="message-content-end" aria-hidden="true" />

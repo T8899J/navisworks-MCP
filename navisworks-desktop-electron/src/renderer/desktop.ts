@@ -7,6 +7,8 @@ import {
   type DesktopSettings,
   type ModelInfo,
   type NavisworksStatus,
+  type QuestionAnswer,
+  type QuestionRequest,
   type SessionSummary,
   type ToolApprovalRequest,
   normalizeModelInfo,
@@ -153,6 +155,23 @@ export const desktopGateway = {
 
   async abortChat(sessionId: string, turnId?: string): Promise<void> {
     await requireApi().request('chat.abort', { sessionId, ...(turnId ? { turnId } : {}) })
+  },
+
+  /** Answer a pending question; false = the run already ended (stale card). */
+  async answerQuestions(requestId: string, answers: readonly QuestionAnswer[]): Promise<boolean> {
+    const response = await requireApi().request('question.answer', { requestId, answers: [...answers] })
+    return response.resolved
+  },
+
+  /** Decline a question — the model receives question_rejected and decides. */
+  async rejectQuestions(requestId: string): Promise<boolean> {
+    const response = await requireApi().request('question.reject', { requestId })
+    return response.resolved
+  },
+
+  /** Re-attach a session's pending question after a session switch (§18). */
+  async listPendingQuestions(sessionId?: string): Promise<QuestionRequest[]> {
+    return await requireApi().request('question.pending.list', sessionId === undefined ? {} : { sessionId })
   },
 
   async resolveToolApproval(

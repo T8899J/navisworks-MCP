@@ -3931,3 +3931,97 @@ select:focus-visible,
 .tool-permission-select:disabled {
   opacity: 0.5;
 }
+
+/* P16 question card — part of the conversation flow, never an overlay. */
+.message-flow-footer {
+  padding: 4px 0 10px;
+}
+
+.question-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-raised, var(--surface));
+  padding: 12px 14px;
+}
+
+.question-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.question-item {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.question-item legend {
+  font-size: 14px;
+  margin-bottom: 2px;
+  padding: 0;
+}
+
+.question-optional {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.question-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.question-option.selected {
+  border-color: var(--accent);
+}
+
+.question-option input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+.question-option strong {
+  display: block;
+  font-size: 13px;
+}
+
+.question-option small {
+  color: var(--text-muted);
+}
+
+.question-text-input {
+  width: 100%;
+  resize: vertical;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.question-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

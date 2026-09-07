@@ -17,6 +17,8 @@ import { nearestReasoningEffort } from '../shared/reasoning'
 import {
   type ChatMessage,
   type ChatRunPhase,
+  type QuestionAnswer,
+  type QuestionRequest,
   type ModelInfo,
   type ModelUsage,
   type ToolDefinitionSummary,
@@ -33,6 +35,7 @@ import {
   normalizeModelUsage
 } from './chatTypes'
 import { Composer } from './Composer'
+import { QuestionCard } from './QuestionCard'
 import {
   routeChatEventSession,
   shouldApplyContextUsage,
@@ -267,6 +270,11 @@ export default function App() {
   const [pendingDeleteSession, setPendingDeleteSession] = useState<SessionSummary | null>(null)
   const [pendingToolApproval, setPendingToolApproval] = useState<ToolApprovalRequest | null>(null)
   const [approvalResolving, setApprovalResolving] = useState(false)
+  // P16: the session's pending question (process-memory mirror of main's
+  // registry). Kept session-scoped: switching windows never cancels it — on
+  // return, question.pending.list(sessionId) re-attaches the card (§18).
+  const [pendingQuestion, setPendingQuestion] = useState<QuestionRequest | null>(null)
+  const [questionResolving, setQuestionResolving] = useState(false)
   const [sessionTransitioning, setSessionTransitioning] = useState(false)
   const [deletingSessionId, setDeletingSessionId] = useState<string>()
   const [navisworksMenuOpen, setNavisworksMenuOpen] = useState(false)
@@ -631,6 +639,7 @@ export default function App() {
         }
         setActiveRun((current) => current?.sessionId === targetId ? null : current)
         setPendingToolApproval((current) => current?.sessionId === targetId ? null : current)
+        setPendingQuestion((current) => current?.sessionId === targetId ? null : current)
         // A late completion for a session already removed from the list must
         // never resurrect it through sessions.save; only clear the run state.
         // Persisting also refreshes the sidebar summary for background runs.
@@ -676,6 +685,16 @@ export default function App() {
           setNotice(`会话「${title}」正在请求工具确认，请在输入区上方处理。`)
         }
       }),
+      desktopGateway.subscribe('question.requested', (event) => {
+        const question = event as unknown as QuestionRequest
+        // Mirror approvals: keep the pending question no matter which session
+        // is on screen; the card only renders for the ACTIVE session.
+        setPendingQuestion(question)
+        if (question.sessionId !== activeSessionIdRef.current) {
+          const title = sessionsRef.current.find((item) => item.id === question.sessionId)?.title ?? '后台会话'
+          setNotice(`会话「${title}」在等你回答，切回该会话继续处理。`)
+        }
+      }),
       desktopGateway.subscribe('navisworks.instances.changed', (event) => {
         const state = event as NavisworksConnectionState
         setNavisworksConnection(state)
@@ -690,6 +709,27 @@ export default function App() {
   useEffect(() => {
     setContextUsage(null)
   }, [activeSessionId])
+
+  // P16 §18: re-attach this session's pending question after a switch. The
+  // card must NOT rely on having caught the question.requested event live.
+  useEffect(() => {
+    if (!serviceAvailable || activeSessionId === undefined) return
+    let stale = false
+    void desktopGateway.listPendingQuestions(activeSessionId)
+      .then((pending) => {
+        if (stale) return
+        setPendingQuestion((current) => {
+          if (pending.length > 0) return pending[0] ?? null
+          // This session has nothing pending: only clear a question that
+          // belongs HERE, never one another session is still awaiting.
+          return current === null || current.sessionId === activeSessionId ? null : current
+        })
+      })
+      .catch(() => undefined)
+    return () => {
+      stale = true
+    }
+  }, [activeSessionId, serviceAvailable])
 
   // Tool registry summaries must re-resolve whenever settings change:
   // permissions shown in the 工具与权限 page always mirror the latest state.
@@ -850,6 +890,9 @@ export default function App() {
     if (!run || run.sessionId !== activeSessionId) return
     try {
       await desktopGateway.abortChat(run.sessionId, run.turnId)
+      // An aborted run's pending question is rejected in main (§20) — clear
+      // the mirror so the card cannot outlive its run.
+      setPendingQuestion((current) => current?.sessionId === run.sessionId ? null : current)
       // Watchdog: if the main process somehow never delivers the terminal
       // event, reset the run state so the UI cannot stay stuck on 停止.
       if (abortWatchdogRef.current !== undefined) window.clearTimeout(abortWatchdogRef.current)
@@ -877,6 +920,27 @@ export default function App() {
       setNotice(error instanceof Error ? error.message : '无法提交操作确认')
     } finally {
       setApprovalResolving(false)
+    }
+  }
+
+  /**
+   * Submit / decline the active question. `resolved=false` means the run
+   * already ended (stale card) — drop it silently like an expired approval.
+   */
+  const resolveQuestion = async (answers: readonly QuestionAnswer[] | null) => {
+    const question = pendingQuestion
+    if (!question || questionResolving) return
+    setQuestionResolving(true)
+    try {
+      const resolved = answers === null
+        ? await desktopGateway.rejectQuestions(question.requestId)
+        : await desktopGateway.answerQuestions(question.requestId, answers)
+      if (!resolved) setNotice('该问题已失效（运行可能已结束）。')
+      setPendingQuestion((current) => current?.requestId === question.requestId ? null : current)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '无法提交回答')
+    } finally {
+      setQuestionResolving(false)
     }
   }
 
@@ -1334,6 +1398,15 @@ export default function App() {
               sessionTitle={session?.title}
               composerClearance={composerClearance}
               onRetryLast={busy ? undefined : retryLast}
+              followKey={pendingQuestion?.requestId}
+              footer={pendingQuestion && pendingQuestion.sessionId === activeSessionId ? (
+                <QuestionCard
+                  request={pendingQuestion}
+                  resolving={questionResolving}
+                  onSubmit={(answers) => void resolveQuestion(answers)}
+                  onReject={() => void resolveQuestion(null)}
+                />
+              ) : undefined}
             />
           )}
 
@@ -1349,6 +1422,9 @@ export default function App() {
             activeModel={activeModel}
             approval={pendingToolApproval}
             approvalResolving={approvalResolving}
+            awaitingQuestion={pendingQuestion !== null
+              && pendingQuestion.sessionId === activeSessionId
+              && activeSessionBusy}
             onDraftChange={setDraft}
             onSend={() => void sendText(draft)}
             onStop={() => void stop()}

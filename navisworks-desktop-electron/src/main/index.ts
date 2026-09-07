@@ -22,6 +22,7 @@ import { makeRootScope } from './kernel/services'
 import { AgentScopeManagerToken, ContextStateToken, TaskManagerToken } from './kernel/agentServices'
 import {
   AgentRuntimeToken,
+  QuestionServiceToken,
   ApprovalServiceToken,
   BridgeClientToken,
   ModelRouterToken,
@@ -131,6 +132,7 @@ async function startApplication(): Promise<void> {
     instanceRegistry,
     instanceSelection,
     modelCatalog,
+    questions: appScope.require(QuestionServiceToken),
     toolResultsDirectory: dataPaths.toolResultsDirectory,
     secrets: {
       encrypt(value) {

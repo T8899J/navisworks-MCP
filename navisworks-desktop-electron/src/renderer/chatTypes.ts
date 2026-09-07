@@ -20,6 +20,7 @@ import type { ModelInfo, ModelUsage } from '../shared/model'
 export type { ApiProfile, ContextWindowSource, ToolApprovalRequest, ToolDefinitionSummary, ToolPermission }
 export type { ReasoningEffort }
 export type { ModelInfo, ModelUsage }
+export type { QuestionAnswer, QuestionPrompt, QuestionRequest } from '../shared/ipc'
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'error'
 
@@ -134,7 +135,7 @@ export function navisworksInstanceDisplay(
   return { name, label: colliding ? `${name} · ${instance.processId}` : name }
 }
 
-export type ChatRunPhase = 'generating' | 'verifying'
+export type ChatRunPhase = 'generating' | 'verifying' | 'awaiting-user-input'
 
 export interface ChatStreamEvent {
   sessionId: string

@@ -38,7 +38,7 @@ interface ComposerProps {
   draft: string
   busy: boolean
   /** Run phase while busy: verifying shows a distinct hint instead of 生成中. */
-  phase?: 'generating' | 'verifying'
+  phase?: 'generating' | 'verifying' | 'awaiting-user-input'
   settings: DesktopSettings
   serviceAvailable: boolean
   /**
@@ -62,6 +62,8 @@ interface ComposerProps {
    */
   activeModel?: ModelInfo | null
   approval?: ToolApprovalRequest | null
+  /** P16 §23: this session is awaiting a question answer — plain send is locked. */
+  awaitingQuestion?: boolean
   approvalResolving?: boolean
   onDraftChange(value: string): void
   onSend(): void
@@ -87,6 +89,7 @@ export function Composer({
   activeModel,
   approval,
   approvalResolving = false,
+  awaitingQuestion = false,
   onDraftChange,
   onSend,
   onStop,
@@ -156,7 +159,10 @@ export function Composer({
    * a fresh open always lands on the pill.
    */
   const [pickerMode, setPickerMode] = useState<'effort' | 'model'>('effort')
-  const canSend = serviceAvailable && !busy && draft.trim().length > 0
+  // §23: while the ACTIVE session waits on a question, plain send is locked
+  // (the answer goes through the QuestionCard); other sessions are unaffected
+  // because App only passes this flag for the current session.
+  const canSend = serviceAvailable && !busy && !awaitingQuestion && draft.trim().length > 0
   // Slash command mode: "/" as the first character opens the command menu
   // above the input (until a space turns the text into a normal message).
   const slashQuery = draft.startsWith('/') && !draft.slice(1).includes(' ')
@@ -505,8 +511,12 @@ export function Composer({
           <span className="sr-only" id="composer-service-status" aria-live="polite">
             {serviceAvailable
               ? (busy
-                ? (phase === 'verifying' ? '正在验证任务完成度' : '助手正在生成回复')
-                : '可以发送消息')
+                ? (phase === 'verifying'
+                  ? '正在验证任务完成度'
+                  : phase === 'awaiting-user-input'
+                    ? '请先回答上方问题'
+                    : '助手正在生成回复')
+                : (awaitingQuestion ? '请先回答上方问题' : '可以发送消息'))
               : '桌面服务未连接'}
           </span>
         </form>
