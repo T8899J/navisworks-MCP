@@ -57,7 +57,8 @@ export const documentSource: ContextSource<DocumentContextValue> = {
         ...(value.documentInstanceId === undefined ? {} : { documentInstanceId: value.documentInstanceId }),
         ...(value.documentName === undefined ? {} : { documentName: value.documentName }),
       })
-      return block === '' ? '' : `【Context Update · Navisworks 文档】\n${block}`
+      // P15.5: body only — appendUpdate adds the single envelope.
+      return block
     }
     // Identity changed: reuse the runtime's existing transition semantics —
     // never a second, diverging wording of the same event (§21).
@@ -82,6 +83,7 @@ export const documentSource: ContextSource<DocumentContextValue> = {
       changedAt: Date.now(),
       reason: value.connected ? 'document-changed' : 'document-closed',
     }
-    return `【Context Update · Navisworks 文档】\n${renderDocumentTransition(notice)}`
+    // P15.5: body only — appendUpdate adds the single 【Context Update】 heading.
+    return renderDocumentTransition(notice)
   },
 }

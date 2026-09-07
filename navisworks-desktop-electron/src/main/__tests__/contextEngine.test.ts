@@ -452,3 +452,74 @@ describe('ContextManager still owns HOW MUCH under the engine (§29/§73)', () =
     }
   })
 })
+
+describe('P15.5 reconciliation regressions', () => {
+  it('every registered source appears AT MOST ONCE in report.sources', async () => {
+    const { dir, cleanup } = await tempDir()
+    try {
+      const store = new ContextEpochStore(dir)
+      const engine = makeEngine(store)
+      const assembly = await engine.prepare('s1', docEnv(
+        { connected: true, documentInstanceId: 'A', documentName: 'A.nwd' },
+      ))
+      const seen = new Map<string, number>()
+      for (const entry of assembly.report.sources) {
+        seen.set(entry.key, (seen.get(entry.key) ?? 0) + 1)
+      }
+      for (const [key, count] of seen) {
+        expect(count, `source ${key} reconciled ${count}x`).toBe(1)
+      }
+      // Registry coverage: every durable + volatile source reported exactly once.
+      const registered = contextRegistry.list()
+        .filter((source) => source.mode !== 'baseline')
+        .map((source) => source.key)
+        .sort()
+      expect([...seen.keys()].sort()).toEqual(registered)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('A→B switch: status=updated, updatesAdded=1, epochId unchanged', async () => {
+    const { dir, cleanup } = await tempDir()
+    try {
+      const store = new ContextEpochStore(dir)
+      const engine = makeEngine(store)
+      const first = await engine.prepare('s1', docEnv(
+        { connected: true, documentInstanceId: 'A', documentName: 'A.nwd' },
+      ))
+      await engine.commit(first.epoch)
+      const second = await engine.prepare('s1', docEnv(
+        { connected: true, documentInstanceId: 'B', documentName: 'B.nwd' },
+      ))
+      expect(second.status).toBe('updated')
+      expect(second.updatesAdded).toBe(1)
+      expect(second.epochId).toBe(first.epochId)
+      expect(second.generation).toBe(first.generation)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('rendered durable update carries EXACTLY ONE 【Context Update heading', async () => {
+    const { dir, cleanup } = await tempDir()
+    try {
+      const store = new ContextEpochStore(dir)
+      const engine = makeEngine(store)
+      const first = await engine.prepare('s1', docEnv(
+        { connected: true, documentInstanceId: 'A', documentName: 'A.nwd' },
+      ))
+      await engine.commit(first.epoch)
+      const second = await engine.prepare('s1', docEnv(
+        { connected: true, documentInstanceId: 'B', documentName: 'B.nwd' },
+      ))
+      const added = second.epoch.updates[second.epoch.updates.length - 1]
+      expect(added).toBeDefined()
+      const headings = (added!.rendered.match(/Context Update/g) ?? [])
+      expect(headings).toHaveLength(1)
+      expect(added!.rendered.startsWith('【Context Update · navisworks/document】')).toBe(true)
+    } finally {
+      await cleanup()
+    }
+  })
+})

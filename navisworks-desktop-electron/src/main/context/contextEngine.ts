@@ -88,28 +88,28 @@ export class ContextEngine {
       try {
         const value = await source.load(env)
         if (value === undefined) {
-          reconciliations.push(this.record(reconciliations, key, 'durable', 'skipped-empty'))
+          reconciliations.push(this.record(key, 'durable', 'skipped-empty'))
           continue
         }
         const fingerprint = source.fingerprint(value)
         const previousSnapshot = next.snapshot[key]
         if (previousSnapshot !== undefined && previousSnapshot.fingerprint === fingerprint) {
-          reconciliations.push(this.record(reconciliations, key, 'durable', 'unchanged', fingerprint))
+          reconciliations.push(this.record(key, 'durable', 'unchanged', fingerprint))
           continue
         }
         const text = source.render(value, previousSnapshot?.value)
         if (!text) {
-          reconciliations.push(this.record(reconciliations, key, 'durable', 'skipped-empty'))
+          reconciliations.push(this.record(key, 'durable', 'skipped-empty'))
           continue
         }
         if (previousSnapshot !== undefined) {
           const update = this.appendUpdate(next, source, fingerprint, text)
           updatesAdded.push(update)
-          reconciliations.push(this.record(reconciliations, key, 'durable', 'updated', fingerprint))
+          reconciliations.push(this.record(key, 'durable', 'updated', fingerprint))
         } else {
           const update = this.appendUpdate(next, source, fingerprint, text)
           updatesAdded.push(update)
-          reconciliations.push(this.record(reconciliations, key, 'durable', 'created', fingerprint))
+          reconciliations.push(this.record(key, 'durable', 'created', fingerprint))
         }
         next.snapshot[key] = {
           key,
@@ -122,7 +122,7 @@ export class ContextEngine {
         // not paper over with stale data — skip the block, log, and let the
         // run continue (the model will re-read live state via tools).
         reconciliations.push(this.record(
-          reconciliations, key, 'durable', 'error', undefined, errorMessageOf(error),
+          key, 'durable', 'error', undefined, errorMessageOf(error),
         ))
       }
     }
@@ -134,13 +134,13 @@ export class ContextEngine {
       try {
         const value = await source.load(env)
         if (value === undefined) {
-          reconciliations.push(this.record(reconciliations, key, 'volatile', 'skipped-empty'))
+          reconciliations.push(this.record(key, 'volatile', 'skipped-empty'))
           continue
         }
         const fingerprint = source.fingerprint(value)
         const text = source.render(value)
         if (!text) {
-          reconciliations.push(this.record(reconciliations, key, 'volatile', 'skipped-empty'))
+          reconciliations.push(this.record(key, 'volatile', 'skipped-empty'))
           continue
         }
         // The compact summary already lives in the prefix as the epoch SEED
@@ -149,17 +149,21 @@ export class ContextEngine {
           && next.seed !== undefined
           && typeof value === 'string'
           && value === next.seed.text) {
-          reconciliations.push(this.record(reconciliations, key, 'volatile', 'unchanged', fingerprint))
+          reconciliations.push(this.record(key, 'volatile', 'unchanged', fingerprint))
           continue
         }
         volatileBlocks.push({ kind: blockKindFor(key), message: { role: 'system', content: text } })
-        reconciliations.push(this.record(reconciliations, key, 'volatile', 'updated', fingerprint))
+        reconciliations.push(this.record(key, 'volatile', 'updated', fingerprint))
       } catch (error) {
         reconciliations.push(this.record(
-          reconciliations, key, 'volatile', 'error', undefined, errorMessageOf(error),
+          key, 'volatile', 'error', undefined, errorMessageOf(error),
         ))
       }
     }
+
+    // P15.5 §3.2: a durable reconcile that added updates WITHOUT a rollover
+    // reports 'updated' — status priority rolled-over > updated > unchanged.
+    if (status === 'unchanged' && updatesAdded.length > 0) status = 'updated'
 
     // ---- assembly ----
     const blocks: ContextBlock[] = []
@@ -319,8 +323,12 @@ export class ContextEngine {
     return update
   }
 
+  /**
+   * P15.5: PURE factory — creates one reconciliation entry and returns it.
+   * The CALLER pushes it exactly once. (It used to both push internally AND
+   * be pushed by the caller, double-counting every source.)
+   */
   private record(
-    list: ContextSourceReconciliation[],
     key: string,
     mode: ContextSourceReconciliation['mode'],
     status: ContextSourceReconciliation['status'],
@@ -334,7 +342,6 @@ export class ContextEngine {
       ...(fingerprint === undefined ? {} : { fingerprint }),
       ...(error === undefined ? {} : { error }),
     }
-    list.push(entry)
     return entry
   }
 
