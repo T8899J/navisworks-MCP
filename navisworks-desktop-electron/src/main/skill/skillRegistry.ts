@@ -32,8 +32,12 @@ export class SkillRegistry {
       if (existing !== undefined && existing.source === 'builtin' && skill.source === 'user') {
         console.debug(`[skill] user overrides builtin: ${skill.name}`)
       }
-      // Within one layer a stable pick: first alphabetical wins.
-      if (existing === undefined || (existing.source === skill.source && skill.name < existing.name)) {
+      // Precedence: user overrides builtin; within one layer the stable
+      // alphabetical-first pick wins (layers pre-sorted).
+      const takesPrecedence = existing === undefined
+        || (existing.source === 'builtin' && skill.source === 'user')
+        || (existing.source === skill.source && skill.name < existing.name)
+      if (takesPrecedence) {
         this.#skills.set(skill.name, skill)
       }
     }

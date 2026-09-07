@@ -35,7 +35,7 @@ export class ContextEngine {
     env: ContextSourceEnvironment,
   ): Promise<ContextAssembly> {
     const baselineSources = this.registry.listByMode('baseline')
-    const baseline = await this.buildBaseline(baselineSources)
+    const baseline = await this.buildBaseline(baselineSources, env)
     const baselineVersions: Record<string, number> = {}
     for (const source of baselineSources) baselineVersions[source.key] = source.version
 
@@ -236,10 +236,14 @@ export class ContextEngine {
     previous?: ContextEpoch,
   ): Promise<ContextEpoch> {
     const prior = previous ?? (this.store ? (await this.store.load(sessionId)).epoch : null) ?? undefined
-    const baselineSources = this.registry.listByMode('baseline')
-    const baseline = await this.buildBaseline(baselineSources)
-    const baselineVersions: Record<string, number> = {}
-    for (const source of baselineSources) baselineVersions[source.key] = source.version
+    // A compaction is NOT a baseline change: the NEW epoch keeps the PRIOR
+    // baseline text/hash verbatim (including the skills manifest exactly as it
+    // was). Recomputing it here would drop env-only sources (manifest) and
+    // make the NEXT prepare() see a spurious baseline-changed rollover.
+    const baseline = prior !== undefined
+      ? { text: prior.baseline, hash: prior.baselineHash }
+      : await this.buildBaseline(this.registry.listByMode('baseline'), { sessionId })
+    const baselineVersions = { ...(prior?.baselineVersions ?? {}) }
     console.debug(`[context] ROLLOVER session=${sessionId} reason=compaction`)
     const seedText = summary.trim()
     const epoch = this.newEpoch(sessionId, baseline, baselineVersions, prior, seedText
@@ -292,10 +296,13 @@ export class ContextEngine {
 
   private async buildBaseline(
     sources: readonly ContextSource<unknown>[],
+    env: ContextSourceEnvironment,
   ): Promise<{ text: string; hash: string }> {
     const parts: string[] = []
     for (const source of sources) {
-      const value = await source.load({})
+      // Baseline sources receive the run's env: core/policy ignore it, but
+      // skills/manifest reads the discovered provider from it (§53).
+      const value = await source.load(env)
       if (value === undefined) continue
       parts.push(source.render(value))
     }

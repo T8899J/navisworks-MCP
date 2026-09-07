@@ -54,6 +54,7 @@ import type { ModelCatalogService } from './model/catalog/modelCatalogService'
 import type { ContextEngine } from './context/contextEngine'
 import type { QuestionService } from './question/questionService'
 import type { QuestionOutcome } from './question/types'
+import { validateAnswersForRequest } from './question/questionSchema'
 import type { ModelUsage, QuestionRequest } from '../shared/ipc/schemas'
 type RuntimeQuestionRequest = {
   source: 'tool' | 'doom-loop'
@@ -402,17 +403,7 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       if (request === undefined) return { resolved: false }
       // Answer indexes must line up with the registered prompts (§5: positions,
       // never model-authored ids) and every required question needs a value.
-      if (request.questions.length < answers.length) return { resolved: false }
-      for (const answer of answers) {
-        const prompt = request.questions[answer.questionIndex]
-        if (prompt === undefined) return { resolved: false }
-        if (prompt.required !== false && answer.values.length === 0) return { resolved: false }
-        if (prompt.kind === 'single' && answer.values.length > 1) return { resolved: false }
-        if (prompt.kind !== 'text') {
-          const labels = new Set((prompt.options ?? []).map((option) => option.label))
-          if (answer.values.some((value) => !labels.has(value))) return { resolved: false }
-        }
-      }
+      if (!validateAnswersForRequest(request, answers)) return { resolved: false }
       return { resolved: service.answer(requestId, answers) === true }
     }),
     'question.reject': routeHandler<'question.reject'>(({ requestId }) => ({

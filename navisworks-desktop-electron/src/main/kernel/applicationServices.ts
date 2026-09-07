@@ -61,10 +61,6 @@ export async function installApplicationServices(
   // Context Engine v1: the WHAT of context, durable per-session epochs. One
   // process-level engine shared by the runtime (assembly) and IPC (session
   // cleanup + compaction rollover).
-  const contextEngine = new ContextEngine(
-    contextRegistry,
-    new ContextEpochStore(paths.contextEpochsDirectory),
-  )
   // P19 Skills: discover once at startup (no file watching, §50); a broken
   // skill is skipped with a warning, never a failed boot.
   const skillRegistry = new SkillRegistry(skillRoots(paths.rootDirectory))
@@ -73,6 +69,13 @@ export async function installApplicationServices(
   } catch (error) {
     console.warn(`[skill] discovery failed: ${error instanceof Error ? error.message : String(error)}`)
   }
+  // The default registry already carries skills/manifest in its fixed
+  // baseline position (core → policy → skills/manifest); when no skills are
+  // discovered the source contributes NOTHING to the baseline (§55).
+  const contextEngine = new ContextEngine(
+    contextRegistry,
+    new ContextEpochStore(paths.contextEpochsDirectory),
+  )
   // P16 Question service: pending questions are process-memory state; the
   // ChatRunRegistry dispatches `question.requested` to the originating window.
   const questions = new QuestionService()

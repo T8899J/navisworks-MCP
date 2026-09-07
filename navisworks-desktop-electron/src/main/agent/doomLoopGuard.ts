@@ -88,9 +88,11 @@ export class DoomLoopGuard {
     if (state.userDecision === 'stop') {
       return { action: 'terminate', repetition: state.recoveriesIssued + 1 }
     }
-    // User chose replan → the exact same signature stays blocked (§34).
+    // User chose replan: the exact same signature stays BLOCKED until the
+    // tool, arguments or document scope change (§34) — a synthetic recovery
+    // observation, never another question.
     if (state.userDecision === 'replan') {
-      return { action: 'escalate', repetition: state.recoveriesIssued + 1 }
+      return { action: 'recover', repetition: state.resultFingerprints.length }
     }
     // A recovery was already offered and the model ignored it → escalate.
     if (state.recoveriesIssued > 0) {
