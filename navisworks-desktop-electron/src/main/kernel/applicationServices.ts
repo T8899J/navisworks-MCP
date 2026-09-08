@@ -160,6 +160,12 @@ export async function installApplicationServices(
     .register(AgentToolRegistryToken, agentTools)
     .register(QuestionServiceToken, questions)
     .register(ApprovalServiceToken, approvals)
+  // P30.6: the CapabilityRegistry is owned by the COMPOSITION ROOT, so App
+  // shutdown tears the capabilities down here — NOT inside runtime.dispose()
+  // (§34). disposeAll isolates each provider's cleanup (a Navisworks dispose
+  // failure must never block another capability, nor keep the app alive); the
+  // Navisworks polling is stopped by the provider's own dispose().
   appScope.onDispose(() => runtime.dispose())
+  appScope.onDispose(async () => { await capabilities.disposeAll() })
   return persistedSettings
 }
