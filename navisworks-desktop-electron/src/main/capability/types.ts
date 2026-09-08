@@ -118,6 +118,23 @@ export interface CapabilityToolObservation {
   sessionId?: string
 }
 
+/** P30.5 run-finish outcome — a generic three-value result, deliberately NOT
+ *  named after any capability concept. The capability reads what it needs from
+ *  its OWN prepared state (§29: documentRevision is NEVER in this input). */
+export type CapabilityRunOutcome = 'completed' | 'failed' | 'aborted'
+
+/** Minimal run-finish seam. The core owns the lifecycle (finally block); the
+ *  provider only decides what its own professional state should do on the way
+ *  out (e.g. Navisworks advances the per-session "document seen" marker when a
+ *  run COMPLETED — never on failed/aborted, §30/§31). */
+export interface CapabilityRunFinishInput {
+  runId: string
+  sessionId?: string
+  /** The opaque state THIS provider returned from prepareRun for this run. */
+  state: unknown
+  outcome: CapabilityRunOutcome
+}
+
 /**
  * Doom-loop scoping, OPAQUE by design: a provider contributes its stable
  * operation scope as scalar fields (Navisworks: instance / bridge session /
@@ -165,6 +182,16 @@ export interface CapabilityProvider {
 
   /** Optional post-bounding ingest into provider state (e.g. facts / reference sets). */
   observeModelResult?(observation: CapabilityToolObservation): void
+
+  /**
+   * P30.5 run finalization. Invoked exactly once per prepared run from the
+   * runtime's `finally` (prepareRuns → run → finishRuns, §32), carrying the
+   * run's generic outcome. A provider advances its OWN durable state here
+   * (Navisworks: mark the preflight document revision seen, ONLY on a
+   * completed run). It must never throw into the user's answer path (§30) —
+   * the registry isolates per-provider failures.
+   */
+  finishRun?(input: CapabilityRunFinishInput): Promise<void> | void
 
   /** Own lifecycle: the provider starts/stops its own background work (§17/§18). */
   start?(): Promise<void> | void

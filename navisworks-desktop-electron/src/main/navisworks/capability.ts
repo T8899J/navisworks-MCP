@@ -203,6 +203,29 @@ export class NavisworksCapabilityProvider implements CapabilityProvider {
     )
   }
 
+  /**
+   * P30.5/§31: advance this session's "document seen" marker — but ONLY for a
+   * run that COMPLETED. This was the old ChatRunRegistry `markDocumentSeen`
+   * that fired after a successful run; it is professional Navisworks state and
+   * now lives here. failed/aborted deliberately leave the transition pending
+   * so the next run re-surfaces the notice (matching the pre-migration
+   * behavior pinned by ipc.test "keeps a transition pending after failure").
+   * It reads the revision from the run's OWN prepared state, never a generic
+   * documentRevision on the finish input (§29).
+   */
+  finishRun(input: {
+    outcome: 'completed' | 'failed' | 'aborted'
+    sessionId?: string
+    state: unknown
+  }): void {
+    if (input.outcome !== 'completed') return
+    const contextState = this.#deps.contextState
+    if (input.sessionId === undefined || contextState === undefined) return
+    const revision = (input.state as NavisworksPreparedRun).observedDocumentRevision
+    if (revision === undefined) return
+    contextState.markDocumentSeen(input.sessionId, revision)
+  }
+
   start(): void {
     if (this.#stopPolling !== undefined || this.#deps.startPolling === undefined) return
     this.#stopPolling = this.#deps.startPolling()

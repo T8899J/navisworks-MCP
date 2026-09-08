@@ -4,6 +4,7 @@ import { CapabilityRegistry } from '../capability/capabilityRegistry'
 import { createToolRegistry } from '../tool/registry'
 import { applyLegacyNavisworksRunState } from '../agent/legacyNavisworksAdapter'
 import { NavisworksCapabilityProvider } from '../navisworks/capability'
+import { ContextState } from '../agent/contextState'
 import type {
   CapabilityPreparedRun,
   CapabilityProvider,
@@ -126,5 +127,109 @@ describe('P30.4 legacy Navisworks fields never pollute other capabilities (§26/
     expect(fakeState).not.toHaveProperty('currentDocument')
     expect(fakeState).not.toHaveProperty('unavailable')
     expect(fakeState).toMatchObject({ ready: true })
+  })
+})
+
+describe('P30.5 run outcome reaches finishRun correctly (§88/§72)', () => {
+  function runFinisher(outcomes: string[]): { capabilities: CapabilityRegistry; tools: ReturnType<typeof createToolRegistry> } {
+    const provider: CapabilityProvider = {
+      manifest: { id: 'fake', name: 'Fake', description: 'fake', version: 1, firstParty: false },
+      tools: () => [fakeTool('fake_echo')],
+      contextSources: () => [],
+      ownsTool: (name) => name === 'fake_echo',
+      normalizeArguments: (_n, args) => args,
+      prepareRun: async () => ({ capabilityId: 'fake', state: { ready: true } }),
+      executeTool: async () => ({ result: { ok: true } }),
+      finishRun: (input) => { outcomes.push(input.outcome) },
+    }
+    const capabilities = new CapabilityRegistry([provider])
+    return { capabilities, tools: createToolRegistry({ capabilities }) }
+  }
+
+  it('a successful run finalizes with outcome=completed', async () => {
+    const outcomes: string[] = []
+    const { capabilities, tools } = runFinisher(outcomes)
+    const fetchImpl = vi.fn(async () => ndjson([{ message: { role: 'assistant', content: '完成。' } }])) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ capabilities, tools, fetchImpl })
+    const result = await runtime.run({ sessionId: 's1', text: 'hi' })
+    expect(result.isSuccess).toBe(true)
+    expect(outcomes).toEqual(['completed'])
+  })
+
+  it('a model failure finalizes with outcome=failed (never overwrites the error) (§32)', async () => {
+    const outcomes: string[] = []
+    const { capabilities, tools } = runFinisher(outcomes)
+    const fetchImpl = vi.fn(async () => { throw new Error('network down') }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ capabilities, tools, fetchImpl })
+    const result = await runtime.run({ sessionId: 's1', text: 'hi' })
+    expect(result.isSuccess).toBe(false)
+    expect(outcomes).toEqual(['failed'])
+  })
+
+  it('an aborted run finalizes with outcome=aborted; the finish error never masks CANCELLED (§72)', async () => {
+    const outcomes: string[] = []
+    const provider: CapabilityProvider = {
+      manifest: { id: 'fake', name: 'Fake', description: 'fake', version: 1, firstParty: false },
+      tools: () => [fakeTool('fake_echo')],
+      contextSources: () => [],
+      ownsTool: (name) => name === 'fake_echo',
+      normalizeArguments: (_n, args) => args,
+      prepareRun: async () => ({ capabilityId: 'fake', state: { ready: true } }),
+      executeTool: async () => ({ result: { ok: true } }),
+      // finishRun throwing must NOT override the abort (registry isolates).
+      finishRun: (input) => { outcomes.push(input.outcome); throw new Error('finish exploded') },
+    }
+    const capabilities = new CapabilityRegistry([provider])
+    const tools = createToolRegistry({ capabilities })
+    const controller = new AbortController()
+    controller.abort(new Error('user cancelled'))
+    const fetchImpl = vi.fn(async () => ndjson([{ message: { role: 'assistant', content: 'x' } }])) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ capabilities, tools, fetchImpl })
+    await expect(
+      runtime.run({ sessionId: 's1', text: 'hi' }, { signal: controller.signal }),
+    ).rejects.toThrow()
+    expect(outcomes).toEqual(['aborted'])
+  })
+})
+
+describe('P30.5 Navisworks finishRun migrates markDocumentSeen (§28/§31)', () => {
+  function providerWithSeen(sessionId: string): { provider: NavisworksCapabilityProvider; contextState: ContextState; revision: number } {
+    const contextState = new ContextState()
+    contextState.observe({ connected: true, documentInstanceId: 'doc-A', bridgeSessionId: 'b1' })
+    // Establish the session has SEEN the current revision, then switch docs so a
+    // transition becomes pending.
+    contextState.markDocumentSeen(sessionId, contextState.documentRevision)
+    contextState.observe({ connected: true, documentInstanceId: 'doc-B', bridgeSessionId: 'b1' })
+    const revision = contextState.documentRevision
+    const provider = new NavisworksCapabilityProvider({
+      bridge: { async call<T>() { return {} as T } } as unknown as never,
+      contextState,
+    })
+    return { provider, contextState, revision }
+  }
+
+  it('completed advances the seen marker (notice consumed)', () => {
+    const sessionId = 's1'
+    const { provider, contextState, revision } = providerWithSeen(sessionId)
+    expect(contextState.documentNoticeForSession(sessionId)).toBeDefined()
+    provider.finishRun({ outcome: 'completed', sessionId, state: { observedDocumentRevision: revision } })
+    expect(contextState.documentNoticeForSession(sessionId)).toBeUndefined()
+  })
+
+  it('failed / aborted leave the transition pending (re-shown next run)', () => {
+    for (const outcome of ['failed', 'aborted'] as const) {
+      const sessionId = `s-${outcome}`
+      const { provider, contextState, revision } = providerWithSeen(sessionId)
+      provider.finishRun({ outcome, sessionId, state: { observedDocumentRevision: revision } })
+      expect(contextState.documentNoticeForSession(sessionId)).toBeDefined()
+    }
+  })
+
+  it('no sessionId / no revision in state → no-op', () => {
+    const { provider, contextState, revision } = providerWithSeen('s9')
+    provider.finishRun({ outcome: 'completed', state: {} })
+    expect(contextState.documentNoticeForSession('s9')).toBeDefined()
+    provider.finishRun({ outcome: 'completed', sessionId: 's9', state: { observedDocumentRevision: revision } })
+    expect(contextState.documentNoticeForSession('s9')).toBeUndefined()
   })
 })

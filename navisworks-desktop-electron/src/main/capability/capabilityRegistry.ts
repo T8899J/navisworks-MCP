@@ -4,6 +4,8 @@ import type {
   CapabilityExecutionScope,
   CapabilityPreparedRun,
   CapabilityProvider,
+  CapabilityRunFinishInput,
+  CapabilityRunOutcome,
   CapabilityRunPrepareInput,
   CapabilityRunSet,
   CapabilityToolExecutionInput,
@@ -131,6 +133,37 @@ export class CapabilityRegistry {
   /** Post-bounding observation fan-out to the owning provider (facts, reference sets). */
   observeModelResult(toolName: string, observation: Parameters<NonNullable<CapabilityProvider['observeModelResult']>>[0]): void {
     this.#toolOwners.get(toolName)?.observeModelResult?.(observation)
+  }
+
+  /**
+   * P30.5 run finalization for every provider that prepared a run. Mirrors
+   * prepareRuns (§32): a single provider's finish failure is logged as a
+   * warning and ISOLATED — it can neither block another capability's cleanup
+   * nor override the user's already-produced answer (§30). It never throws.
+   */
+  async finishRuns(
+    runSet: CapabilityRunSet,
+    outcome: CapabilityRunOutcome,
+    input: { runId: string; sessionId?: string },
+  ): Promise<void> {
+    for (const provider of this.#providers) {
+      if (provider.finishRun === undefined) continue
+      const prepared = runSet.get(provider.manifest.id)
+      if (prepared === undefined) continue
+      const finishInput: CapabilityRunFinishInput = {
+        runId: input.runId,
+        ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+        state: prepared.state,
+        outcome,
+      }
+      try {
+        await provider.finishRun(finishInput)
+      } catch (error) {
+        console.warn(
+          `[capability] finish failed id=${provider.manifest.id}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    }
   }
 
   /**

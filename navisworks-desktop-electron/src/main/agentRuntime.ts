@@ -7,7 +7,7 @@ import { toolRegistry, createToolRegistry, type ToolRegistry } from './tool/regi
 import type { CapabilityRegistry } from './capability/capabilityRegistry'
 import { createLegacyNavisworksRegistry, applyLegacyNavisworksRunState } from './agent/legacyNavisworksAdapter'
 import type {
-  CapabilityPreparedRun,
+  CapabilityRunOutcome,
   CapabilityRunSet,
   CapabilityToolExecutionResult,
 } from './capability/types'
@@ -949,6 +949,23 @@ export class AgentRuntime {
         return null
       }
     }
+    // P30.5: the run's outcome drives Capability finishRuns (§32). Only a run
+    // that produced an answer (every success return routes through
+    // finishSuccess) counts as 'completed' — exactly the condition under which
+    // the old ChatRunRegistry called contextState.markDocumentSeen. Failed and
+    // aborted runs leave their pending document transition unconsumed.
+    let settledAsCompleted = false
+    const finishCapabilityRun = async (): Promise<void> => {
+      const outcome: CapabilityRunOutcome = options.signal?.aborted === true
+        ? 'aborted'
+        : settledAsCompleted
+          ? 'completed'
+          : 'failed'
+      await this.#capabilities?.finishRuns(capabilityStates, outcome, {
+        runId,
+        ...(sessionId === undefined ? {} : { sessionId }),
+      })
+    }
     try {
       // Section 一/1.3: budget-check BEFORE the first model call, not just on later rounds.
       const initialTokens = contextManager.estimateRequestTokens(tools, outputReserve)
@@ -1009,6 +1026,7 @@ export class AgentRuntime {
         // pre-run one and the next prepare() re-reconciles from it unchanged.
         const finishSuccess = async (message: string = lastAssistantText): Promise<AgentRunResult> => {
           await settleContextEpoch()
+          settledAsCompleted = true
           return {
             isSuccess: true,
             message,
@@ -1450,6 +1468,11 @@ export class AgentRuntime {
         contextWindowSource,
         errorCode: 'MODEL_ERROR',
       }
+    } finally {
+      // prepareRuns → run → finally finishRuns (§32). finishCapabilityRun never
+      // throws (the registry isolates provider failures), so it can never
+      // overwrite the model/tool error the run is already unwinding with.
+      await finishCapabilityRun()
     }
   }
 

@@ -56,6 +56,8 @@ interface FakeProviderOptions {
   throwOnDispose?: boolean
   scope?: Record<string, string | number | null>
   normalizeSpy?: (name: string, args: Record<string, unknown>) => Record<string, unknown>
+  finishSpy?: (outcome: string, state: unknown) => void
+  throwOnFinish?: boolean
 }
 
 function fakeProvider(options: FakeProviderOptions): CapabilityProvider {
@@ -75,6 +77,12 @@ function fakeProvider(options: FakeProviderOptions): CapabilityProvider {
       if (options.throwOnExecute) throw new Error('provider exploded')
       return { result: { echo: String((input.arguments as { text?: string }).text ?? '') } }
     },
+    finishRun: options.finishSpy
+      ? (input) => {
+        if (options.throwOnFinish) throw new Error('finish exploded')
+        options.finishSpy!(input.outcome, input.state)
+      }
+      : undefined,
     start: options.startSpy,
     dispose: options.disposeSpy
       ?? (options.throwOnDispose ? () => { throw new Error('dispose exploded') } : undefined),
@@ -146,6 +154,45 @@ describe('Capability lifecycle (§109)', () => {
     const states = await registry.prepareRuns({ runId: 'r1' })
     expect(states.has('good')).toBe(true)
     expect(states.has('broken')).toBe(false)
+  })
+})
+
+describe('P30.5 finishRuns lifecycle (§30/§32/§88)', () => {
+  it('reaches every prepared provider with the run outcome + its own state', async () => {
+    const seen: Array<{ id: string; outcome: string; state: unknown }> = []
+    const registry = new CapabilityRegistry([
+      fakeProvider({ id: 'a', tools: ['a_tool'], finishSpy: (o, s) => seen.push({ id: 'a', outcome: o, state: s }) }),
+      fakeProvider({ id: 'b', tools: ['b_tool'], finishSpy: (o, s) => seen.push({ id: 'b', outcome: o, state: s }) }),
+    ])
+    const states = await registry.prepareRuns({ runId: 'r1' })
+    await registry.finishRuns(states, 'completed', { runId: 'r1', sessionId: 's1' })
+    expect(seen).toHaveLength(2)
+    expect(seen.map((entry) => entry.id).sort()).toEqual(['a', 'b'])
+    expect(seen.every((entry) => entry.outcome === 'completed')).toBe(true)
+    expect(seen[0]?.state).toEqual({ preparedBy: seen[0]?.id })
+  })
+
+  it('a provider with no prepared state is skipped; no hook means no call (§30)', async () => {
+    const finishSpy = vi.fn()
+    const registry = new CapabilityRegistry([
+      fakeProvider({ id: 'ok', tools: ['ok_tool'], finishSpy }),
+      fakeProvider({ id: 'willfail', tools: ['f_tool'], failPrepare: true, finishSpy }),
+    ])
+    const states = await registry.prepareRuns({ runId: 'r1' })
+    await registry.finishRuns(states, 'failed', { runId: 'r1' })
+    // 'willfail' never prepared → finishRun is NOT invoked for it; only 'ok'.
+    expect(finishSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('one provider throwing in finishRun never blocks the others (§30/§72)', async () => {
+    const finishB = vi.fn()
+    const registry = new CapabilityRegistry([
+      fakeProvider({ id: 'a', tools: ['a_tool'], throwOnFinish: true }),
+      fakeProvider({ id: 'b', tools: ['b_tool'], finishSpy: finishB }),
+    ])
+    const states = await registry.prepareRuns({ runId: 'r1' })
+    await expect(registry.finishRuns(states, 'aborted', { runId: 'r1' })).resolves.toBeUndefined()
+    expect(finishB).toHaveBeenCalledTimes(1)
   })
 })
 
