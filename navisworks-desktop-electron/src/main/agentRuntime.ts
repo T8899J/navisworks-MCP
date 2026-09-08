@@ -513,7 +513,6 @@ export type { AgentBridgeClient } from './model/types'
 
 export class AgentRuntime {
   readonly #capabilities: CapabilityRegistry | undefined
-  readonly #bridgeClient: AgentBridgeClient | undefined
   readonly #router: ModelRouter
   readonly #model: string
   readonly #think: boolean
@@ -547,7 +546,6 @@ export class AgentRuntime {
     this.#tools = capabilities === undefined
       ? toolRegistry
       : createToolRegistry({ capabilities })
-    this.#bridgeClient = options.bridgeClient
     this.#router = new ModelRouter({
       requestTimeoutMs: options.requestTimeoutMs,
       fetchImpl: options.fetchImpl,
