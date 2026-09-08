@@ -11,11 +11,7 @@ import type { NavisworksBridgeClient } from './bridgeClient'
 import type { NavisworksInstanceRegistry } from './navisworks/instanceRegistry'
 import type { NavisworksInstanceSelection } from './navisworks/instanceSelection'
 import type { NavisworksInstance } from './navisworks/instanceTypes'
-import type { NavisworksRunBinding } from './navisworks/instanceTypes'
-import {
-  createNavisworksRunBinding,
-  NavisworksTargetError,
-} from './navisworks/runBinding'
+import { NavisworksTargetError } from './navisworks/runBinding'
 import type {
   AppSettings as PersistedSettings,
   ConversationSession,
@@ -123,12 +119,10 @@ export interface OllamaRunInput {
   /** P4: durable compact summary of earlier turns, injected into this run's context. */
   compactSummary?: string
   semanticMemory?: SemanticMemory
-  /** Runtime-only Navisworks environment notice; not part of persisted chat history. */
-  documentNotice?: DocumentChangeNotice
-  /** The document snapshot captured by the same preflight that binds the Run Scope. */
-  currentDocument?: CurrentDocumentContext
-  navisworksBinding?: NavisworksRunBinding
-  navisworksUnavailable?: { code: 'TARGET_INSTANCE_DISCONNECTED'; message: string }
+  // P30.9 (Invariant C): the production chat→agent port carries NO Navisworks
+  // run fields (documentNotice / currentDocument / navisworksBinding /
+  // navisworksUnavailable). The capability derives all of that in prepareRun;
+  // the deprecated AgentRunInput fields remain only for legacy unit tests.
 }
 
 export interface OllamaHistoryEntry {
@@ -305,11 +299,6 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
     persistence,
     toolApprovals,
     dependencies.scopeManager,
-    dependencies.contextState,
-    () => readNavisworksStatus(dependencies.bridge),
-    dependencies.instanceRegistry,
-    dependencies.instanceSelection,
-    dependencies.bridge,
     dependencies.modelCatalog,
     dependencies.questions,
   )
@@ -607,21 +596,22 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
 
 export class ChatRunRegistry {
   readonly #runs = new Map<string, ActiveChatRun>()
-  readonly #runningInstances = new Map<string, string>()
 
+  /**
+   * P30.9: the ChatRunRegistry constructor is now Navisworks-free. It owns
+   * ONLY the run lifecycle — identity, AbortController, session, model/settings
+   * resolution, persistence, streaming events, the approval + question channels
+   * and exactly-once terminal settlement (§51). It no longer receives an
+   * instance registry, a selection, a bridge, a status reader or the
+   * ContextState: the Navisworks run preparation (refresh / select / bind /
+   * observe / document snapshot / revision / seen-state) belongs to the
+   * Navisworks capability's own prepareRun + finishRun (§22/§51/§97).
+   */
   constructor(
     private readonly agent: OllamaAgentPort,
     private readonly persistence: PersistenceFacade,
     private readonly toolApprovals: ToolApprovalRegistry = new ToolApprovalRegistry(),
     private readonly scopeManager?: AgentScopeManager,
-    private readonly contextState?: ContextState,
-    private readonly readCurrentNavisworksStatus: () => Promise<NavisworksStatus> = async () => ({
-      connected: false,
-      status: 'Navisworks 未连接',
-    }),
-    private readonly instanceRegistry?: NavisworksInstanceRegistry,
-    private readonly instanceSelection?: NavisworksInstanceSelection,
-    private readonly bridge?: NavisworksBridgeClient,
     private readonly modelCatalog?: ModelCatalogService,
     private readonly questions?: QuestionService,
   ) {}
@@ -749,67 +739,13 @@ export class ChatRunRegistry {
     }
     console.debug(`[chat-run] START run=${runId} session=${input.sessionId}`)
     let runScope: Scope | undefined
-    let navisworksBinding: NavisworksRunBinding | undefined
-    let navisworksUnavailable: OllamaRunInput['navisworksUnavailable']
     try {
-      if (this.instanceRegistry !== undefined
-        && this.instanceSelection !== undefined
-        && this.bridge !== undefined) {
-        const instances = await this.instanceRegistry.refresh()
-        this.instanceSelection.observe(instances)
-        const selectedInstanceId = this.instanceSelection.selectedInstanceId
-        const selected = selectedInstanceId === undefined
-          ? undefined
-          : this.instanceRegistry.get(selectedInstanceId)
-        if (selected === undefined || !selected.connected) {
-          navisworksUnavailable = {
-            code: 'TARGET_INSTANCE_DISCONNECTED',
-            // UI/user-selection prerequisite: the model cannot fix this by
-            // retrying tools; the user must pick an instance from the menu.
-            message: selectedInstanceId === undefined
-              ? '当前没有选择 Navisworks 实例，请先选择一个实例。'
-              : '之前选择的 Navisworks 已断开，请从实例菜单重新选择一个可用实例。',
-          }
-          this.contextState?.observe({ connected: false })
-        } else {
-          navisworksBinding = await createNavisworksRunBinding(selected, this.bridge, {
-            signal: controller.signal,
-          })
-          this.contextState?.observe({
-            connected: true,
-            instanceId: navisworksBinding.instanceId,
-            bridgeSessionId: navisworksBinding.bridgeSessionId,
-            ...(navisworksBinding.documentInstanceId === undefined
-              ? {}
-              : { documentInstanceId: navisworksBinding.documentInstanceId }),
-            ...(navisworksBinding.documentName === undefined
-              ? {}
-              : { documentName: navisworksBinding.documentName }),
-          })
-          this.#runningInstances.set(runId, navisworksBinding.instanceId)
-          broadcastNavisworksConnectionState(buildNavisworksConnectionState(
-            this.instanceSelection,
-            this.instanceRegistry.instances,
-            navisworksBinding.instanceId,
-          ))
-        }
-      } else if (this.contextState !== undefined) {
-        let status: NavisworksStatus
-        try {
-          status = await this.readCurrentNavisworksStatus()
-        } catch {
-          status = { connected: false, status: 'Navisworks 未连接' }
-        }
-        this.contextState.observe(status)
-      }
-      const observedDocumentRevision = this.contextState?.documentRevision
-      const documentNotice = this.contextState?.documentNoticeForSession(input.sessionId)
-      const currentDocument = this.contextState?.currentDocument
-      runScope = await this.scopeManager?.createRun(
-        runId,
-        input.sessionId,
-        this.contextState?.documentInstanceId,
-      )
+      // P30.9: ChatRunRegistry performs NO Navisworks run preparation. The
+      // instance refresh, selection, run binding, ContextState observe, the
+      // unavailable marker and the document snapshot/revision are all owned by
+      // the Navisworks capability's prepareRun (Invariant B/D/§16/§22/§51). The
+      // chat runtime only creates its identity scope and calls the agent.
+      runScope = await this.scopeManager?.createRun(runId, input.sessionId)
       const [history, settings] = await Promise.all([
         this.persistence.getAgentHistory(input.sessionId, input.text),
         this.persistence.getSettings()
@@ -850,10 +786,10 @@ export class ChatRunRegistry {
           ...(activeEndpoint ? { api: activeEndpoint } : {}),
           ...(compactSummary === undefined ? {} : { compactSummary }),
           ...(semanticMemory === undefined ? {} : { semanticMemory }),
-          ...(documentNotice === undefined ? {} : { documentNotice }),
-          ...(currentDocument === undefined ? {} : { currentDocument }),
-          ...(navisworksBinding === undefined ? {} : { navisworksBinding }),
-          ...(navisworksUnavailable === undefined ? {} : { navisworksUnavailable })
+          // P30.9 (Invariant C/§23): the production AgentRunInput carries NO
+          // Navisworks run fields. documentNotice / currentDocument /
+          // navisworksBinding / navisworksUnavailable are now derived by the
+          // capability's own prepareRun — ChatRunRegistry passes none.
         },
         {
           signal: controller.signal,
@@ -900,9 +836,11 @@ export class ChatRunRegistry {
       )
 
       if (controller.signal.aborted) throw controller.signal.reason
-      if (observedDocumentRevision !== undefined) {
-        this.contextState?.markDocumentSeen(input.sessionId, observedDocumentRevision)
-      }
+      // P30.9: the document "seen" advance is NO LONGER done here. It moved
+      // into the Navisworks capability's finishRun (P30.5), which fires from
+      // the runtime's finally on a completed run — the same semantics (mark
+      // only after a successful run) but the chat runtime no longer knows any
+      // Navisworks document state (§28/§51).
 
       // The user's run is OVER the moment agent.run returns: emit the terminal
       // event FIRST so the renderer never waits on disk. Compaction-summary /
@@ -943,15 +881,11 @@ export class ChatRunRegistry {
     } finally {
       console.debug(`[chat-run] SETTLED run=${runId} session=${input.sessionId}`)
       await runScope?.dispose()
-      if (this.#runningInstances.delete(runId)
-        && this.instanceRegistry !== undefined
-        && this.instanceSelection !== undefined) {
-        broadcastNavisworksConnectionState(buildNavisworksConnectionState(
-          this.instanceSelection,
-          this.instanceRegistry.instances,
-          [...this.#runningInstances.values()].at(-1),
-        ))
-      }
+      // P30.9: the per-run Navisworks "running instance" broadcast is gone —
+      // ChatRunRegistry no longer binds or knows any instance (§22). The
+      // navisworks.instances.changed state is driven by the direct Navisworks
+      // IPC routes (status.get / instances.list / instance.select) and the
+      // capability's own polling, which is where Navisworks UI state belongs.
       this.#runs.delete(runId)
       settle()
     }

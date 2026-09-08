@@ -343,12 +343,11 @@ async function runAgent(
       ...(input.api === undefined ? {} : { api: input.api }),
       ...(input.compactSummary === undefined ? {} : { compactSummary: input.compactSummary }),
       ...(input.semanticMemory === undefined ? {} : { semanticMemory: input.semanticMemory }),
-      ...(input.documentNotice === undefined ? {} : { documentNotice: input.documentNotice }),
-      ...(input.currentDocument === undefined ? {} : { currentDocument: input.currentDocument }),
-      ...(input.navisworksBinding === undefined ? {} : { navisworksBinding: input.navisworksBinding }),
-      ...(input.navisworksUnavailable === undefined
-        ? {}
-        : { navisworksUnavailable: input.navisworksUnavailable })
+      // P30.9: the production chat→agent port no longer carries Navisworks run
+      // fields (documentNotice / currentDocument / navisworksBinding /
+      // navisworksUnavailable). The Navisworks capability prepares that state
+      // itself via prepareRun; the AgentRunInput fields stay only for legacy
+      // unit tests (Invariant C).
     },
     {
       signal: options.signal,

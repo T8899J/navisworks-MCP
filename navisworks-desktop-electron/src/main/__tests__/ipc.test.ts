@@ -432,70 +432,6 @@ function discoveredInstance(
 }
 
 describe('ChatRunRegistry.abortAndWait', () => {
-  it('refreshes immediately, binds the selected instance, and ignores a later selection change', async () => {
-    const instanceA = discoveredInstance('instance-a', 12340, 'Model-A.nwf')
-    const instanceB = discoveredInstance('instance-b', 18120, 'Model-B.nwf')
-    const instances = [instanceA, instanceB]
-    const registry = {
-      get instances() { return instances.map((instance) => ({ ...instance })) },
-      refresh: vi.fn(async () => instances.map((instance) => ({ ...instance }))),
-      get(instanceId: string) { return instances.find((instance) => instance.instanceId === instanceId) },
-    } as unknown as NavisworksInstanceRegistry
-    const selection = new NavisworksInstanceSelection()
-    selection.observe([instanceA])
-    const bridge = {
-      async callToEndpoint<T>(_endpoint: unknown, method: string): Promise<T> {
-        if (method !== 'navisworks_status') throw new Error('unexpected method')
-        return {
-          connected: true,
-          bridgeSessionId: 'instance-a',
-          documentInstanceId: 'doc-12340',
-          documentTitle: 'Model-A.nwf',
-        } as T
-      },
-    } as unknown as NavisworksBridgeClient
-    const inputs: Array<Record<string, unknown>> = []
-    const agent: OllamaAgentPort = {
-      ...stubAgent(),
-      async run(input) {
-        inputs.push(input as unknown as Record<string, unknown>)
-        selection.select('instance-b', instances)
-        return { content: '完成。' }
-      },
-    }
-    const createRun = vi.fn(async (
-      _runId: string,
-      _sessionId: string,
-      _documentInstanceId?: string | null,
-    ) => ({ dispose: vi.fn(async () => undefined) }))
-    const registryUnderTest = new ChatRunRegistry(
-      agent,
-      createFacade(createSessionStore()),
-      new ToolApprovalRegistry(),
-      { createRun } as unknown as AgentScopeManager,
-      new ContextState(),
-      async () => ({ connected: false, status: 'legacy must not be used' }),
-      registry,
-      selection,
-      bridge,
-    )
-    const sender = fakeSender()
-    const send = sender.send as unknown as ReturnType<typeof vi.fn>
-
-    registryUnderTest.start(chatStartInput(), sender)
-    await vi.waitFor(() => expect(send.mock.calls.some((call) => call[1] === 'chat.done')).toBe(true))
-
-    expect(registry.refresh).toHaveBeenCalledTimes(1)
-    expect(createRun.mock.calls[0]?.[2]).toBe('doc-12340')
-    expect(inputs[0]?.navisworksBinding).toMatchObject({
-      instanceId: 'instance-a',
-      pipeName: 'pipe-12340',
-      documentInstanceId: 'doc-12340',
-    })
-    expect(selection.selectedInstanceId).toBe('instance-b')
-    expect((inputs[0]?.navisworksBinding as { instanceId: string }).instanceId).toBe('instance-a')
-  })
-
   it('escapes within the timeout when the agent ignores the abort signal', async () => {
     const signals: AbortSignal[] = []
     const agent: OllamaAgentPort = {
@@ -573,17 +509,14 @@ describe('ChatRunRegistry.abortAndWait', () => {
     for (const signal of signals) expect(signal.aborted).toBe(true)
   })
 
-  it('preflights Navisworks before createRun and binds an immediate A to B switch to B', async () => {
-    const contextState = new ContextState()
-    const statuses = [
-      { connected: true, status: 'A', documentName: 'Model-A.nwf', documentInstanceId: 'doc-A', bridgeSessionId: 'bridge-1' },
-      { connected: true, status: 'B', documentName: 'Model-B.nwf', documentInstanceId: 'doc-B', bridgeSessionId: 'bridge-1' },
-    ]
-    const readStatus = vi.fn(async () => statuses.shift()!)
+  it('P30.9: prepares NO Navisworks run state — the agent input is field-free (§24/§86/Invariant C)', async () => {
+    // The old preflight tests (binding creation, A→B document switching,
+    // pending-transition marking, offline status) moved to the Navisworks
+    // capability where that preparation now lives. This test proves the
+    // chat runtime side no longer participates in any of it.
     const createRun = vi.fn(async (
       _runId: string,
       _sessionId: string,
-      _documentInstanceId?: string | null,
     ) => ({ dispose: vi.fn(async () => undefined) }))
     const scopeManager = { createRun } as unknown as AgentScopeManager
     const inputs: Array<Record<string, unknown>> = []
@@ -594,102 +527,27 @@ describe('ChatRunRegistry.abortAndWait', () => {
         return { content: '完成。' }
       },
     }
+    // The ChatRunRegistry constructor is Navisworks-free: only the port,
+    // persistence, approvals and the (optional) scope manager.
     const registry = new ChatRunRegistry(
       agent,
       createFacade(createSessionStore()),
       new ToolApprovalRegistry(),
       scopeManager,
-      contextState,
-      readStatus,
     )
     const sender = fakeSender()
     const send = sender.send as unknown as ReturnType<typeof vi.fn>
 
     registry.start(chatStartInput(), sender)
     await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(1))
-    registry.start(chatStartInput(), sender)
-    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(2))
 
-    expect(createRun.mock.calls[1]?.[2]).toBe('doc-B')
-    expect(inputs[1]?.currentDocument).toMatchObject({
-      documentName: 'Model-B.nwf',
-      documentInstanceId: 'doc-B',
-    })
-    expect(inputs[1]?.documentNotice).toMatchObject({
-      previous: { documentName: 'Model-A.nwf', documentInstanceId: 'doc-A' },
-      current: { documentName: 'Model-B.nwf', documentInstanceId: 'doc-B' },
-    })
-    expect(readStatus.mock.invocationCallOrder[1]).toBeLessThan(createRun.mock.invocationCallOrder[1]!)
-  })
-
-  it('keeps a transition pending after failure and marks it seen only after success', async () => {
-    const contextState = new ContextState()
-    const statuses = [
-      { connected: true, status: 'A', documentName: 'A.nwf', documentInstanceId: 'doc-A' },
-      { connected: true, status: 'B', documentName: 'B.nwf', documentInstanceId: 'doc-B' },
-      { connected: true, status: 'B', documentName: 'B.nwf', documentInstanceId: 'doc-B' },
-      { connected: true, status: 'B', documentName: 'B.nwf', documentInstanceId: 'doc-B' },
-    ]
-    const seenNotices: unknown[] = []
-    let runCount = 0
-    const agent: OllamaAgentPort = {
-      ...stubAgent(),
-      async run(input) {
-        runCount += 1
-        seenNotices.push(input.documentNotice)
-        if (runCount === 2) throw new Error('timeout')
-        return { content: '完成。' }
-      },
-    }
-    const registry = new ChatRunRegistry(
-      agent,
-      createFacade(createSessionStore()),
-      new ToolApprovalRegistry(),
-      undefined,
-      contextState,
-      async () => statuses.shift()!,
-    )
-    const sender = fakeSender()
-    const send = sender.send as unknown as ReturnType<typeof vi.fn>
-
-    registry.start(chatStartInput(), sender)
-    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(1))
-    registry.start(chatStartInput(), sender)
-    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.error')).toHaveLength(1))
-    registry.start(chatStartInput(), sender)
-    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(2))
-    registry.start(chatStartInput(), sender)
-    await vi.waitFor(() => expect(send.mock.calls.filter((call) => call[1] === 'chat.done')).toHaveLength(3))
-
-    expect(seenNotices[0]).toBeUndefined()
-    expect(seenNotices[1]).toMatchObject({ revision: 1 })
-    expect(seenNotices[2]).toMatchObject({ revision: 1 })
-    expect(seenNotices[3]).toBeUndefined()
-  })
-
-  it('continues ordinary chat when the preflight status read fails', async () => {
-    const contextState = new ContextState()
-    const run = vi.fn(async () => ({ content: '普通聊天正常。' }))
-    const agent: OllamaAgentPort = {
-      ...stubAgent(),
-      run: run as unknown as OllamaAgentPort['run'],
-    }
-    const registry = new ChatRunRegistry(
-      agent,
-      createFacade(createSessionStore()),
-      new ToolApprovalRegistry(),
-      undefined,
-      contextState,
-      async () => { throw new Error('bridge unavailable') },
-    )
-    const sender = fakeSender()
-    const send = sender.send as unknown as ReturnType<typeof vi.fn>
-
-    registry.start(chatStartInput(), sender)
-    await vi.waitFor(() => expect(send.mock.calls.some((call) => call[1] === 'chat.done')).toBe(true))
-
-    expect(run).toHaveBeenCalledTimes(1)
-    expect(contextState.currentDocument).toEqual({ connected: false })
+    const input = inputs[0] ?? {}
+    expect(input.navisworksBinding).toBeUndefined()
+    expect(input.navisworksUnavailable).toBeUndefined()
+    expect(input.currentDocument).toBeUndefined()
+    expect(input.documentNotice).toBeUndefined()
+    // The run scope is created WITHOUT a Navisworks document instance id.
+    expect(createRun).toHaveBeenCalledWith(expect.stringMatching(/./), 'session-a')
   })
 })
 
@@ -1614,11 +1472,9 @@ describe('ChatRunRegistry — pending questions across session switches (§85)',
         return { content: 'B 已完成' }
       },
     }
-    const registry = new ChatRunRegistry(
-      agent, facade, new ToolApprovalRegistry(), undefined, undefined,
-      async () => ({ connected: false, status: 'Navisworks 未连接' }),
-      undefined, undefined, undefined, undefined, questions,
-    )
+    // P30.9: ChatRunRegistry is Navisworks-free — no status reader / instance
+    // registry / selection / bridge args.
+    const registry = new ChatRunRegistry(agent, facade, new ToolApprovalRegistry(), undefined, undefined, questions)
     const senderA = fakeSender()
     const senderB = fakeSender()
     const sendA = senderA.send as unknown as ReturnType<typeof vi.fn>
@@ -1668,11 +1524,9 @@ describe('ChatRunRegistry — pending questions across session switches (§85)',
         return { content: 'unreachable' }
       },
     }
-    const registry = new ChatRunRegistry(
-      agent, facade, new ToolApprovalRegistry(), undefined, undefined,
-      async () => ({ connected: false, status: 'Navisworks 未连接' }),
-      undefined, undefined, undefined, undefined, questions,
-    )
+    // P30.9: ChatRunRegistry is Navisworks-free — no status reader / instance
+    // registry / selection / bridge args.
+    const registry = new ChatRunRegistry(agent, facade, new ToolApprovalRegistry(), undefined, undefined, questions)
     const sender = fakeSender()
     const send = sender.send as unknown as ReturnType<typeof vi.fn>
     const started = registry.start({ sessionId: 'session-c', messageId: 'm-c', text: 'x' }, sender)
