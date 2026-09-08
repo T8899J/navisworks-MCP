@@ -5,7 +5,7 @@ import {
 } from './toolCatalog'
 import { toolRegistry, createToolRegistry, type ToolRegistry } from './tool/registry'
 import type { CapabilityRegistry } from './capability/capabilityRegistry'
-import { createLegacyNavisworksRegistry } from './agent/legacyNavisworksAdapter'
+import { createLegacyNavisworksRegistry, applyLegacyNavisworksRunState } from './agent/legacyNavisworksAdapter'
 import type {
   CapabilityPreparedRun,
   CapabilityRunSet,
@@ -323,20 +323,30 @@ export interface AgentRunInput {
   /** P4: durable digest of earlier (compacted) turns, injected as a leading system block. */
   compactSummary?: string
   semanticMemory?: SemanticMemory
-  /** Runtime-only environment notice; never persisted into conversation history. */
+  /** @deprecated Runtime-only environment notice; PRODUCTION MUST NOT SET IT.
+   *  The Navisworks capability now derives the pending document notice in
+   *  prepareRun/contributeContext (§17/§30.3). Only legacy engine-less unit
+   *  tests may pass it, to preserve their exact prior context assembly. */
   documentNotice?: DocumentChangeNotice
-  /** Stable preflight snapshot for this Run Scope. */
+  /** @deprecated The document snapshot from the old inline preflight;
+   *  PRODUCTION MUST NOT SET IT — it now comes from prepareRun's
+   *  NavisworksPreparedRun.currentDocument folded into the capability's own
+   *  context namespace (§44). Legacy unit tests only. */
   currentDocument?: CurrentDocumentContext
-  /** @deprecated legacy preflight fields — production passes none; the
-   *  Navisworks capability now contributes binding + current document through
-   *  prepareRun/contributeContext (§41). The legacy fallback assembly honors
-   *  them so engine-less unit tests keep their exact behavior. */
+  /** @deprecated legacy preflight fields — PRODUCTION MUST NOT PASS THESE
+   *  (§23/§24): ChatRunRegistry stopped generating them, and the capability
+   *  now contributes binding + current document through prepareRun /
+   *  contributeContext. They are honored ONLY by the legacy adapter merge,
+   *  which folds them into the Navisworks capability's OWN state and never
+   *  into any other provider (§26/§27), so engine-less unit tests keep their
+   *  exact behavior without any Navisworks business logic in the run loop. */
   navisworksBinding?: {
     instanceId: string
     bridgeSessionId: string
     documentInstanceId?: string
     documentName?: string
   }
+  /** @deprecated see `navisworksBinding`. */
   navisworksUnavailable?: { code: 'TARGET_INSTANCE_DISCONNECTED'; message: string }
   /** Capability Architecture: per-run prepared capability states (runtime-only,
    *  NEVER persisted, NEVER crosses IPC). When present, tool execution routes
@@ -687,15 +697,6 @@ export class AgentRuntime {
     // Capability Architecture v1: prepare every registered provider's run
     // state ONCE (binding / current environment / availability). Opaque to
     // the core; execution and context contributions read it by capability id.
-    const legacyNavisworksState = input.navisworksBinding !== undefined
-      || input.navisworksUnavailable !== undefined
-      || input.currentDocument !== undefined
-      ? {
-        ...(input.navisworksBinding === undefined ? {} : { binding: input.navisworksBinding }),
-        ...(input.navisworksUnavailable === undefined ? {} : { unavailable: input.navisworksUnavailable }),
-        ...(input.currentDocument === undefined ? {} : { currentDocument: input.currentDocument }),
-      }
-      : undefined
     const preparedStates: CapabilityRunSet = this.#capabilities === undefined
       ? new Map()
       : await this.#capabilities.prepareRuns({
@@ -703,22 +704,16 @@ export class AgentRuntime {
         ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       })
-    // Deprecated adapter (§41/§107): when the run still carries the legacy
-    // navisworks preflight fields, merge them into every provider's state
-    // (unknown keys are simply ignored by providers that do not use them).
+    // P30.4: the deprecated flat run fields fold into ONLY the Navisworks
+    // capability's own state (via the quarantined adapter) — never another
+    // provider's. Production passes no flat fields (§24), so this is a no-op
+    // there; only legacy engine-less unit tests reach the merge branch.
     const capabilityStates: CapabilityRunSet = input.capabilityStates
-      ?? (legacyNavisworksState === undefined
-        ? preparedStates
-        : new Map([...preparedStates].map(([id, prepared]) => [
-          id,
-          {
-            capabilityId: prepared.capabilityId,
-            state: {
-              ...(prepared.state as Record<string, unknown> ?? {}),
-              ...legacyNavisworksState,
-            },
-          },
-        ])))
+      ?? applyLegacyNavisworksRunState(this.#capabilities, preparedStates, {
+        ...(input.navisworksBinding === undefined ? {} : { binding: input.navisworksBinding }),
+        ...(input.navisworksUnavailable === undefined ? {} : { unavailable: input.navisworksUnavailable }),
+        ...(input.currentDocument === undefined ? {} : { currentDocument: input.currentDocument }),
+      })
     const capabilityContext: Record<string, unknown> = this.#capabilities === undefined
       ? {}
       : this.#capabilities.contributeContext(capabilityStates, {
