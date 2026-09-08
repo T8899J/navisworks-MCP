@@ -425,6 +425,15 @@ export interface AgentRuntimeOptions {
    *  present, tool execution routes exclusively through it (P26). Absent →
    *  the legacy bridgeClient path (engine-less unit tests). */
   capabilities?: CapabilityRegistry
+  /**
+   * P30.1 single truth: THE composed ToolRegistry (internal + capability
+   * tools) this run shares with the `tools.list` IPC surface. Production
+   * composition MUST pass it explicitly (§59/§60): model materialization,
+   * permission resolution and the Settings UI then read one registry.
+   * Absent → a compatible default is composed from `capabilities` (legacy
+   * unit-test hosts only).
+   */
+  tools?: ToolRegistry
   /** @deprecated legacy path; ignored when `capabilities` is provided. */
   bridgeClient?: AgentBridgeClient
   /** Default model when a run input does not name one. */
@@ -543,9 +552,13 @@ export class AgentRuntime {
         ...(options.operationCoordinator === undefined ? {} : { operationCoordinator: options.operationCoordinator }),
       }))
     this.#capabilities = capabilities
-    this.#tools = capabilities === undefined
+    // P30.1: the composition root passes the ONE registry both this runtime
+    // and the tools.list IPC use. The fallbacks below exist only for legacy
+    // hosts (flat bridgeClient unit tests, capability-free core tests) —
+    // production must never rely on them (§60).
+    this.#tools = options.tools ?? (capabilities === undefined
       ? toolRegistry
-      : createToolRegistry({ capabilities })
+      : createToolRegistry({ capabilities }))
     this.#router = new ModelRouter({
       requestTimeoutMs: options.requestTimeoutMs,
       fetchImpl: options.fetchImpl,

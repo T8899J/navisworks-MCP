@@ -33,6 +33,9 @@ import type {
 } from '../sessionRepository'
 import type { NavisworksBridgeClient } from '../bridgeClient'
 import type { ToolCatalog } from '../toolCatalog'
+import { createToolRegistry, type ToolRegistry } from '../tool/registry'
+import { CapabilityRegistry } from '../capability/capabilityRegistry'
+import { NavisworksCapabilityProvider } from '../navisworks/capability'
 import { ContextState } from '../agent/contextState'
 import { QuestionService } from '../question/questionService'
 import type { AgentScopeManager } from '../kernel/agentScopes'
@@ -199,6 +202,7 @@ function createHarness(options: {
   secrets?: { encrypt(value: string): string; decrypt(value: string): string }
   bridge?: NavisworksBridgeClient
   tools?: ToolCatalog
+  agentTools?: ToolRegistry
   instanceRegistry?: NavisworksInstanceRegistry
   instanceSelection?: NavisworksInstanceSelection
   contextState?: ContextState
@@ -206,6 +210,7 @@ function createHarness(options: {
   const store = options.store ?? createSessionStore()
   const dependencies: DesktopIpcDependencies = {
     questions: options.questions,
+    agentTools: options.agentTools ?? createToolRegistry({}),
     runtimeInfo: {
       version: '0.0.0-test',
       platform: 'win32',
@@ -245,6 +250,36 @@ function createHarness(options: {
     dispose,
   }
 }
+
+describe('tools.list single truth (P30.1)', () => {
+  it('returns the composed capability inventory through the REAL route+schema (§5/§7)', async () => {
+    // A production-like composition: a real Navisworks capability contributes
+    // its tools; internal helpers must stay hidden. The route output is
+    // validated by toolDefinitionSummarySchema, so a shape drift fails here.
+    const bridge = { async call<T>() { return {} as T } } as unknown as NavisworksBridgeClient
+    const capabilities = new CapabilityRegistry([
+      new NavisworksCapabilityProvider({ bridge }),
+    ])
+    const harness = createHarness({
+      ollama: stubAgent(),
+      agentTools: createToolRegistry({ capabilities }),
+    })
+    try {
+      const result = await harness.invoke('tools.list', undefined)
+      expect(result.ok).toBe(true)
+      const names = ((result as { data: Array<{ name: string; capabilityId?: string }> }).data).map((entry) => entry.name)
+      expect(names).toContain('navisworks_status')
+      expect(names).toContain('navisworks_get_document')
+      expect(names).toContain('navisworks_set_visibility')
+      // Internal tools are never configurable in Settings.
+      expect(names).not.toContain('read_tool_result')
+      expect(names).not.toContain('question')
+      expect(names).not.toContain('skill')
+    } finally {
+      await harness.dispose()
+    }
+  })
+})
 
 describe('Navisworks instance IPC selection', () => {
   it('keeps A selected when B appears and changes to B only on explicit selection', async () => {

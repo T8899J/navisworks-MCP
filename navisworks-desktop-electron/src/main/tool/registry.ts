@@ -364,9 +364,10 @@ function buildDefaultRegistry(): ToolRegistry {
 }
 
 /**
- * The process-wide registry singleton. NOTE: this fallback contains ONLY the
- * internal tools; real composition happens in applicationServices via
- * createToolRegistry(), so the singleton exists purely for legacy imports.
+ * @deprecated production composition uses the ONE `agentTools` registry built
+ * in the composition root (`AgentToolRegistryToken` in applicationServices) —
+ * this module-level singleton contains ONLY the internal tools and exists
+ * purely for legacy unit-test imports (§8). Production MUST NOT use it.
  */
 export const toolRegistry: ToolRegistry = buildDefaultRegistry()
 

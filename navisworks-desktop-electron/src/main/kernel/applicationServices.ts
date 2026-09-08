@@ -14,6 +14,8 @@ import { ContextEpochStore } from '../context/contextEpochStore'
 import { createContextRegistry } from '../context/contextRegistry'
 import { CapabilityRegistry } from '../capability/capabilityRegistry'
 import { NavisworksCapabilityProvider } from '../navisworks/capability'
+import { createToolRegistry } from '../tool/registry'
+import type { ToolRegistry } from '../tool/registry'
 import {
   JsonSessionRepository,
   JsonSettingsRepository,
@@ -45,6 +47,10 @@ export const NavisworksInstanceSelectionToken = token<NavisworksInstanceSelectio
 export const ContextEngineToken = token<ContextEngine>('app.contextEngine')
 export const QuestionServiceToken = token<QuestionService>('app.questions')
 export const CapabilityRegistryToken = token<CapabilityRegistry>('app.capabilities')
+/** P30.1: the ONE composed ToolRegistry (internal + capability tools). The
+ *  AgentRuntime materializes tools AND the tools.list IPC read this instance
+ *  (§7). Production must never reach for the deprecated module singleton. */
+export const AgentToolRegistryToken = token<ToolRegistry>('app.agentTools')
 
 /** Composition root: instantiate once, register once, and resolve everywhere else. */
 export async function installApplicationServices(
@@ -95,6 +101,11 @@ export async function installApplicationServices(
     ),
   }))
   await capabilities.startAll()
+  // P30.1 single truth: exactly ONE composed ToolRegistry serves model
+  // materialization, permission resolution, argument normalization, the
+  // tools.list IPC and the Settings UI (§6/§7). The AgentRuntime never
+  // builds its own copy and the IPC never reads the legacy singleton.
+  const agentTools = createToolRegistry({ capabilities })
   // skills/manifest sits in the fixed baseline slot (core → policy →
   // skills/manifest); when no skills are discovered it contributes NOTHING (§55).
   const contextEngine = new ContextEngine(
@@ -111,6 +122,9 @@ export async function installApplicationServices(
     internalToolExecutor,
     skillRegistry,
     capabilities,
+    // P30.1: the runtime materializes tools from the SAME registry the IPC
+    // and Settings UI read (§60/§61).
+    tools: agentTools,
     model: persistedSettings?.selectedModel,
     think: localThinkForEffort(normalizeReasoningEffort(persistedSettings?.reasoningMode)),
     contextWindow: persistedSettings?.contextWindowTokens,
@@ -132,6 +146,7 @@ export async function installApplicationServices(
     .register(CompactionServiceToken, runtime)
     .register(ContextEngineToken, contextEngine)
     .register(CapabilityRegistryToken, capabilities)
+    .register(AgentToolRegistryToken, agentTools)
     .register(QuestionServiceToken, questions)
     .register(ApprovalServiceToken, approvals)
   appScope.onDispose(() => runtime.dispose())

@@ -21,6 +21,7 @@ import { makeRootScope } from './kernel/services'
 import { AgentScopeManagerToken, ContextStateToken, TaskManagerToken } from './kernel/agentServices'
 import {
   AgentRuntimeToken,
+  AgentToolRegistryToken,
   QuestionServiceToken,
   ApprovalServiceToken,
   BridgeClientToken,
@@ -121,6 +122,9 @@ async function startApplication(): Promise<void> {
     settings,
     bridge,
     tools,
+    // P30.1: the SAME composed ToolRegistry the runtime materializes from —
+    // tools.list and the model share one source of truth (§7).
+    agentTools: appScope.require(AgentToolRegistryToken),
     ollama,
     appearance,
     senderTrust,

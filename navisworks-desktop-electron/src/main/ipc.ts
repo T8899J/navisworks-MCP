@@ -23,7 +23,7 @@ import type {
   JsonSettingsRepository
 } from './sessionRepository'
 import { toAgentRuntimeSettings, type AgentRuntimeSettings, type ApiEndpointConfig } from './agentRuntime'
-import { toolRegistry } from './tool/registry'
+import type { ToolRegistry } from './tool/registry'
 import { normalizeToolPermissions } from './sessionRepository'
 import { normalizeProfileAdvanced, normalizeExecutionSettings, normalizeStorageSettings } from './sessionRepository'
 import {
@@ -223,6 +223,13 @@ export interface DesktopIpcDependencies {
   settings: JsonSettingsRepository
   bridge: NavisworksBridgeClient
   tools: ToolCatalog
+  /**
+   * P30.1 single truth: the ONE composed ToolRegistry the AgentRuntime also
+   * uses. The `tools.list` IPC reads its capability-inclusive UI inventory so
+   * Settings shows exactly what the model is offered (§5/§7). Production must
+   * pass the composition-root instance, never the internal-only singleton.
+   */
+  agentTools: ToolRegistry
   ollama: OllamaAgentPort
   appearance: AppearancePort
   senderTrust: SenderTrustOptions
@@ -377,7 +384,10 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
     }),
     'tools.list': routeHandler<'tools.list'>(async () => {
       const settings = await persistence.getSettings()
-      return toolRegistry.listUiTools({
+      // P30.1: read the SAME composed registry the model sees — never the
+      // internal-only module singleton (§5/§101). Capability tools surface;
+      // internal helpers stay hidden inside listUiTools's origin filter.
+      return dependencies.agentTools.listUiTools({
         permissions: settings.toolPermissions,
         legacyDisabled: settings.disabledTools,
       })
