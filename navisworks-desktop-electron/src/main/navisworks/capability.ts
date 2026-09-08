@@ -14,6 +14,7 @@ import { recallSource } from '../context/sources/recallSource'
 import { navisworksToolDefinitions, NAVISWORKS_TOOL_NAMES } from './toolDefinitions'
 import { runNavisworksTool } from './toolExecutor'
 import type {
+  CapabilityContextFragment,
   CapabilityExecutionScope,
   CapabilityManifest,
   CapabilityPreparedRun,
@@ -157,15 +158,17 @@ export class NavisworksCapabilityProvider implements CapabilityProvider {
   }
 
   /**
-   * Inject this capability's professional state into the run's context
-   * environment: the CURRENT document + pending notice + ContextState handle
-   * (read by this capability's OWN sources) — the core passes it through
-   * without interpreting it.
+   * P30.8: contribute THIS capability's professional state as a NAMESPACED
+   * fragment (the registry stores it under manifest.id). The core passes it
+   * through untouched; only Navisworks' OWN context sources read it — through
+   * getNavisworksContext(), which casts this value back to the typed
+   * NavisworksContextFragment (the reader-side view of the same shape). The
+   * fragment adds NOTHING to the core environment (§44/§46).
    */
   contributeContext(
     state: unknown,
     ctx: { sessionId?: string },
-  ): Record<string, unknown> {
+  ): CapabilityContextFragment {
     const prepared = state as NavisworksPreparedRun
     const contextState = this.#deps.contextState
     return {
@@ -183,7 +186,6 @@ export class NavisworksCapabilityProvider implements CapabilityProvider {
         : {
           contextState,
           documentRevision: contextState.documentRevision,
-          observedDocumentRevision: contextState.documentRevision,
         }),
     }
   }

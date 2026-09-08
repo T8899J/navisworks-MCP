@@ -5,6 +5,10 @@ import { createToolRegistry } from '../tool/registry'
 import { applyLegacyNavisworksRunState } from '../agent/legacyNavisworksAdapter'
 import { NavisworksCapabilityProvider } from '../navisworks/capability'
 import { ContextState } from '../agent/contextState'
+import { createContextRegistry } from '../context/contextRegistry'
+import { ContextEngine } from '../context/contextEngine'
+import type { ContextSource, ContextSourceEnvironment } from '../context/types'
+import type { CapabilityContextFragment } from '../capability/types'
 import type {
   CapabilityPreparedRun,
   CapabilityProvider,
@@ -231,5 +235,76 @@ describe('P30.5 Navisworks finishRun migrates markDocumentSeen (§28/§31)', () 
     expect(contextState.documentNoticeForSession('s9')).toBeDefined()
     provider.finishRun({ outcome: 'completed', sessionId: 's9', state: { observedDocumentRevision: revision } })
     expect(contextState.documentNoticeForSession('s9')).toBeUndefined()
+  })
+})
+
+describe('P30.8 namespaced capability context (§44/§45/§50/§91)', () => {
+  it('contributeContext returns fragments keyed by capability id, never flattened', async () => {
+    const fakeProvider: CapabilityProvider = {
+      manifest: { id: 'fake', name: 'Fake', description: 'fake', version: 1, firstParty: false },
+      tools: () => [],
+      contextSources: () => [],
+      ownsTool: () => false,
+      normalizeArguments: (_n, args) => args,
+      prepareRun: async () => ({ capabilityId: 'fake', state: { ready: true } }),
+      contributeContext: (): CapabilityContextFragment => ({ workspace: 'fake-ws', cwd: '/tmp' }),
+      executeTool: async () => ({ result: {} }),
+    }
+    const navisworks: CapabilityProvider = {
+      manifest: { id: 'navisworks', name: 'N', description: 'n', version: 1, firstParty: true },
+      tools: () => [],
+      contextSources: () => [],
+      ownsTool: () => false,
+      normalizeArguments: (_n, args) => args,
+      prepareRun: async () => ({ capabilityId: 'navisworks', state: {} }),
+      contributeContext: (): CapabilityContextFragment => ({ document: { connected: true }, contextState: 'handle' }),
+      executeTool: async () => ({ result: {} }),
+    }
+    const registry = new CapabilityRegistry([fakeProvider, navisworks])
+    const states = await registry.prepareRuns({ runId: 'r1' })
+    const namespaced = registry.contributeContext(states, { sessionId: 's1' })
+    // Two capabilities both contributing their OWN keys, kept separate.
+    expect(Object.keys(namespaced).sort()).toEqual(['fake', 'navisworks'])
+    expect(namespaced.fake).toEqual({ workspace: 'fake-ws', cwd: '/tmp' })
+    expect(namespaced.navisworks).toMatchObject({ document: { connected: true } })
+  })
+
+  it('a fake capability source reads env.capabilities.fake with NO new core field (§50/§91)', async () => {
+    // The ONLY way this source gets its value is the generic namespaced
+    // `capabilities` environment field — ContextSourceEnvironment was NOT
+    // extended with a `workspace` field, proving the engine serves new
+    // capabilities without core changes.
+    let sawWorkspace: unknown = 'UNSET'
+    const fakeSource: ContextSource<string> = {
+      key: 'fake/workspace',
+      version: 1,
+      mode: 'baseline',
+      load(env: ContextSourceEnvironment) {
+        const slice = (env.capabilities as Record<string, { workspace?: unknown }> | undefined)?.fake
+        sawWorkspace = slice?.workspace
+        return slice?.workspace === undefined ? undefined : `WORKSPACE=${String(slice.workspace)}`
+      },
+      fingerprint: (value) => String(value),
+      render: (value) => value,
+    }
+    const provider: CapabilityProvider = {
+      manifest: { id: 'fake', name: 'Fake', description: 'fake', version: 1, firstParty: false },
+      tools: () => [],
+      contextSources: () => [fakeSource],
+      ownsTool: () => false,
+      normalizeArguments: (_n, args) => args,
+      prepareRun: async () => ({ capabilityId: 'fake', state: { ready: true } }),
+      contributeContext: (): CapabilityContextFragment => ({ workspace: 'fake-root' }),
+      executeTool: async () => ({ result: {} }),
+    }
+    const capabilities = new CapabilityRegistry([provider])
+    const engine = new ContextEngine(createContextRegistry(capabilities), undefined)
+    const states = await capabilities.prepareRuns({ runId: 'r1' })
+    const assembly = await engine.prepare('s1', {
+      sessionId: 's1',
+      capabilities: capabilities.contributeContext(states, { sessionId: 's1' }),
+    })
+    expect(sawWorkspace).toBe('fake-root')
+    expect(assembly.baseline).toContain('WORKSPACE=fake-root')
   })
 })

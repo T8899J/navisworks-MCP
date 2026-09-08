@@ -1,6 +1,7 @@
 import { renderReferenceSetBlock } from '../../agent/contextState'
 import { canonicalFingerprint } from '../contextHash'
 import type { ContextSource } from '../types'
+import { getNavisworksContext } from '../../navisworks/contextFragment'
 
 /**
  * Volatile: the last relevant reference set of the CURRENT document, so
@@ -15,7 +16,7 @@ export const referenceSetSource: ContextSource<string> = {
   version: 1,
   mode: 'volatile',
   load(env) {
-    const contextState = env.contextState
+    const contextState = getNavisworksContext(env)?.contextState
     if (contextState === undefined) return undefined
     const set = contextState.lastRelevantReferenceSet(env.sessionId)
     if (set === undefined) return undefined

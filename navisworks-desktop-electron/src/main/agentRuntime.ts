@@ -714,17 +714,16 @@ export class AgentRuntime {
         ...(input.navisworksUnavailable === undefined ? {} : { unavailable: input.navisworksUnavailable }),
         ...(input.currentDocument === undefined ? {} : { currentDocument: input.currentDocument }),
       })
-    const capabilityContext: Record<string, unknown> = this.#capabilities === undefined
+    // P30.8: each capability contributes a context fragment NAMESPACED by its
+    // id (e.g. { navisworks: { document, documentNotice, documentRevision,
+    // contextState } }). The core stores it opaquely under `capabilities` and
+    // reads NO field of it — Navisworks' own sources read their slice via
+    // getNavisworksContext. A core-only run gets `{}` (§50/§91).
+    const capabilityContext: Readonly<Record<string, unknown>> = this.#capabilities === undefined
       ? {}
       : this.#capabilities.contributeContext(capabilityStates, {
         ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
       })
-    const navisworksState = capabilityContext as {
-      document?: CurrentDocumentContext
-      documentNotice?: DocumentChangeNotice
-      documentRevision?: number
-      contextState?: import('./agent/contextState').ContextState
-    }
     // Context window + its SOURCE. API priority: profile override → provider
     // capability → safe fallback. The LOCAL 32768 clamp never applies to API
     // endpoints, and the fallback is budget accounting — never presented as
@@ -762,7 +761,7 @@ export class AgentRuntime {
       ? input.semanticMemory
       : updateSemanticMemory(input.semanticMemory, trimmedInput)
     const currentDocumentBlock = renderCurrentDocumentContext(
-      input.currentDocument ?? this.#contextState?.currentDocument ?? navisworksState.document,
+      input.currentDocument ?? this.#contextState?.currentDocument,
     )
 
     // Context Engine v1 (P9–P13): the WHAT of the model context — baseline,
@@ -777,27 +776,18 @@ export class AgentRuntime {
     if (this.#contextEngine !== undefined && sessionId !== undefined) {
       contextAssembly = await this.#contextEngine.prepare(sessionId, {
         sessionId,
-        document: input.currentDocument ?? this.#contextState?.currentDocument ?? navisworksState.document,
-        ...(input.documentNotice === undefined
-          ? navisworksState.documentNotice === undefined
-            ? {}
-            : { documentNotice: navisworksState.documentNotice }
-          : { documentNotice: input.documentNotice }),
-        ...(navisworksState.documentRevision === undefined
-          ? {}
-          : { documentRevision: navisworksState.documentRevision }),
-        ...(navisworksState.contextState === undefined
-          ? this.#contextState === undefined
-            ? {}
-            : { contextState: this.#contextState }
-          : { contextState: navisworksState.contextState }),
-        capabilityStates,
+        // P30.8: NO top-level Navisworks fields. Each capability's document /
+        // notice / revision / ContextState handle ride inside their own
+        // namespaced slice under `capabilities`; the core environment stays
+        // provider-neutral (§43/§44/§99). A legacy host that still supplies a
+        // runtime-owned ContextState contributes NOTHING here — such hosts run
+        // the engine-less branch (no contextEngine) instead.
+        capabilities: capabilityContext,
         ...(activeTask === undefined ? {} : { activeTask }),
         ...(semanticMemory === undefined ? {} : { semanticMemory }),
         ...(input.compactSummary?.trim()
           ? { compactSummary: input.compactSummary.trim() }
           : {}),
-        ...(this.#contextState === undefined ? {} : { contextState: this.#contextState }),
         ...(this.#resolveToolResult === undefined ? {} : { resolveToolResult: this.#resolveToolResult }),
         ...(input.skillManifestProvider === undefined && this.#skillRegistry === undefined
           ? {}

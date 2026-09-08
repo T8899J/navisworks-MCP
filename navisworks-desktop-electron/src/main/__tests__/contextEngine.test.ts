@@ -35,9 +35,11 @@ function docEnv(
   document: { connected: boolean; documentInstanceId?: string; documentName?: string; bridgeSessionId?: string; instanceId?: string },
   extra: Partial<ContextSourceEnvironment> = {},
 ): ContextSourceEnvironment {
+  // P30.8: the document lives in the Navisworks capability's NAMESPACED slice,
+  // never a top-level core environment field.
   return {
     sessionId: 'session-1',
-    document,
+    capabilities: { navisworks: { document } },
     ...extra,
   }
 }
@@ -157,8 +159,12 @@ describe('Cross-document isolation (Invariant D, §61)', () => {
       const engine = makeEngine(new ContextEpochStore(dir))
       const onB = await engine.prepare('s1', {
         sessionId: 's1',
-        document: contextState.currentDocument ?? { connected: true, documentInstanceId: 'doc-B', bridgeSessionId: 'b1' },
-        contextState,
+        capabilities: {
+          navisworks: {
+            document: contextState.currentDocument ?? { connected: true, documentInstanceId: 'doc-B', bridgeSessionId: 'b1' },
+            contextState,
+          },
+        },
       })
       const joined = onB.blocks.map((b) => b.message.content).join('\n')
       expect(joined).not.toContain('itemA1')

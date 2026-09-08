@@ -1,5 +1,6 @@
 import { canonicalFingerprint } from '../contextHash'
 import type { ContextSource } from '../types'
+import { getNavisworksContext } from '../../navisworks/contextFragment'
 
 const MAX_RECALL_CHARS = 4_000
 
@@ -14,7 +15,7 @@ export const recallSource: ContextSource<string> = {
   version: 1,
   mode: 'volatile',
   async load(env) {
-    const contextState = env.contextState
+    const contextState = getNavisworksContext(env)?.contextState
     const sessionId = env.sessionId
     if (contextState === undefined || sessionId === undefined) return undefined
     const set = contextState.lastRelevantReferenceSet(sessionId)

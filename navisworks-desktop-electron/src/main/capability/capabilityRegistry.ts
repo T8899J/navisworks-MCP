@@ -167,24 +167,26 @@ export class CapabilityRegistry {
   }
 
   /**
-   * Merge every provider's context-environment fragment. First-wins per key:
-   * earlier registrations are never overwritten by later capabilities.
+   * P30.8 (§45): collect every provider's context fragment, NAMESPACED by
+   * capability id — `{ navisworks: {…}, files: {…} }` — never flattened into
+   * one shared object. That removes the whole class of cross-capability key
+   * collisions (two capabilities both contributing `document` / `state` /
+   * `revision`), and means adding a capability never requires a new core
+   * ContextSourceEnvironment field. The core stores each value opaquely.
    */
   contributeContext(
     runSet: CapabilityRunSet,
     ctx: { sessionId?: string },
-  ): import('./types').CapabilityContextFragment {
-    const merged: import('./types').CapabilityContextFragment = {}
+  ): Readonly<Record<string, import('./types').CapabilityContextFragment>> {
+    const namespaced: Record<string, import('./types').CapabilityContextFragment> = {}
     for (const provider of this.#providers) {
       if (provider.contributeContext === undefined) continue
       const prepared = runSet.get(provider.manifest.id)
       if (prepared === undefined) continue
       const fragment = provider.contributeContext(prepared.state, ctx)
-      for (const [key, value] of Object.entries(fragment)) {
-        if (value !== undefined && merged[key] === undefined) merged[key] = value
-      }
+      namespaced[provider.manifest.id] = fragment
     }
-    return merged
+    return namespaced
   }
 
   async startAll(): Promise<void> {

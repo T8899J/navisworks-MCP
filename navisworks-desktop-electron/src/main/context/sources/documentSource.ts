@@ -2,6 +2,7 @@ import { renderCurrentDocumentContext, renderDocumentTransition } from '../../ag
 import type { DocumentChangeNotice } from '../../agent/contextState'
 import { canonicalFingerprint } from '../contextHash'
 import type { ContextSource, ContextSourceEnvironment } from '../types'
+import { getNavisworksContext } from '../../navisworks/contextFragment'
 
 /**
  * The durable document identity. `revision` and `changedAt` deliberately do
@@ -32,8 +33,11 @@ export const documentSource: ContextSource<DocumentContextValue> = {
   version: 1,
   mode: 'durable',
   load(env: ContextSourceEnvironment): DocumentContextValue | undefined {
-    const document = env.document
-    if (document === undefined) return undefined
+    // P30.8: read the run's document + notice from THIS capability's namespaced
+    // fragment, never a top-level core field.
+    const navisworks = getNavisworksContext(env)
+    const document = navisworks?.document
+    if (document === undefined || navisworks === undefined) return undefined
     return {
       connected: document.connected,
       ...(document.instanceId === undefined ? {} : { instanceId: document.instanceId }),
@@ -42,7 +46,7 @@ export const documentSource: ContextSource<DocumentContextValue> = {
         ? {}
         : { documentInstanceId: document.documentInstanceId }),
       ...(document.documentName === undefined ? {} : { documentName: document.documentName }),
-      ...(env.documentNotice === undefined ? {} : { transition: env.documentNotice }),
+      ...(navisworks.documentNotice === undefined ? {} : { transition: navisworks.documentNotice }),
     }
   },
   fingerprint(value) {

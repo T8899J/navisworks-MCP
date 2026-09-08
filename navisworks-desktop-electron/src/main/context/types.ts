@@ -1,8 +1,6 @@
-import type { CurrentDocumentContext, DocumentChangeNotice } from '../agent/contextState'
 import type { SemanticMemory } from '../agent/semanticMemory'
 import type { TaskVerificationFeedback } from '../agent/taskContext'
 import type { CuriTask } from '../agent/taskTypes'
-import type { ContextState } from '../agent/contextState'
 import type { SkillManifestEntry } from '../skill/types'
 
 /**
@@ -18,17 +16,20 @@ export type ContextSourceMode = 'baseline' | 'durable' | 'volatile'
 
 /**
  * Everything a source may read for one run. Built once per run by
- * AgentRuntime from the live environment (ContextState, task manager,
- * session fields). Sources must NEVER mutate what they read here.
+ * AgentRuntime from the live environment (task manager, session fields, and
+ * the capability-contributed fragments below). Sources must NEVER mutate what
+ * they read here.
+ *
+ * P30.8 (Invariant K/§43): the core environment carries ONLY provider-neutral
+ * fields. A capability's professional state is NAMESPACED under `capabilities`
+ * keyed by capability id — never as top-level Navisworks-shaped fields
+ * (`document` / `documentNotice` / `documentRevision` / `contextState` were all
+ * removed). A capability's OWN context sources read their slice through a
+ * typed helper; the core stores the value opaquely and adds no field to serve
+ * a new capability (§50/§91). It NEVER crosses IPC.
  */
 export interface ContextSourceEnvironment {
   readonly sessionId?: string
-  /** Live document observation (ContextState.currentDocument). */
-  readonly document?: CurrentDocumentContext
-  /** Pending document-change notice for this session (unconsumed). */
-  readonly documentNotice?: DocumentChangeNotice
-  /** Document revision at preflight — the runtime advances seen-state after a successful run. */
-  readonly documentRevision?: number
   /** Resumable active task for this session (undefined ⇒ none). */
   readonly activeTask?: CuriTask
   /** Latest verifier feedback folded into the task block. */
@@ -37,20 +38,18 @@ export interface ContextSourceEnvironment {
   readonly semanticMemory?: SemanticMemory
   /** Durable compact summary of earlier (compacted) turns. */
   readonly compactSummary?: string
-  /** Verified facts / reference sets / recall read through it (never re-implemented). */
-  readonly contextState?: ContextState
   /** Resolve an externalized persisted tool result for runtime-internal recall. */
   readonly resolveToolResult?: (value: unknown) => Promise<unknown>
   /** P19: the discovered skill manifest source (name + description only). */
   readonly skillManifestProvider?: { manifest(): readonly SkillManifestEntry[] }
   /**
-   * Capability Architecture: per-run opaque capability states keyed by
-   * capability id. Navisworks-flavored fragments (contextState handle,
-   * documentRevision, unavailable) are merged at the top level by the
-   * provider's contributeContext — the core never reads capability state;
-   * only that capability's own sources do.
+   * P30.8: each registered capability's contributed context fragment, keyed by
+   * capability id (e.g. `{ navisworks: { document, documentNotice,
+   * documentRevision, contextState, unavailable } }`). The shape of a value is
+   * defined entirely by that capability; the core passes it through untouched.
+   * Adding a capability needs NO change to this interface (§43/§91).
    */
-  readonly capabilityStates?: ReadonlyMap<string, { capabilityId: string; state: unknown }>
+  readonly capabilities?: Readonly<Record<string, unknown>>
 }
 
 /**
