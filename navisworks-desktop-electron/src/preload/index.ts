@@ -115,7 +115,7 @@ const desktopApi: DesktopApi = {
 }
 
 if (!process.contextIsolated) {
-  throw new Error('Navisworks MCP Desktop requires Electron context isolation')
+  throw new Error('Curi requires Electron context isolation')
 }
 
 contextBridge.exposeInMainWorld('desktop', desktopApi)

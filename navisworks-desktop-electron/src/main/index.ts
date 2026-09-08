@@ -191,7 +191,8 @@ function createMainWindow(): BrowserWindow {
     minHeight: 620,
     show: false,
     autoHideMenuBar: true,
-    title: 'Navisworks MCP Desktop',
+    // Product identity is Curi; Navisworks is one capability it can use (§69).
+    title: 'Curi',
     // Frameless: the renderer draws its own title bar (drag region + window
     // controls); the system title bar with its caption text is gone.
     frame: false,
