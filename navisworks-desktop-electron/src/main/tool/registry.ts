@@ -1,25 +1,47 @@
 import type { AgentToolContract, AgentToolImpact, JsonSchema } from '../toolCatalog'
 import { toolCatalog } from '../toolCatalog'
 import type { ToolPermission } from '../../shared/ipc'
+import type { ToolOrigin } from '../capability/types'
+import type { CapabilityRegistry } from '../capability/capabilityRegistry'
 
 /**
- * The single source of truth for agent tools. Built on top of the existing
- * toolCatalog wire contracts (name/description/schema/impact/normalization)
- * and adds what the permission layer needs: a stable identity, a display
- * label, a category, and a default permission.
+ * The single source of truth for agent tools. Core-owned INTERNAL tools are
+ * defined here; capability tools are CONTRIBUTED by the CapabilityRegistry
+ * at composition time (§24/§101) — this file never names a capability.
+ * Adds the permission layer's needs: a stable identity, a display label, an
+ * origin, and a default permission.
  *
  * The renderer NEVER holds a second copy of this catalog — it fetches
  * summaries through the `tools.list` IPC route.
  */
 
+/** @deprecated display compatibility only; runtime decisions read `origin` (§23). */
 export type ToolCategory = 'navisworks' | 'internal'
+
+/** @deprecated narrow alias for the historical Navisworks tool set; core types use string. */
+export type NavisworksToolName =
+  | 'navisworks_status'
+  | 'navisworks_get_document'
+  | 'navisworks_get_selection'
+  | 'navisworks_find_items'
+  | 'navisworks_get_item_properties'
+  | 'navisworks_select_items'
+  | 'navisworks_set_visibility'
+  | 'navisworks_list_viewpoints'
+  | 'navisworks_activate_viewpoint'
+
+/** @deprecated narrow alias for the core-owned internal tools. */
+export type InternalToolName = 'read_tool_result' | 'question' | 'skill'
 
 export interface AgentToolDefinition {
   name: string
   label: string
   description: string
   parameters: JsonSchema
+  /** @deprecated kept for the settings UI until capability grouping lands; use origin. */
   category: ToolCategory
+  /** P23: where the definition actually comes from — the routing authority. */
+  origin: ToolOrigin
   impact: AgentToolImpact
   defaultPermission: ToolPermission
   /** The wire contract sent to the model when the tool is not denied. */
@@ -48,6 +70,7 @@ const READ_TOOL_RESULT_DEFINITION: AgentToolDefinition = {
     required: ['resultRef'],
   },
   category: 'internal',
+  origin: { kind: 'internal' },
   impact: 'read-only',
   defaultPermission: 'allow',
   contract: {
@@ -109,6 +132,7 @@ const QUESTION_DEFINITION: AgentToolDefinition = {
     required: ['questions'],
   },
   category: 'internal',
+  origin: { kind: 'internal' },
   impact: 'read-only',
   defaultPermission: 'allow',
   contract: {
@@ -164,6 +188,7 @@ const SKILL_DEFINITION: AgentToolDefinition = {
     required: ['name'],
   },
   category: 'internal',
+  origin: { kind: 'internal' },
   impact: 'read-only',
   defaultPermission: 'allow',
   contract: {
@@ -181,55 +206,50 @@ const SKILL_DEFINITION: AgentToolDefinition = {
   },
 }
 
-const LABELS: Record<string, string> = {
-  navisworks_status: '检查插件连接状态',
-  navisworks_get_document: '读取当前文档',
-  navisworks_get_selection: '读取当前选择',
-  navisworks_find_items: '搜索构件',
-  navisworks_get_item_properties: '读取构件属性',
-  navisworks_select_items: '改变构件选择',
-  navisworks_set_visibility: '改变模型可见性',
-  navisworks_list_viewpoints: '列出保存视点',
-  navisworks_activate_viewpoint: '激活保存视点',
-  read_tool_result: '读取历史工具结果',
-  question: '向用户提问',
-  skill: '加载 Skill',
-}
+const INTERNAL_DEFINITIONS: readonly AgentToolDefinition[] = [
+  READ_TOOL_RESULT_DEFINITION,
+  QUESTION_DEFINITION,
+  SKILL_DEFINITION,
+]
 
-function buildDefinition(contract: AgentToolContract): AgentToolDefinition {
-  const name = contract.function.name
-  const isViewState = contract.impact === 'view-state-change'
-  return {
-    name,
-    label: LABELS[name] ?? name,
-    description: contract.function.description,
-    parameters: contract.function.parameters,
-    category: 'navisworks',
-    impact: contract.impact,
-    // Read tools run silently; tools that change the user's view ask first.
-    // (Existing safety rules keep applying on top — never weaker.)
-    defaultPermission: isViewState ? 'ask' : 'allow',
-    contract,
-  }
-}
-
-export interface ToolDefinitionSummary {
-  name: string
-  label: string
-  description: string
-  impact: AgentToolImpact
-  category: ToolCategory
-  permission: ToolPermission
-  defaultPermission: ToolPermission
+export interface ToolRegistryOptions {
+  /** Registered capabilities; their tool definitions join the single truth (§24). */
+  capabilities?: CapabilityRegistry
+  /** Explicit internal definitions override (tests). */
+  internal?: readonly AgentToolDefinition[]
 }
 
 export class ToolRegistry {
   readonly #definitions: AgentToolDefinition[]
   readonly #byName: Map<string, AgentToolDefinition>
+  readonly #capabilities: CapabilityRegistry | undefined
 
-  constructor(definitions: readonly AgentToolDefinition[]) {
-    this.#definitions = [...definitions]
+  /**
+   * `definitions` (legacy positional) fully replaces the set — used by unit
+   * tests predating capability composition. The production path is
+   * `createToolRegistry(options)` which aggregates internal + capabilities.
+   */
+  constructor(definitions?: readonly AgentToolDefinition[], capabilities?: CapabilityRegistry) {
+    this.#definitions = definitions ? [...definitions] : [...INTERNAL_DEFINITIONS]
     this.#byName = new Map(this.#definitions.map((definition) => [definition.name, definition]))
+    this.#capabilities = capabilities
+  }
+
+  /** Aggregate the single tool truth: internal definitions + every registered capability (§24). */
+  static compose(options: ToolRegistryOptions): ToolRegistry {
+    const internal = [...(options.internal ?? INTERNAL_DEFINITIONS)]
+    const capabilityDefinitions = options.capabilities?.toolDefinitions() ?? []
+    const registry = new ToolRegistry([...internal, ...capabilityDefinitions], options.capabilities)
+    // Tool names must be globally unique — the capability registry already
+    // checks cross-capability collisions; internal/capability overlap is caught HERE.
+    const seen = new Set<string>()
+    for (const definition of registry.#definitions) {
+      if (seen.has(definition.name)) {
+        throw new Error(`重复的 Tool name: ${definition.name}（internal 与 capability 冲突，拒绝启动）`)
+      }
+      seen.add(definition.name)
+    }
+    return registry
   }
 
   list(): readonly AgentToolDefinition[] {
@@ -245,15 +265,16 @@ export class ToolRegistry {
   }
 
   /**
-   * Argument normalization — delegates Navisworks tools to the existing
-   * catalog behavior (blank optional strings dropped), so old calling
-   * conventions keep working.
+   * Argument normalization: capability definitions delegate to the owning
+   * catalog's behavior (blank optional strings dropped) so old calling
+   * conventions keep working; internal tools pass through unchanged.
    */
   normalizeArguments(
     name: string,
     argumentsValue: Record<string, unknown>,
   ): Record<string, unknown> {
-    if (this.get(name)?.category === 'navisworks') {
+    const definition = this.get(name)
+    if (definition !== undefined && definition.origin.kind === 'capability' && definition.category === 'navisworks') {
       return toolCatalog.normalizeArguments(name, argumentsValue)
     }
     return argumentsValue
@@ -271,7 +292,7 @@ export class ToolRegistry {
     ) {
       throw new Error(`工具 ${name} 的 arguments 必须是对象。`)
     }
-    if (definition.category === 'navisworks') {
+    if (definition.origin.kind === 'capability' && definition.category === 'navisworks') {
       // Keeps the catalog's own strict tool-name check on the legacy path.
       toolCatalog.assertAllowed(name, argumentsValue)
     }
@@ -306,23 +327,55 @@ export class ToolRegistry {
   /** Settings-UI summaries (internal tools excluded) with resolved permissions. */
   listUiTools(input: ToolPermissionInput = {}): ToolDefinitionSummary[] {
     return this.#definitions
-      .filter((definition) => definition.category !== 'internal')
+      .filter((definition) => definition.origin.kind !== 'internal')
       .map((definition) => ({
         name: definition.name,
         label: definition.label,
         description: definition.description,
         impact: definition.impact,
         category: definition.category,
+        capabilityId: definition.origin.kind === 'capability' ? definition.origin.capabilityId : undefined,
+        capabilityName: definition.origin.kind === 'capability'
+          ? this.#capabilities?.get(definition.origin.capabilityId)?.manifest.name
+          : undefined,
         permission: this.resolvePermission(definition.name, input),
         defaultPermission: definition.defaultPermission,
       }))
   }
 }
 
-function buildDefaultRegistry(): ToolRegistry {
-  const navisworksDefinitions = toolCatalog.definitions.map(buildDefinition)
-  return new ToolRegistry([...navisworksDefinitions, READ_TOOL_RESULT_DEFINITION, QUESTION_DEFINITION, SKILL_DEFINITION])
+export interface ToolDefinitionSummary {
+  name: string
+  label: string
+  description: string
+  impact: AgentToolImpact
+  category: ToolCategory
+  capabilityId?: string
+  capabilityName?: string
+  permission: ToolPermission
+  defaultPermission: ToolPermission
 }
 
-/** The process-wide registry singleton. */
+function buildDefaultRegistry(): ToolRegistry {
+  // Production default: the three core-internal tools only. Capability tools
+  // join through ToolRegistry.compose({ capabilities }) in the composition
+  // root — this module no longer hardcodes any capability's catalog (§101).
+  return ToolRegistry.compose({ internal: INTERNAL_DEFINITIONS })
+}
+
+/**
+ * The process-wide registry singleton. NOTE: this fallback contains ONLY the
+ * internal tools; real composition happens in applicationServices via
+ * createToolRegistry(), so the singleton exists purely for legacy imports.
+ */
 export const toolRegistry: ToolRegistry = buildDefaultRegistry()
+
+/** Factory seam (§117): compose the registry once the capabilities exist. */
+export function createToolRegistry(options: ToolRegistryOptions): ToolRegistry {
+  return ToolRegistry.compose(options)
+}
+
+/** Explicit access to the core-internal definitions (tests / composition). */
+export function internalToolDefinitions(): readonly AgentToolDefinition[] {
+  return INTERNAL_DEFINITIONS
+}

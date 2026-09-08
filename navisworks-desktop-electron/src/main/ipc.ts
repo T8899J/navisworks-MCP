@@ -85,7 +85,6 @@ import {
   type Session,
   type SessionSummary,
   type ThemeMode,
-  type ToolName
 } from '../shared/ipc'
 
 export type OllamaStreamEvent =
@@ -196,7 +195,9 @@ export interface OllamaAgentPort {
 export interface OllamaToolApprovalRequest {
   runId: string
   toolCallId: string
-  toolName: ToolName
+  // Capability Architecture: any capability tool may require approval; the
+  // emit-time zod schema still bounds what the renderer actually receives.
+  toolName: string
   arguments: Record<string, unknown>
   argumentsHash: string
   instanceId?: string

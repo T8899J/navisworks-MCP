@@ -43,6 +43,14 @@ export interface ContextSourceEnvironment {
   readonly resolveToolResult?: (value: unknown) => Promise<unknown>
   /** P19: the discovered skill manifest source (name + description only). */
   readonly skillManifestProvider?: { manifest(): readonly SkillManifestEntry[] }
+  /**
+   * Capability Architecture: per-run opaque capability states keyed by
+   * capability id. Navisworks-flavored fragments (contextState handle,
+   * documentRevision, unavailable) are merged at the top level by the
+   * provider's contributeContext — the core never reads capability state;
+   * only that capability's own sources do.
+   */
+  readonly capabilityStates?: ReadonlyMap<string, { capabilityId: string; state: unknown }>
 }
 
 /**

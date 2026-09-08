@@ -240,7 +240,11 @@ export const toolDefinitionSummarySchema = z.strictObject({
   label: nonEmptyString,
   description: z.string(),
   impact: z.enum(['read-only', 'view-state-change']),
+  /** @deprecated display compatibility; capability grouping reads capabilityId. */
   category: z.enum(['navisworks', 'internal']),
+  /** Capability Architecture v1: present only for capability-contributed tools. */
+  capabilityId: z.string().optional(),
+  capabilityName: z.string().optional(),
   permission: toolPermissionSchema,
   defaultPermission: toolPermissionSchema
 })
@@ -635,7 +639,10 @@ export const eventSchemas = {
     turnId: nonEmptyString,
     messageId: nonEmptyString,
     toolCallId: nonEmptyString,
-    toolName: toolNameSchema,
+    // Capability Architecture: approval can concern ANY capability tool (the
+    // historical navisworks enum would reject future capability names), so
+    // this is a string; navisworks-only strictness stays on navisworks.tool.execute.
+    toolName: z.string().min(1),
     arguments: z.record(z.string(), z.unknown()),
     argumentsHash: nonEmptyString,
     instanceId: nonEmptyString.optional(),

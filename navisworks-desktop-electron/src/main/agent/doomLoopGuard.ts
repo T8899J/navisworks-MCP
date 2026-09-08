@@ -13,12 +13,12 @@ import { hashArguments } from './executionLedger'
 /** Concentrated threshold (§99): never scatter `>= 2` across files. */
 export const DOOM_LOOP_REPEAT_THRESHOLD = 2
 
-export interface DoomLoopScope {
-  instanceId: string | null
-  bridgeSessionId: string | null
-  documentInstanceId: string | null
-  documentRevision: number | null
-}
+/**
+ * Capability Architecture: the operation scope is an OPAQUE scalar record
+ * contributed by the owning capability (§27/§44) — the guard hashes whatever
+ * fields the capability provides and assigns them no meaning of its own.
+ */
+export type DoomLoopScope = Readonly<Record<string, string | number | null>>
 
 export interface DoomLoopCall {
   toolName: string

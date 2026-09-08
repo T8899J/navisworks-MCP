@@ -1,12 +1,23 @@
-import { BridgeError, type BridgeCallOptions } from './bridgeClient'
-import type { NavisworksBridgeClient } from './bridgeClient'
 import { randomUUID } from 'node:crypto'
 import {
   type AgentToolName,
   ToolCatalogError,
 } from './toolCatalog'
-import { toolRegistry } from './tool/registry'
+import { toolRegistry, createToolRegistry, type ToolRegistry } from './tool/registry'
+import type { CapabilityRegistry } from './capability/capabilityRegistry'
+import { createLegacyNavisworksRegistry } from './agent/legacyNavisworksAdapter'
+import type {
+  CapabilityPreparedRun,
+  CapabilityRunSet,
+  CapabilityToolExecutionResult,
+} from './capability/types'
 import type { ToolOutputStore } from './toolOutputStore'
+import {
+  buildToolErrorObservation,
+  buildToolSuccessObservation,
+  payloadIsRecord,
+  summarizeToolSuccess,
+} from './agent/toolObservation'
 import type { ToolPermission } from '../shared/ipc'
 import { ModelRouter } from './model/modelRouter'
 import {
@@ -24,12 +35,6 @@ import {
   throwIfAborted,
 } from './model/providerUtils'
 import type { SamplingOptions } from './model/types'
-import type { NavisworksRunBinding } from './navisworks/instanceTypes'
-import {
-  callWithNavisworksRunBinding,
-  NavisworksTargetError,
-  validateNavisworksRunBinding,
-} from './navisworks/runBinding'
 import type { BuiltAgentRequest } from './agent/contextTypes'
 import {
   COMPACT_MAX_TRANSCRIPT_CHARS,
@@ -79,10 +84,7 @@ import {
   updateSemanticMemory,
   type SemanticMemory,
 } from './agent/semanticMemory'
-import {
-  CURI_CORE_PROMPT,
-  NAVISWORKS_CAPABILITY_PROMPT,
-} from './agent/prompts'
+import { CURI_CORE_PROMPT } from './agent/prompts'
 import type {
   ApiProfileAdvancedSettings,
   ContextWindowSource,
@@ -235,6 +237,27 @@ class ToolExecutionGuardError extends Error {
   }
 }
 
+/** A provider signals a run-level abort (e.g. the bound instance vanished).
+ *  The core stops the run with this code; it never interprets the cause (§53). */
+class CapabilityRunTerminatingError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message)
+    this.name = 'CapabilityRunTerminatingError'
+  }
+}
+
+/** Per-call dispatch context for #executeTool. */
+interface ToolDispatchContext {
+  runId: string
+  sessionId?: string
+  messageId?: string
+  permission: ToolPermission
+  signal?: AbortSignal
+  requestToolApproval?: (request: import('./capability/types').CapabilityApprovalRequest) => Promise<boolean>
+  allowAmbiguousRetry: boolean
+  capabilityStates: CapabilityRunSet
+}
+
 export interface AgentHistoryEntry {
   role: 'user' | 'assistant' | 'ai'
   content: string
@@ -304,8 +327,21 @@ export interface AgentRunInput {
   documentNotice?: DocumentChangeNotice
   /** Stable preflight snapshot for this Run Scope. */
   currentDocument?: CurrentDocumentContext
-  navisworksBinding?: NavisworksRunBinding
+  /** @deprecated legacy preflight fields — production passes none; the
+   *  Navisworks capability now contributes binding + current document through
+   *  prepareRun/contributeContext (§41). The legacy fallback assembly honors
+   *  them so engine-less unit tests keep their exact behavior. */
+  navisworksBinding?: {
+    instanceId: string
+    bridgeSessionId: string
+    documentInstanceId?: string
+    documentName?: string
+  }
   navisworksUnavailable?: { code: 'TARGET_INSTANCE_DISCONNECTED'; message: string }
+  /** Capability Architecture: per-run prepared capability states (runtime-only,
+   *  NEVER persisted, NEVER crosses IPC). When present, tool execution routes
+   *  through the owning capability. */
+  capabilityStates?: CapabilityRunSet
   /** P19: the discovered skill manifest feeds the skills/manifest baseline source. */
   skillManifestProvider?: { manifest(): readonly SkillManifestEntry[] }
 }
@@ -385,7 +421,12 @@ export interface AgentRunResult {
 }
 
 export interface AgentRuntimeOptions {
-  bridgeClient: AgentBridgeClient
+  /** Capability Architecture v1: the registered capability providers. When
+   *  present, tool execution routes exclusively through it (P26). Absent →
+   *  the legacy bridgeClient path (engine-less unit tests). */
+  capabilities?: CapabilityRegistry
+  /** @deprecated legacy path; ignored when `capabilities` is provided. */
+  bridgeClient?: AgentBridgeClient
   /** Default model when a run input does not name one. */
   model?: string
   /** Default reasoning toggle when a run input has no reasoning mode. */
@@ -471,7 +512,8 @@ export function resolveApiContextWindow(
 export type { AgentBridgeClient } from './model/types'
 
 export class AgentRuntime {
-  readonly #bridgeClient: AgentBridgeClient
+  readonly #capabilities: CapabilityRegistry | undefined
+  readonly #bridgeClient: AgentBridgeClient | undefined
   readonly #router: ModelRouter
   readonly #model: string
   readonly #think: boolean
@@ -486,9 +528,25 @@ export class AgentRuntime {
   readonly #taskManager: TaskManager | undefined
   readonly #contextEngine: ContextEngine | undefined
   readonly #internalToolExecutor: InternalToolExecutor | undefined
+  readonly #tools: ToolRegistry
   readonly #skillRegistry: SkillRegistry | undefined
 
   constructor(options: AgentRuntimeOptions) {
+    // §107 legacy migration: a host that still passes flat navisworks deps
+    // gets a real CapabilityRegistry via the quarantined adapter; a host that
+    // passes neither gets a genuinely capability-free core (§36/§74).
+    const capabilities = options.capabilities ?? (options.bridgeClient === undefined
+      ? undefined
+      : createLegacyNavisworksRegistry({
+        bridgeClient: options.bridgeClient,
+        ...(options.contextState === undefined ? {} : { contextState: options.contextState }),
+        ...(options.executionLedger === undefined ? {} : { executionLedger: options.executionLedger }),
+        ...(options.operationCoordinator === undefined ? {} : { operationCoordinator: options.operationCoordinator }),
+      }))
+    this.#capabilities = capabilities
+    this.#tools = capabilities === undefined
+      ? toolRegistry
+      : createToolRegistry({ capabilities })
     this.#bridgeClient = options.bridgeClient
     this.#router = new ModelRouter({
       requestTimeoutMs: options.requestTimeoutMs,
@@ -568,7 +626,7 @@ export class AgentRuntime {
     const disabledTools = input.disabledTools
     // Registry materialization: deny tools never reach the model, ask tools
     // are offered but gate on approval, allow tools run silently.
-    const tools = toolRegistry.materialize({
+    const tools = this.#tools.materialize({
       permissions: input.toolPermissions,
       legacyDisabled: disabledTools,
     })
@@ -597,16 +655,59 @@ export class AgentRuntime {
     // turn, so a legitimate cross-turn repeat (e.g. the user re-selected in
     // the Navisworks UI) is never blocked by the previous turn's history.
     const doomLoop = new DoomLoopGuard()
-    const doomScope: DoomLoopScope = {
-      instanceId: input.navisworksBinding?.instanceId ?? this.#contextState?.instanceId ?? null,
-      bridgeSessionId: input.navisworksBinding?.bridgeSessionId ?? null,
-      documentInstanceId: input.navisworksBinding?.documentInstanceId
-        ?? this.#contextState?.documentInstanceId ?? null,
-      documentRevision: this.#contextState?.documentRevision ?? null,
-    }
+    // P18/P27: the operation scope is contributed by the OWNING capability
+    // (opaque fields); the core never names document/instance concepts itself.
+    const doomScopeFor = (toolName: string): Record<string, string | number | null> =>
+      this.#capabilities?.executionScopeFor(toolName, capabilityStates) ?? {}
     // The question channel: ChatRunRegistry supplies it (pending registry +
     // the run's sender); absent → internal question tools report unavailable.
     const askQuestion = options.requestQuestion
+    // Capability Architecture v1: prepare every registered provider's run
+    // state ONCE (binding / current environment / availability). Opaque to
+    // the core; execution and context contributions read it by capability id.
+    const legacyNavisworksState = input.navisworksBinding !== undefined
+      || input.navisworksUnavailable !== undefined
+      || input.currentDocument !== undefined
+      ? {
+        ...(input.navisworksBinding === undefined ? {} : { binding: input.navisworksBinding }),
+        ...(input.navisworksUnavailable === undefined ? {} : { unavailable: input.navisworksUnavailable }),
+        ...(input.currentDocument === undefined ? {} : { currentDocument: input.currentDocument }),
+      }
+      : undefined
+    const preparedStates: CapabilityRunSet = this.#capabilities === undefined
+      ? new Map()
+      : await this.#capabilities.prepareRuns({
+        runId,
+        ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      })
+    // Deprecated adapter (§41/§107): when the run still carries the legacy
+    // navisworks preflight fields, merge them into every provider's state
+    // (unknown keys are simply ignored by providers that do not use them).
+    const capabilityStates: CapabilityRunSet = input.capabilityStates
+      ?? (legacyNavisworksState === undefined
+        ? preparedStates
+        : new Map([...preparedStates].map(([id, prepared]) => [
+          id,
+          {
+            capabilityId: prepared.capabilityId,
+            state: {
+              ...(prepared.state as Record<string, unknown> ?? {}),
+              ...legacyNavisworksState,
+            },
+          },
+        ])))
+    const capabilityContext: Record<string, unknown> = this.#capabilities === undefined
+      ? {}
+      : this.#capabilities.contributeContext(capabilityStates, {
+        ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+      })
+    const navisworksState = capabilityContext as {
+      document?: CurrentDocumentContext
+      documentNotice?: DocumentChangeNotice
+      documentRevision?: number
+      contextState?: import('./agent/contextState').ContextState
+    }
     // Context window + its SOURCE. API priority: profile override → provider
     // capability → safe fallback. The LOCAL 32768 clamp never applies to API
     // endpoints, and the fallback is budget accounting — never presented as
@@ -644,7 +745,7 @@ export class AgentRuntime {
       ? input.semanticMemory
       : updateSemanticMemory(input.semanticMemory, trimmedInput)
     const currentDocumentBlock = renderCurrentDocumentContext(
-      input.currentDocument ?? this.#contextState?.currentDocument,
+      input.currentDocument ?? this.#contextState?.currentDocument ?? navisworksState.document,
     )
 
     // Context Engine v1 (P9–P13): the WHAT of the model context — baseline,
@@ -659,9 +760,21 @@ export class AgentRuntime {
     if (this.#contextEngine !== undefined && sessionId !== undefined) {
       contextAssembly = await this.#contextEngine.prepare(sessionId, {
         sessionId,
-        document: input.currentDocument ?? this.#contextState?.currentDocument,
-        ...(input.documentNotice === undefined ? {} : { documentNotice: input.documentNotice }),
-        ...(this.#contextState === undefined ? {} : { documentRevision: this.#contextState.documentRevision }),
+        document: input.currentDocument ?? this.#contextState?.currentDocument ?? navisworksState.document,
+        ...(input.documentNotice === undefined
+          ? navisworksState.documentNotice === undefined
+            ? {}
+            : { documentNotice: navisworksState.documentNotice }
+          : { documentNotice: input.documentNotice }),
+        ...(navisworksState.documentRevision === undefined
+          ? {}
+          : { documentRevision: navisworksState.documentRevision }),
+        ...(navisworksState.contextState === undefined
+          ? this.#contextState === undefined
+            ? {}
+            : { contextState: this.#contextState }
+          : { contextState: navisworksState.contextState }),
+        capabilityStates,
         ...(activeTask === undefined ? {} : { activeTask }),
         ...(semanticMemory === undefined ? {} : { semanticMemory }),
         ...(input.compactSummary?.trim()
@@ -676,15 +789,7 @@ export class AgentRuntime {
       baseline = contextAssembly.baseline
       contextBlocks = [...contextAssembly.blocks]
     } else {
-      contextBlocks = [
-        {
-          kind: 'other',
-          message: {
-            role: 'system',
-            content: NAVISWORKS_CAPABILITY_PROMPT,
-          },
-        },
-      ]
+      contextBlocks = await this.#capabilityBaselineBlocks()
       if (activeTask !== undefined) {
         contextBlocks.push({
           kind: 'task-state',
@@ -1093,7 +1198,7 @@ export class AgentRuntime {
             try {
               const executed = await executor.execute(
                 toolCall.name,
-                toolRegistry.normalizeArguments(toolCall.name, toolCall.arguments),
+                this.#tools.normalizeArguments(toolCall.name, toolCall.arguments),
                 {
                   runId,
                   sessionId: input.sessionId ?? '',
@@ -1137,8 +1242,8 @@ export class AgentRuntime {
           // never pop a Tool Approval the user would then "approve" for nothing.
           const doomSignature = toolCallSignature({
             toolName: toolCall.name,
-            normalizedArguments: toolRegistry.normalizeArguments(toolCall.name, toolCall.arguments),
-            scope: doomScope,
+            normalizedArguments: this.#tools.normalizeArguments(toolCall.name, toolCall.arguments),
+            scope: doomScopeFor(toolCall.name),
           })
           const doomDecision = doomLoop.beforeCall(doomSignature)
           if (doomDecision.action !== 'execute') {
@@ -1169,19 +1274,20 @@ export class AgentRuntime {
             continue
           }
 
-          toolResult = await this.#executeTool(
-            toolCall,
+          toolResult = await this.#executeTool(toolCall, {
             runId,
-            toolRegistry.resolvePermission(toolCall.name, {
+            ...(sessionId === undefined ? {} : { sessionId }),
+            permission: this.#tools.resolvePermission(toolCall.name, {
               permissions: input.toolPermissions,
               legacyDisabled: disabledTools,
             }),
-            options.signal,
-            options.requestToolApproval,
-            hasExplicitAmbiguousRetryConfirmation(trimmedInput),
-            input.navisworksBinding,
-            input.navisworksUnavailable,
-          )
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+            ...(options.requestToolApproval === undefined
+              ? {}
+              : { requestToolApproval: options.requestToolApproval }),
+            allowAmbiguousRetry: hasExplicitAmbiguousRetryConfirmation(trimmedInput),
+            capabilityStates,
+          })
           // Record the real result's fingerprint so a REPEAT with no new
           // information is detectable (§29); different results reset nothing.
           if (toolResult.error === undefined) {
@@ -1228,15 +1334,16 @@ export class AgentRuntime {
             ),
           })
 
-          // P2: mine this successful result for Verified Facts + an ordered Reference Set,
-          // attributed to the current document instance. No-op without a ContextState.
-          if (toolResult.error === undefined) {
-            this.#contextState?.ingestToolResult(
-              toolCall.name,
-              toolResult.result,
-              toolCall.id,
-              input.sessionId,
-            )
+          // P2/§55: result mining (Verified Facts + ordered Reference Set) is
+          // the OWNING capability's professional state — fan it out through the
+          // registry; no-op when the provider has no ingest hook.
+          if (toolResult.error === undefined && toolResult.result !== undefined) {
+            this.#capabilities?.observeModelResult(toolCall.name, {
+              toolName: toolCall.name,
+              result: toolResult.result,
+              toolCallId: toolCall.id,
+              ...(sessionId === undefined ? {} : { sessionId }),
+            })
           }
 
           // Task evidence (Section 十八/十九): summary + reference only. Raw
@@ -1303,7 +1410,10 @@ export class AgentRuntime {
           errorCode: error.code,
         }
       }
-      if (error instanceof NavisworksTargetError) {
+      if (error instanceof CapabilityRunTerminatingError) {
+        // P27: the capability said the environment is gone (e.g. the bound
+        // Navisworks instance disconnected mid-run). Stop with its code — the
+        // core never interprets WHY; the error code stays model-visible.
         await pauseIfRunning('MODEL_ERROR')
         return {
           isSuccess: false,
@@ -1395,25 +1505,44 @@ export class AgentRuntime {
     return { result, wire: buildToolSuccessObservation(toolCall.name, result) }
   }
 
+  /**
+   * Capability-provided BASELINE blocks for the engine-less legacy path:
+   * renders each registered capability's baseline context sources. The core
+   * never names a capability or its prompt — the policy text arrives because
+   * the capability is registered, and NOTHING appears when none is (§37).
+   */
+  async #capabilityBaselineBlocks(): Promise<ContextBlock[]> {
+    const blocks: ContextBlock[] = []
+    const capabilities = this.#capabilities
+    if (capabilities === undefined) return blocks
+    for (const source of capabilities.contextSourcesByMode('baseline')) {
+      try {
+        const value = await source.load({})
+        if (value === undefined) continue
+        blocks.push({ kind: 'other', message: { role: 'system', content: source.render(value) } })
+      } catch (error) {
+        console.debug(`[capability] baseline source failed: ${source.key}`)
+      }
+    }
+    return blocks
+  }
+
+  /**
+   * Capability Architecture v1: the dispatch table. Core owns assertAllowed,
+   * deny short-circuit and the internal read_tool_result path (§47); every
+   * other tool routes through the CapabilityRegistry by OWNER (§98 — never a
+   * name prefix) into the provider's executeTool, which carries the whole
+   * professional safety ladder. runTerminating signals a provider-level run
+   * abort (e.g. the bound instance vanished); the core stops the run with the
+   * given code without ever interpreting the cause (§53).
+   */
   async #executeTool(
     toolCall: { id: string; name: string; arguments: Record<string, unknown> },
-    runId: string,
-    permission: ToolPermission,
-    signal?: AbortSignal,
-    requestToolApproval?: RunAgentOptions['requestToolApproval'],
-    allowAmbiguousRetry = false,
-    navisworksBinding?: NavisworksRunBinding,
-    navisworksUnavailable?: AgentRunInput['navisworksUnavailable'],
+    ctx: ToolDispatchContext,
   ): Promise<ToolExecutionResult> {
-    const ledger = this.#executionLedger
-    const isModifying = toolRegistry.get(toolCall.name)?.impact === 'view-state-change'
-    let documentAtRequest: string | undefined
-    let ledgerStarted = false
-    let executing = false
+    const permission = ctx.permission
     try {
-      toolRegistry.assertAllowed(toolCall.name, toolCall.arguments)
-      // Double protection for deny: materialization already hides the tool
-      // from the model — a forged call is rejected here as well.
+      this.#tools.assertAllowed(toolCall.name, toolCall.arguments)
       if (permission === 'deny') {
         const message = `该工具已被用户禁用：${toolCall.name}`
         return {
@@ -1421,8 +1550,8 @@ export class AgentRuntime {
           wire: buildToolErrorObservation(toolCall.name, 'PERMISSION_DENIED', message),
         }
       }
-      // Internal tool: reads Curi's own stored tool outputs — no bridge and no
-      // Navisworks dependency, so it works while the instance is offline.
+      // Internal tool: reads Curi's own stored tool outputs — no capability
+      // and no bridge dependency, so it works while every instance is offline.
       if (toolCall.name === 'read_tool_result') {
         const store = this.#toolOutputStore
         if (store === undefined) {
@@ -1432,246 +1561,72 @@ export class AgentRuntime {
             wire: buildToolErrorObservation(toolCall.name, 'TOOL_OUTPUT_UNAVAILABLE', message),
           }
         }
-        const normalizedArguments = toolRegistry.normalizeArguments(toolCall.name, toolCall.arguments)
+        const normalizedArguments = this.#tools.normalizeArguments(toolCall.name, toolCall.arguments)
         const resultRef = typeof normalizedArguments.resultRef === 'string' ? normalizedArguments.resultRef : ''
         const offset = typeof normalizedArguments.offset === 'number' ? normalizedArguments.offset : 0
         const limit = typeof normalizedArguments.limit === 'number' ? normalizedArguments.limit : 50
         const page = await store.read(resultRef, offset, limit)
         if (page.error !== undefined) {
-          const message = page.error
           return {
-            error: { code: 'TOOL_OUTPUT_UNAVAILABLE', message },
-            wire: buildToolErrorObservation(toolCall.name, 'TOOL_OUTPUT_UNAVAILABLE', message),
+            error: { code: 'TOOL_OUTPUT_UNAVAILABLE', message: page.error },
+            wire: buildToolErrorObservation(toolCall.name, 'TOOL_OUTPUT_UNAVAILABLE', page.error),
           }
         }
         return { result: page, wire: buildToolSuccessObservation(toolCall.name, page) }
       }
-      if (navisworksUnavailable !== undefined) {
-        throw new NavisworksTargetError(navisworksUnavailable.code, navisworksUnavailable.message)
+      const capabilities = this.#capabilities
+      if (capabilities === undefined) {
+        throw new ToolCatalogError(`当前运行未注册任何 Capability：${toolCall.name}`)
       }
-      const normalizedArguments = toolRegistry.normalizeArguments(toolCall.name, toolCall.arguments)
-      if (isModifying) {
-        documentAtRequest = navisworksBinding?.documentInstanceId
-          ?? this.#contextState?.documentInstanceId
-          ?? undefined
-        const argumentsHash = hashArguments(normalizedArguments)
-        const ambiguous = ledger?.findAmbiguous({
-          instanceId: navisworksBinding?.instanceId,
-          documentInstanceId: documentAtRequest,
-          toolName: toolCall.name,
-          argumentsHash,
-        })
-        if (ambiguous !== undefined && !allowAmbiguousRetry) {
-          const message = '上一次相同修改的结果不确定，已阻止自动重试。请先确认当前状态，或明确要求仍然执行。'
-          return {
-            error: { code: 'AMBIGUOUS_RETRY_BLOCKED', message, ambiguousOutcome: true },
-            wire: buildToolErrorObservation(
-              toolCall.name,
-              'AMBIGUOUS_RETRY_BLOCKED',
-              message,
-              true,
-            ),
-          }
+      const owner = capabilities.ownerForTool(toolCall.name)
+      if (owner === undefined) {
+        // §111: unknown tools never fan out to providers.
+        throw new ToolCatalogError(`工具不在允许列表中：${toolCall.name || '(empty)'}`)
+      }
+      const prepared = ctx.capabilityStates.get(owner.manifest.id)
+      const normalizedArguments = this.#tools.normalizeArguments(toolCall.name, toolCall.arguments)
+      const executed = await owner.executeTool({
+        runId: ctx.runId,
+        ...(ctx.sessionId === undefined ? {} : { sessionId: ctx.sessionId }),
+        toolCallId: toolCall.id,
+        ...(ctx.messageId === undefined ? {} : { messageId: ctx.messageId }),
+        toolName: toolCall.name,
+        arguments: normalizedArguments,
+        permission,
+        ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+        ...(ctx.requestToolApproval === undefined
+          ? {}
+          : { requestApproval: ctx.requestToolApproval }),
+        allowAmbiguousRetry: ctx.allowAmbiguousRetry,
+        state: prepared?.state,
+      })
+      if (executed.error !== undefined) {
+        const { code, message, ambiguousOutcome, runTerminating } = executed.error
+        if (runTerminating === true) {
+          throw new CapabilityRunTerminatingError(code, message)
         }
-        await ledger?.begin({
-          runId,
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          argumentsHash,
-          ...(navisworksBinding === undefined
-            ? {}
-            : {
-                instanceId: navisworksBinding.instanceId,
-                bridgeSessionId: navisworksBinding.bridgeSessionId,
-              }),
-          documentInstanceId: documentAtRequest,
-        })
-        ledgerStarted = ledger !== undefined
-        await ledger?.mark(runId, toolCall.id, 'awaiting-approval')
-        // permission=allow means the user explicitly opted out of per-call
-        // prompts for this tool; ask still goes through the approval flow.
-        // Existing ledger/safety checks above stay untouched.
-        const approved = permission === 'allow'
-          ? true
-          : requestToolApproval
-          ? await requestToolApproval({
-              runId,
-              toolCallId: toolCall.id,
-              toolName: toolCall.name as AgentToolName,
-              arguments: normalizedArguments,
-              argumentsHash,
-              ...(navisworksBinding === undefined
-                ? {}
-                : {
-                    instanceId: navisworksBinding.instanceId,
-                    bridgeSessionId: navisworksBinding.bridgeSessionId,
-                  }),
-              ...(documentAtRequest === undefined ? {} : { documentInstanceId: documentAtRequest }),
-              ...(ambiguous === undefined ? {} : { ambiguousRetry: true }),
-            })
-          : false
-        if (!approved) {
-          await ledger?.mark(runId, toolCall.id, 'cancelled')
-          const message = '用户取消了本次视图操作。'
-          return {
-            error: { code: 'TOOL_CANCELLED', message },
-            wire: buildToolErrorObservation(toolCall.name, 'TOOL_CANCELLED', message),
-          }
-        }
-        throwIfAborted(signal)
-        await ledger?.mark(runId, toolCall.id, 'approved')
-        if (navisworksBinding !== undefined) {
-          try {
-            await validateNavisworksRunBinding(
-              this.#bridgeClient as AgentBridgeClient & Pick<NavisworksBridgeClient, 'callToEndpoint'>,
-              navisworksBinding,
-              { signal },
-            )
-          } catch (error) {
-            if (!(error instanceof NavisworksTargetError)) throw error
-            await ledger?.mark(runId, toolCall.id, 'cancelled', 'TARGET_CHANGED')
-            const message = '当前 Navisworks 目标已变化，本次操作已取消。'
-            return {
-              error: { code: 'TARGET_CHANGED', message },
-              wire: buildToolErrorObservation(toolCall.name, 'TARGET_CHANGED', message),
-            }
-          }
-        } else if (this.#contextState !== undefined
-          && !this.#contextState.canUseDocumentReference(documentAtRequest)) {
-          await ledger?.mark(runId, toolCall.id, 'cancelled', 'DOCUMENT_CHANGED')
-          const message = '文档已变化，已取消本次视图操作，请重新选择目标后重试。'
-          return {
-            error: { code: 'DOCUMENT_CHANGED', message },
-            wire: buildToolErrorObservation(toolCall.name, 'DOCUMENT_CHANGED', message),
-          }
-        }
-        if (hashArguments(normalizedArguments) !== argumentsHash) {
-          await ledger?.mark(runId, toolCall.id, 'cancelled', 'ARGUMENTS_CHANGED')
-          const message = '工具参数在审批后发生变化，已取消执行。'
-          return {
-            error: { code: 'ARGUMENTS_CHANGED', message },
-            wire: buildToolErrorObservation(toolCall.name, 'ARGUMENTS_CHANGED', message),
-          }
-        }
-        if (ambiguous !== undefined) {
-          await ledger?.resolveAmbiguous(ambiguous, 'USER_CONFIRMED_RETRY')
+        return {
+          error: { code, message, ...(ambiguousOutcome === undefined ? {} : { ambiguousOutcome }) },
+          wire: buildToolErrorObservation(toolCall.name, code, message, ambiguousOutcome),
         }
       }
-      // A read-only tool the user set to ask: gate on approval without the
-      // modifying-call ledger machinery. Refusal is a PERMISSION result — the
-      // model must know the user said no, not that the tool failed.
-      if (permission === 'ask' && !isModifying) {
-        const approved = requestToolApproval
-          ? await requestToolApproval({
-              runId,
-              toolCallId: toolCall.id,
-              toolName: toolCall.name as AgentToolName,
-              arguments: normalizedArguments,
-              argumentsHash: hashArguments(normalizedArguments),
-              ...(navisworksBinding === undefined
-                ? {}
-                : {
-                    instanceId: navisworksBinding.instanceId,
-                    bridgeSessionId: navisworksBinding.bridgeSessionId,
-                  }),
-            })
-          : false
-        if (!approved) {
-          const message = `用户拒绝了本次工具调用（权限设置为每次询问）：${toolCall.name}`
-          return {
-            error: { code: 'PERMISSION_DENIED', message },
-            wire: buildToolErrorObservation(toolCall.name, 'PERMISSION_DENIED', message),
-          }
-        }
-      }
-
-      const callBridge = () => navisworksBinding === undefined
-        ? this.#bridgeClient.call(toolCall.name, normalizedArguments, { signal })
-        : callWithNavisworksRunBinding(
-            this.#bridgeClient as AgentBridgeClient & Pick<NavisworksBridgeClient, 'callToEndpoint'>,
-            navisworksBinding,
-            toolCall.name,
-            normalizedArguments,
-            { signal },
-          )
-      const execute = async (): Promise<unknown> => {
-        if (isModifying) {
-          if (navisworksBinding === undefined
-            && this.#contextState !== undefined
-            && !this.#contextState.canUseDocumentReference(documentAtRequest)) {
-            await ledger?.mark(runId, toolCall.id, 'cancelled', 'DOCUMENT_CHANGED')
-            throw new ToolExecutionGuardError(
-              'DOCUMENT_CHANGED',
-              '文档已变化，已取消本次视图操作，请重新选择目标后重试。',
-            )
-          }
-          await ledger?.mark(runId, toolCall.id, 'executing')
-          executing = true
-        }
-        return callBridge()
-      }
-      const result = isModifying && this.#operationCoordinator !== undefined
-        ? await this.#operationCoordinator.runExclusive(
-            navisworksBinding === undefined
-              ? documentAtRequest
-              : `${navisworksBinding.instanceId}\u0000${documentAtRequest ?? ''}`,
-            execute,
-          )
-        : await execute()
-      if (isModifying) await ledger?.mark(runId, toolCall.id, 'success')
-      return {
-        result,
-        wire: buildToolSuccessObservation(toolCall.name, result),
-      }
+      return { result: executed.result, wire: buildToolSuccessObservation(toolCall.name, executed.result) }
     } catch (error) {
-      if (error instanceof NavisworksTargetError) {
-        if (isModifying && ledgerStarted) {
-          const current = ledger?.get(runId, toolCall.id)
-          if (current?.status === 'executing') {
-            await ledger?.mark(runId, toolCall.id, 'failed', error.code)
-          } else if (current?.status === 'awaiting-approval' || current?.status === 'approved') {
-            await ledger?.mark(runId, toolCall.id, 'cancelled', error.code)
-          }
-        }
+      if (error instanceof CapabilityRunTerminatingError) {
         throw error
       }
-      if (signal?.aborted) {
-        if (isModifying && ledgerStarted) {
-          const current = ledger?.get(runId, toolCall.id)
-          if (executing && current?.status === 'executing') {
-            await ledger?.mark(runId, toolCall.id, 'ambiguous', 'ABORTED_DURING_EXECUTION')
-          } else if (current?.status === 'awaiting-approval' || current?.status === 'approved') {
-            await ledger?.mark(runId, toolCall.id, 'cancelled', 'ABORTED_BEFORE_EXECUTION')
-          }
-        }
+      if (ctx.signal?.aborted) {
         throw error
       }
-      const code = error instanceof BridgeError
+      const code = error instanceof ToolExecutionGuardError
         ? error.code
-        : error instanceof ToolExecutionGuardError
-          ? error.code
         : error instanceof ToolCatalogError
           ? error.code
           : 'TOOL_EXECUTION_FAILED'
       const message = errorMessage(error)
-      const ambiguousOutcome = error instanceof BridgeError && error.ambiguousOutcome
-      // Invariant F: a modifying call whose outcome the bridge could not confirm is
-      // recorded ambiguous (never auto-retried); a clean failure records failed.
-      if (isModifying && ledgerStarted) {
-        const current = ledger?.get(runId, toolCall.id)
-        if (current?.status === 'executing') {
-          await ledger?.mark(
-            runId,
-            toolCall.id,
-            ambiguousOutcome ? 'ambiguous' : 'failed',
-            code,
-          )
-        }
-      }
-      const errorShape = { code, message, ambiguousOutcome }
       return {
-        error: errorShape,
-        wire: buildToolErrorObservation(toolCall.name, code, message, ambiguousOutcome),
+        error: { code, message },
+        wire: buildToolErrorObservation(toolCall.name, code, message),
       }
     }
   }
@@ -1849,127 +1804,6 @@ function hasExplicitAmbiguousRetryConfirmation(input: string): boolean {
   return /(?:仍然|继续|再次|重新)执行|确认重试/.test(input)
 }
 
-function buildToolSuccessObservation(toolName: string, result: unknown): Record<string, unknown> {
-  const record = payloadIsRecord(result) ? result : undefined
-  return {
-    status: 'success',
-    tool: toolName,
-    summary: summarizeToolSuccess(toolName, record),
-    next_actions: toolSuccessNextActions(toolName, record),
-    artifacts: collectToolArtifacts(record),
-    result,
-  }
-}
-
-function summarizeToolSuccess(
-  toolName: string,
-  result: Record<string, unknown> | undefined,
-): string {
-  if (toolName === 'navisworks_status' && typeof result?.connected === 'boolean') {
-    return result.connected ? 'Navisworks 已连接。' : 'Navisworks 未连接。'
-  }
-  if (toolName === 'navisworks_find_items') {
-    const count = Array.isArray(result?.items) ? result.items.length : 0
-    const total = typeof result?.total === 'number' ? result.total : undefined
-    const totalText = total === undefined ? '' : `，共 ${total} 个`
-    const truncatedText = result?.truncated === true ? '，结果尚未完整' : ''
-    return `搜索完成：返回 ${count} 个构件${totalText}${truncatedText}。`
-  }
-  if (toolName === 'navisworks_get_selection') {
-    const count = Array.isArray(result?.items)
-      ? result.items.length
-      : (typeof result?.selectionCount === 'number' ? result.selectionCount : 0)
-    return `已读取当前选择：${count} 个构件。`
-  }
-  if (toolName === 'navisworks_list_viewpoints') {
-    const count = Array.isArray(result?.viewpoints) ? result.viewpoints.length : 0
-    return `已读取保存视点：返回 ${count} 个。`
-  }
-  if (toolName === 'navisworks_get_item_properties') {
-    const count = Array.isArray(result?.items) ? result.items.length : 0
-    return `已读取 ${count} 个构件的属性。`
-  }
-  return `${toolName} 执行成功。`
-}
-
-function toolSuccessNextActions(
-  toolName: string,
-  result: Record<string, unknown> | undefined,
-): string[] {
-  if (result?.truncated !== true) return []
-  if (toolName === 'navisworks_find_items') {
-    return ['如果任务仍需要更多结果，使用完全相同的搜索参数继续调用 navisworks_find_items；否则停止续查并回答。']
-  }
-  return ['结果未完整；仅在当前任务确实需要更多数据时继续分页。']
-}
-
-function collectToolArtifacts(result: Record<string, unknown> | undefined): string[] {
-  if (result === undefined) return []
-  const artifacts = new Set<string>()
-  for (const key of ['items', 'viewpoints', 'results']) {
-    const entries = result[key]
-    if (!Array.isArray(entries)) continue
-    for (const entry of entries) {
-      if (!payloadIsRecord(entry)) continue
-      const id = entry.id ?? entry.itemId ?? entry.viewpointId ?? entry.guid
-      if (typeof id === 'string' && id.trim()) artifacts.add(id.trim())
-      if (artifacts.size >= 20) return [...artifacts]
-    }
-  }
-  return [...artifacts]
-}
-
-function buildToolErrorObservation(
-  toolName: string,
-  code: string,
-  summary: string,
-  ambiguousOutcome?: boolean,
-): Record<string, unknown> {
-  return {
-    status: 'error',
-    tool: toolName,
-    code,
-    summary,
-    next_actions: toolErrorNextActions(code),
-    artifacts: [],
-    ...(ambiguousOutcome === undefined ? {} : { ambiguousOutcome }),
-  }
-}
-
-function toolErrorNextActions(code: string): string[] {
-  switch (code) {
-    case 'AMBIGUOUS_RETRY_BLOCKED':
-      return [
-        '先调用只读工具确认当前状态。',
-        '除非用户明确确认仍要执行，否则停止并不得自动重试相同修改。',
-      ]
-    case 'TOOL_CANCELLED':
-      return ['停止本次修改，等待用户给出新的明确指令。']
-    case 'TARGET_CHANGED':
-    case 'DOCUMENT_CHANGED':
-    case 'INSTANCE_CHANGED':
-      return [
-        '重新读取当前 Navisworks 目标和文档状态后再规划。',
-        '不得自动重试原修改操作。',
-      ]
-    case 'ARGUMENTS_CHANGED':
-      return ['重新生成稳定参数，并对修改操作重新请求审批。']
-    case 'TOOL_NOT_ALLOWED':
-    case 'PERMISSION_DENIED':
-      return ['改用允许列表中的最小必要工具；不需要实时数据时直接回答。']
-    case 'TOOL_OUTPUT_UNAVAILABLE':
-      return [
-        '该结果已过期或不可用；如仍需要数据，请用相同参数重新调用原工具。',
-      ]
-    default:
-      return [
-        '确认 Navisworks Manage 2023 已启动。',
-        '确认模型文档已打开，并已加载 Navisworks MCP 插件。',
-        '如果条件未变且相同错误再次出现，停止重试并向用户说明。',
-      ]
-  }
-}
-
 function truncateToolResult(toolName: string, result: string, maxChars: number): string {
   if (result.length <= maxChars) {
     return result
@@ -2013,9 +1847,6 @@ function summarizeTruncatedPayload(result: string): string {
   return ''
 }
 
-function payloadIsRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function unwrapWire(value: unknown): unknown {
   // `navisworks_*` results come back wrapped as `{status, tool, result}`; if the payload
