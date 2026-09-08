@@ -3,7 +3,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { DesktopDataPaths } from './dataPaths'
 import type { ThemeMode } from '../shared/ipc'
-import { toolNameSchema } from '../shared/ipc'
+import { sanitizeToolNames } from '../shared/ipc'
 import {
   DEFAULT_API_PROFILE_ADVANCED,
   DEFAULT_EXECUTION_SETTINGS,
@@ -709,11 +709,10 @@ function parseWpfSettingsSnapshot(value: unknown): WpfAppSettingsSnapshot {
     ),
     CustomProfileNumPredict: optionalFiniteInteger(entry.CustomProfileNumPredict, 2048),
     ThemeMode: optionalThemeMode(entry.ThemeMode),
-    // Unknown or stale tool names from hand-edited files are dropped rather
-    // than trusted; the valid set is the shared catalog enum.
-    DisabledTools: optionalStringArray(entry.DisabledTools).filter((name) =>
-      (toolNameSchema.options as readonly string[]).includes(name)
-    ),
+    // P30.7: malformed names from hand-edited files are dropped; any
+    // well-formed name (current Navisworks tool or a future capability) is
+    // trusted, since disabledTools only ever maps a name to deny (§39).
+    DisabledTools: sanitizeToolNames(optionalStringArray(entry.DisabledTools)),
     FontScale: optionalFiniteNumber(entry.FontScale, 1),
     PreferApiModel: typeof entry.PreferApiModel === 'boolean'
       ? entry.PreferApiModel

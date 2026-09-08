@@ -2,7 +2,7 @@ import {
   DEFAULT_API_PROFILE_ADVANCED,
   DEFAULT_EXECUTION_SETTINGS,
   DEFAULT_STORAGE_SETTINGS,
-  toolNameSchema,
+  sanitizeToolNames,
   type ApiProfile,
   type ApiProfileAdvancedSettings,
   type ContextWindowSource,
@@ -278,13 +278,13 @@ export function normalizeSettings(value: unknown): DesktopSettings {
   const selectedModel = String(source.selectedModel ?? source.SelectedModel ?? models[0] ?? 'qwen3.5:9b-q4_K_M')
   if (!models.includes(selectedModel)) models.unshift(selectedModel)
 
-  const rawDisabled = new Set<string>(
-    (Array.isArray(source.disabledTools)
-      ? source.disabledTools
-      : Array.isArray(source.DisabledTools)
-        ? source.DisabledTools
-        : []).map(String)
-  )
+  // P30.7: persisted disabled tools are sanitized by FORMAT, not against a
+  // closed enum, so a future capability's name survives the round-trip (§39).
+  const rawDisabled = (Array.isArray(source.disabledTools)
+    ? source.disabledTools
+    : Array.isArray(source.DisabledTools)
+      ? source.DisabledTools
+      : []).map(String)
 
   const rawFontScale = Number(source.fontScale ?? source.FontScale ?? 1)
   const rawApiProfiles = Array.isArray(source.apiProfiles) ? source.apiProfiles : []
@@ -306,7 +306,7 @@ export function normalizeSettings(value: unknown): DesktopSettings {
     models,
     reasoningMode: normalizeReasoningEffort(source.reasoningMode ?? source.ReasoningMode),
     themeMode: source.themeMode === 'light' || source.themeMode === 'dark' ? source.themeMode : 'system',
-    disabledTools: toolNameSchema.options.filter((name) => rawDisabled.has(name)),
+    disabledTools: sanitizeToolNames(rawDisabled),
     fontScale: Number.isFinite(rawFontScale) ? Math.min(1.3, Math.max(0.85, rawFontScale)) : 1,
     contextWindowTokens: Number(
       source.contextWindowTokens

@@ -67,7 +67,7 @@ import {
   IPC_REQUEST_CHANNEL,
   eventSchemas,
   requestSchemas,
-  toolNameSchema,
+  sanitizeToolNames,
   type AppearanceState,
   type ApiProfile,
   type AppSettings,
@@ -1602,7 +1602,9 @@ function toDesktopSettings(settings: PersistedSettings): AppSettings {
     models,
     reasoningMode,
     themeMode: settings.themeMode ?? 'system',
-    disabledTools: toolNameSchema.options.filter((name) => disabled.includes(name)),
+    // P30.7: sanitize persisted disabled tools by format (future capability
+    // names survive; malformed junk is dropped) instead of a closed enum (§39).
+    disabledTools: sanitizeToolNames(disabled),
     fontScale: Math.min(1.3, Math.max(0.85, settings.fontScale ?? 1)),
     contextWindowTokens: settings.contextWindowTokens ?? 32768,
     preferApiModel: settings.preferApiModel ?? false,

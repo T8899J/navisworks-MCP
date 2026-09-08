@@ -96,12 +96,47 @@ export const appearanceStateSchema = z.strictObject({
   effectiveTheme: effectiveThemeSchema
 })
 
-export const toolNameSchema = z.enum([
-  'read_tool_result',
-  // P16/P19 internal runtime tools — materializable + approvable types only;
-  // they never execute through navisworks.tool.execute (the catalog rejects them).
-  'question',
-  'skill',
+/**
+ * P30.7 generic tool identity: an OPEN namespace string, so a future
+ * `files_read` / `browser_open` / `web_search` can be stored in disabledTools,
+ * carried as a ToolName, and approved through the generic Tool-Approval event
+ * WITHOUT ever re-widening a closed enum (§36/§37). The character set allows
+ * the `:`/`_`/`.`/`-` namespaces a capability may want while refusing
+ * whitespace and other junk; it deliberately does NOT hardcode any
+ * capability's name. The 128-char ceiling is a defensive bound, not a limit
+ * on legitimate namespaces.
+ */
+export const toolNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9_.:-]+$/, '工具名只允许字母、数字与 _ . : - 组合。')
+
+/**
+ * P30.7 Navisworks-only tool names. This STAYS a closed enum because the
+ * `navisworks.tool.execute` route legitimately only exposes the direct
+ * Navisworks READ tools (§38/§100) — future non-Navisworks capabilities must
+ * NOT be reachable through it.
+ */
+/** P30.7: keep persisted/legacy disabled-tool entries that are well-formed
+ *  (old names still work; future-capability names survive a settings
+ *  round-trip — the closed enum would silently drop them, §39/§96) and drop
+ *  malformed junk. Order-preserving and de-duplicating. */
+export function sanitizeToolNames(values: Iterable<unknown>): string[] {
+  const seen = new Set<string>()
+  const kept: string[] = []
+  for (const value of values) {
+    const parsed = toolNameSchema.safeParse(value)
+    if (parsed.success && !seen.has(parsed.data)) {
+      seen.add(parsed.data)
+      kept.push(parsed.data)
+    }
+  }
+  return kept
+}
+
+export const navisworksToolNameSchema = z.enum([
   'navisworks_status',
   'navisworks_get_document',
   'navisworks_get_selection',
@@ -540,7 +575,10 @@ export const requestSchemas = {
   },
   'navisworks.tool.execute': {
     input: z.strictObject({
-      toolName: toolNameSchema,
+      // P30.7: this route stays restricted to Navisworks read tools — the
+      // direct-invoke path is a Navisworks UI integration API, not a generic
+      // capability bus (Invariant J).
+      toolName: navisworksToolNameSchema,
       arguments: z.record(z.string(), z.unknown())
     }),
     output: z.unknown()
@@ -639,10 +677,10 @@ export const eventSchemas = {
     turnId: nonEmptyString,
     messageId: nonEmptyString,
     toolCallId: nonEmptyString,
-    // Capability Architecture: approval can concern ANY capability tool (the
-    // historical navisworks enum would reject future capability names), so
-    // this is a string; navisworks-only strictness stays on navisworks.tool.execute.
-    toolName: z.string().min(1),
+    // P30.7: approval can concern ANY capability tool, so the name is the
+    // generic toolNameSchema (future fake/files/web tools validate) — never a
+    // closed enum. Navisworks-only strictness lives on navisworks.tool.execute.
+    toolName: toolNameSchema,
     arguments: z.record(z.string(), z.unknown()),
     argumentsHash: nonEmptyString,
     instanceId: nonEmptyString.optional(),

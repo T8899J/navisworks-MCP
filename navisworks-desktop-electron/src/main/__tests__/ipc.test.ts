@@ -21,6 +21,10 @@ import {
   type DesktopIpcDependencies,
   type OllamaAgentPort,
 } from '../ipc'
+import {
+  eventSchemas,
+  requestSchemas,
+} from '../../shared/ipc'
 import type {
   IpcEnvelope,
   InputFor,
@@ -912,6 +916,42 @@ describe('desktop IPC tool authorization', () => {
     } finally {
       await harness.dispose()
     }
+  })
+})
+
+describe('P30.7 generic vs Navisworks-only tool-name schemas (REAL schemas §41/§90)', () => {
+  it('toolNameSchema accepts a future capability name and rejects junk', async () => {
+    // The generic name is now an open namespace (§37): a future tool validates.
+    expect(() => requestSchemas['settings.update'].input.parse({
+      settings: { disabledTools: ['fake_echo', 'files_read', 'browser.open', 'a:b-c_d'] },
+    })).not.toThrow()
+    // Whitespace / over-long names are still refused.
+    expect(() => requestSchemas['settings.update'].input.parse({
+      settings: { disabledTools: ['not a tool name'] },
+    })).toThrow()
+  })
+
+  it('the generic tool.approval.requested EVENT accepts a fake capability tool (§41)', () => {
+    const parsed = eventSchemas['tool.approval.requested'].safeParse({
+      approvalId: 'a1',
+      runId: 'r1',
+      sessionId: 's1',
+      turnId: 't1',
+      messageId: 'm1',
+      toolCallId: 'tc1',
+      toolName: 'fake_write',
+      arguments: {},
+      argumentsHash: 'h1',
+    })
+    expect(parsed.success).toBe(true)
+  })
+
+  it('navisworks.tool.execute KEEPS the closed Navisworks enum: fake_echo invalid, read tool valid (§38/§100)', () => {
+    const executeInput = requestSchemas['navisworks.tool.execute'].input
+    expect(executeInput.safeParse({ toolName: 'fake_echo', arguments: {} }).success).toBe(false)
+    expect(executeInput.safeParse({ toolName: 'navisworks_get_document', arguments: {} }).success).toBe(true)
+    // Even a well-formed non-Navisworks name cannot reach the direct route.
+    expect(executeInput.safeParse({ toolName: 'files_read', arguments: {} }).success).toBe(false)
   })
 })
 

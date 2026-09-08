@@ -131,12 +131,15 @@ describe('WPF-compatible JSON repositories', () => {
     expect(loaded?.disabledTools).toEqual([])
   })
 
-  it('round-trips disabled tools and drops names outside the catalog', async () => {
+  it('round-trips disabled tools: old names survive, future names are kept, junk dropped', async () => {
     const paths = await createPaths()
     const repository = new JsonSettingsRepository(paths)
     const settings: AppSettings = {
       ...DEFAULT_APP_SETTINGS,
-      disabledTools: ['navisworks_set_visibility', 'stale-tool'],
+      // P30.7: disabledTools is an OPEN namespace now — a future capability
+      // name (files_read) round-trips, while a malformed entry (whitespace) is
+      // dropped. Old Navisworks names still work unchanged (§39 compat).
+      disabledTools: ['navisworks_set_visibility', 'files_read', 'not a tool name'],
     }
 
     await expect(repository.save(settings)).resolves.toBe(true)
@@ -145,7 +148,7 @@ describe('WPF-compatible JSON repositories', () => {
     expect(saved).toContain('"navisworks_set_visibility"')
 
     const loaded = await repository.load()
-    expect(loaded?.disabledTools).toEqual(['navisworks_set_visibility'])
+    expect(loaded?.disabledTools).toEqual(['navisworks_set_visibility', 'files_read'])
   })
 
   it('round-trips the font scale and clamps hand-edited extremes', async () => {
