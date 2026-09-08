@@ -55,6 +55,7 @@ interface FakeProviderOptions {
   disposeSpy?: () => void
   throwOnDispose?: boolean
   scope?: Record<string, string | number | null>
+  normalizeSpy?: (name: string, args: Record<string, unknown>) => Record<string, unknown>
 }
 
 function fakeProvider(options: FakeProviderOptions): CapabilityProvider {
@@ -64,7 +65,7 @@ function fakeProvider(options: FakeProviderOptions): CapabilityProvider {
     tools: () => (options.tools ?? ['fake_echo']).map((name) => toolDef(name, id)),
     contextSources: () => options.sources ?? [],
     ownsTool: (name) => (options.tools ?? ['fake_echo']).includes(name),
-    normalizeArguments: (_name, args) => args,
+    normalizeArguments: options.normalizeSpy ?? ((_name, args) => args),
     prepareRun: async (): Promise<CapabilityPreparedRun> => {
       if (options.failPrepare) throw new Error('preflight exploded')
       return { capabilityId: id, state: { preparedBy: id } }
@@ -154,6 +155,38 @@ describe('ToolRegistry composition (§15 internal/capability collision)', () => 
       fakeProvider({ id: 'evil', tools: ['question'] }),
     ])
     expect(() => createToolRegistry({ capabilities: registry })).toThrow(/question/)
+  })
+})
+
+describe('P30.2 argument normalization routes through the owning provider (§12/§85)', () => {
+  it('a capability tool is normalized by ITS provider, not a hardcoded catalog', () => {
+    const normalizeSpy = vi.fn((name: string, args: Record<string, unknown>) => ({
+      ...args,
+      normalizedBy: name,
+    }))
+    const registry = new CapabilityRegistry([
+      fakeProvider({ id: 'fake', tools: ['fake_echo'], normalizeSpy }),
+    ])
+    const tools = createToolRegistry({ capabilities: registry })
+
+    const out = tools.normalizeArguments('fake_echo', { text: 'hi' })
+    // The FAKE provider ran normalization — proving the core does not only
+    // support Navisworks and keys off origin.capabilityId, never category.
+    expect(out).toEqual({ text: 'hi', normalizedBy: 'fake_echo' })
+    expect(normalizeSpy).toHaveBeenCalledWith('fake_echo', { text: 'hi' })
+  })
+
+  it('internal tools pass through normalization unchanged (§12)', () => {
+    const tools = createToolRegistry({})
+    expect(tools.normalizeArguments('question', { questions: [] })).toEqual({ questions: [] })
+  })
+
+  it('assertAllowed checks registration + args-object only, never a Navisworks category (§13)', () => {
+    const registry = new CapabilityRegistry([fakeProvider({ id: 'fake', tools: ['fake_echo'] })])
+    const tools = createToolRegistry({ capabilities: registry })
+    expect(() => tools.assertAllowed('fake_echo', {})).not.toThrow()
+    expect(() => tools.assertAllowed('nope', {})).toThrow(/工具不在允许列表中/)
+    expect(() => tools.assertAllowed('fake_echo', [])).toThrow(/arguments 必须是对象/)
   })
 })
 

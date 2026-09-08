@@ -1,5 +1,4 @@
 import type { AgentToolContract, AgentToolImpact, JsonSchema } from '../toolCatalog'
-import { toolCatalog } from '../toolCatalog'
 import type { ToolPermission } from '../../shared/ipc'
 import type { ToolOrigin } from '../capability/types'
 import type { CapabilityRegistry } from '../capability/capabilityRegistry'
@@ -265,21 +264,29 @@ export class ToolRegistry {
   }
 
   /**
-   * Argument normalization: capability definitions delegate to the owning
-   * catalog's behavior (blank optional strings dropped) so old calling
-   * conventions keep working; internal tools pass through unchanged.
+   * P30.2: normalization belongs to the Provider that DEFINED the schema
+   * (§12). A capability tool routes by `origin.capabilityId` through the
+   * CapabilityRegistry owner — never a `navisworks_` prefix, a `category`
+   * check, or a hardcoded catalog import. Internal tools pass through.
    */
   normalizeArguments(
     name: string,
     argumentsValue: Record<string, unknown>,
   ): Record<string, unknown> {
     const definition = this.get(name)
-    if (definition !== undefined && definition.origin.kind === 'capability' && definition.category === 'navisworks') {
-      return toolCatalog.normalizeArguments(name, argumentsValue)
+    if (definition !== undefined && definition.origin.kind === 'capability') {
+      const owner = this.#capabilities?.ownerForTool(name)
+      if (owner !== undefined) return owner.normalizeArguments(name, argumentsValue)
     }
     return argumentsValue
   }
 
+  /**
+   * P30.2 (§13): the core gate checks ONLY registration + the universal
+   * argument-is-an-object invariant. Any capability-specific validation lives
+   * with the owning Provider or its executor — the core never branches on the
+   * `navisworks` category to decide what is allowed.
+   */
   assertAllowed(name: string, argumentsValue: unknown = {}): void {
     const definition = this.get(name)
     if (definition === undefined) {
@@ -291,10 +298,6 @@ export class ToolRegistry {
       || Array.isArray(argumentsValue)
     ) {
       throw new Error(`工具 ${name} 的 arguments 必须是对象。`)
-    }
-    if (definition.origin.kind === 'capability' && definition.category === 'navisworks') {
-      // Keeps the catalog's own strict tool-name check on the legacy path.
-      toolCatalog.assertAllowed(name, argumentsValue)
     }
   }
 
