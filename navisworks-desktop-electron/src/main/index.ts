@@ -9,7 +9,6 @@ import { resolveDesktopDataPaths } from './dataPaths'
 import {
   registerDesktopIpc,
   broadcastNativeThemeUpdated,
-  startNavisworksInstancesPolling,
   type OllamaAgentPort,
   type OllamaEndpointOptions,
   type OllamaRunInput,
@@ -145,14 +144,9 @@ async function startApplication(): Promise<void> {
       }
     }
   })
-  // Detect Navisworks appearing/disappearing without a manual refresh, and keep the
-  // Document Scope current so a switch/reopen invalidates stale facts + reference sets.
-  const disposeStatusPolling = startNavisworksInstancesPolling(
-    instanceRegistry,
-    instanceSelection,
-    undefined,
-    (status) => contextState.observe(status)
-  )
+  // Capability Architecture: Navisworks instance polling is now started and
+  // stopped by the Navisworks capability itself (startAll/disposeAll) — the
+  // application root no longer knows about it (§18/§62).
 
   Menu.setApplicationMenu(null)
 
@@ -167,7 +161,6 @@ async function startApplication(): Promise<void> {
     disposeCsp()
     disposeNavigation()
     disposePermissions()
-    disposeStatusPolling()
     appearance.dispose()
     await disposeIpc()
     // P6: tear down the App scope, cascading disposal to any live Document child scopes.

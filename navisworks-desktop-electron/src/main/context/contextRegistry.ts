@@ -1,14 +1,10 @@
 import type { ContextSource, ContextSourceMode } from './types'
 import { coreSource } from './sources/coreSource'
-import { navisworksPolicySource } from './sources/navisworksPolicySource'
 import { skillManifestSource } from './sources/skillManifestSource'
-import { documentSource } from './sources/documentSource'
 import { compactSummarySource } from './sources/compactSummarySource'
 import { taskSource } from './sources/taskSource'
 import { semanticMemorySource } from './sources/semanticMemorySource'
-import { verifiedFactsSource } from './sources/verifiedFactsSource'
-import { referenceSetSource } from './sources/referenceSetSource'
-import { recallSource } from './sources/recallSource'
+import type { CapabilityRegistry } from '../capability/capabilityRegistry'
 
 /**
  * The ordered list of every registered context source. THE ORDER IS EXPLICIT
@@ -16,28 +12,35 @@ import { recallSource } from './sources/recallSource'
  * working context — never Object.keys order, never Map insertion accidents,
  * never filesystem scan order. The runtime must not re-sort it.
  *
- * Baseline order (§54): core/identity → policy/navisworks → skills/manifest.
- * Volatile order matches the pre-engine runtime's block order so existing
- * behavior is reproduced byte-for-byte where the content is unchanged.
+ * Capability Architecture v1 (§30/§100): the CORE list holds only
+ * provider-neutral sources. Navisworks' policy/document/facts/reference-set/
+ * recall sources are CONTRIBUTED by the Navisworks capability and interleaved
+ * by composeContextRegistry() into the SAME fixed global order they had when
+ * statically listed here — so migrated sessions see an unchanged baseline.
+ *
+ * Fixed global order (§33): core baseline → capability baselines → skill
+ * manifest → capability durable → core volatile → capability volatile.
  */
-const ORDERED_SOURCES: readonly ContextSource<unknown>[] = [
-  coreSource,
-  navisworksPolicySource,
-  skillManifestSource,
-  documentSource,
+export const CORE_BASELINE_SOURCES: readonly ContextSource<unknown>[] = [coreSource]
+export const CORE_MANIFEST_SOURCES: readonly ContextSource<unknown>[] = [skillManifestSource]
+export const CORE_VOLATILE_SOURCES: readonly ContextSource<unknown>[] = [
   compactSummarySource,
   taskSource,
   semanticMemorySource,
-  verifiedFactsSource,
-  referenceSetSource,
-  recallSource,
+]
+
+/** Core-only default (no capabilities registered) — §37 acceptance. */
+const CORE_ONLY_ORDERED: readonly ContextSource<unknown>[] = [
+  ...CORE_BASELINE_SOURCES,
+  ...CORE_MANIFEST_SOURCES,
+  ...CORE_VOLATILE_SOURCES,
 ]
 
 export class ContextRegistry {
   readonly #sources: readonly ContextSource<unknown>[]
   readonly #byKey: Map<string, ContextSource<unknown>>
 
-  constructor(sources: readonly ContextSource<unknown>[] = ORDERED_SOURCES) {
+  constructor(sources: readonly ContextSource<unknown>[] = CORE_ONLY_ORDERED) {
     const seen = new Set<string>()
     for (const source of sources) {
       if (seen.has(source.key)) {
@@ -63,16 +66,25 @@ export class ContextRegistry {
   }
 }
 
-/** The process-wide registry singleton (the default source set). */
-export const contextRegistry = new ContextRegistry()
-
 /**
- * Factory seam (§54): build a registry from an explicit, ordered source list.
- * Callers compose sources themselves — the runtime never mutates the global
- * array at run time; order is what the constructor was handed.
+ * Build the production registry: CORE sources + every registered capability's
+ * contributions, interleaved into the exact fixed order Navisworks had when
+ * its sources were statically listed here (baseline → capability baselines →
+ * skill manifest → capability durable → core volatile → capability volatile).
+ * Passing no capability registry yields the core-only baseline (§37): no
+ * Navisworks policy, document, facts, reference set, or recall anywhere.
  */
 export function createContextRegistry(
-  sources: readonly ContextSource<unknown>[] = ORDERED_SOURCES,
+  capabilityRegistry?: CapabilityRegistry,
 ): ContextRegistry {
-  return new ContextRegistry(sources)
+  const capability = capabilityRegistry
+  const ordered: ContextSource<unknown>[] = [
+    ...CORE_BASELINE_SOURCES,
+    ...(capability?.contextSourcesByMode('baseline') ?? []),
+    ...CORE_MANIFEST_SOURCES,
+    ...(capability?.contextSourcesByMode('durable') ?? []),
+    ...CORE_VOLATILE_SOURCES,
+    ...(capability?.contextSourcesByMode('volatile') ?? []),
+  ]
+  return new ContextRegistry(ordered)
 }

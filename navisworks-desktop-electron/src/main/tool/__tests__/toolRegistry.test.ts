@@ -12,7 +12,7 @@ import { eventSchemas } from '../../../shared/ipc/schemas'
 // exact same invariants, just through the real composition path.
 const capabilities = new CapabilityRegistry([
   new NavisworksCapabilityProvider({
-    bridge: { call: async () => ({}) },
+    bridge: { call: async <T>(): Promise<T> => ({}) as T },
   }),
 ])
 const registry = createToolRegistry({ capabilities })

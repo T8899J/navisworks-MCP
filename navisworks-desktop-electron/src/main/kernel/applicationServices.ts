@@ -3,7 +3,7 @@ import { resolveResult } from '../agent/toolResultStore'
 import { NavisworksBridgeClient } from '../bridgeClient'
 import { ToolOutputStore } from '../toolOutputStore'
 import type { DesktopDataPaths } from '../dataPaths'
-import { ToolApprovalRegistry } from '../ipc'
+import { ToolApprovalRegistry, startNavisworksInstancesPolling } from '../ipc'
 import { ModelRouter } from '../model/modelRouter'
 import { ContextEngine } from '../context/contextEngine'
 import { QuestionService } from '../question/questionService'
@@ -11,7 +11,9 @@ import { SkillRegistry } from '../skill/skillRegistry'
 import { skillRoots } from '../skill/paths'
 import { InternalToolExecutor } from '../agent/internalToolExecutor'
 import { ContextEpochStore } from '../context/contextEpochStore'
-import { contextRegistry } from '../context/contextRegistry'
+import { createContextRegistry } from '../context/contextRegistry'
+import { CapabilityRegistry } from '../capability/capabilityRegistry'
+import { NavisworksCapabilityProvider } from '../navisworks/capability'
 import {
   JsonSessionRepository,
   JsonSettingsRepository,
@@ -42,6 +44,7 @@ export const NavisworksInstanceRegistryToken = token<NavisworksInstanceRegistry>
 export const NavisworksInstanceSelectionToken = token<NavisworksInstanceSelection>('app.navisworksSelection')
 export const ContextEngineToken = token<ContextEngine>('app.contextEngine')
 export const QuestionServiceToken = token<QuestionService>('app.questions')
+export const CapabilityRegistryToken = token<CapabilityRegistry>('app.capabilities')
 
 /** Composition root: instantiate once, register once, and resolve everywhere else. */
 export async function installApplicationServices(
@@ -69,11 +72,33 @@ export async function installApplicationServices(
   } catch (error) {
     console.warn(`[skill] discovery failed: ${error instanceof Error ? error.message : String(error)}`)
   }
-  // The default registry already carries skills/manifest in its fixed
-  // baseline position (core → policy → skills/manifest); when no skills are
-  // discovered the source contributes NOTHING to the baseline (§55).
+  const contextState = appScope.require(ContextStateToken)
+  const executionLedger = appScope.require(ExecutionLedgerToken)
+  const operationCoordinator = appScope.require(OperationCoordinatorToken)
+  // Capability Architecture v1 (§61): Curi Core is capability-free; the
+  // Navisworks professional execution + context + polling are registered as
+  // ONE first-party capability provider. Adding Files/Web/Browser later means
+  // appending here — never editing AgentRuntime.
+  const capabilities = new CapabilityRegistry()
+  capabilities.register(new NavisworksCapabilityProvider({
+    bridge,
+    contextState,
+    executionLedger,
+    operationCoordinator,
+    // §18: the Navisworks instance polling is this capability's OWN
+    // background work — startAll() starts it, disposeAll() stops it.
+    startPolling: () => startNavisworksInstancesPolling(
+      instanceRegistry,
+      instanceSelection,
+      undefined,
+      (status) => contextState.observe(status),
+    ),
+  }))
+  await capabilities.startAll()
+  // skills/manifest sits in the fixed baseline slot (core → policy →
+  // skills/manifest); when no skills are discovered it contributes NOTHING (§55).
   const contextEngine = new ContextEngine(
-    contextRegistry,
+    createContextRegistry(capabilities),
     new ContextEpochStore(paths.contextEpochsDirectory),
   )
   // P16 Question service: pending questions are process-memory state; the
@@ -85,14 +110,11 @@ export async function installApplicationServices(
     contextEngine,
     internalToolExecutor,
     skillRegistry,
-    bridgeClient: bridge,
+    capabilities,
     model: persistedSettings?.selectedModel,
     think: localThinkForEffort(normalizeReasoningEffort(persistedSettings?.reasoningMode)),
     contextWindow: persistedSettings?.contextWindowTokens,
     numPredict: persistedSettings?.numPredict,
-    contextState: appScope.require(ContextStateToken),
-    executionLedger: appScope.require(ExecutionLedgerToken),
-    operationCoordinator: appScope.require(OperationCoordinatorToken),
     taskManager: appScope.require(TaskManagerToken),
     toolOutputStore,
     resolveToolResult: (value) => resolveResult(paths.toolResultsDirectory, value),
@@ -109,6 +131,7 @@ export async function installApplicationServices(
     .register(AgentRuntimeToken, runtime)
     .register(CompactionServiceToken, runtime)
     .register(ContextEngineToken, contextEngine)
+    .register(CapabilityRegistryToken, capabilities)
     .register(QuestionServiceToken, questions)
     .register(ApprovalServiceToken, approvals)
   appScope.onDispose(() => runtime.dispose())

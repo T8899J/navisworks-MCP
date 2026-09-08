@@ -5,7 +5,16 @@ import { join } from 'node:path'
 import { ContextEngine } from '../context/contextEngine'
 import { ContextEpochStore } from '../context/contextEpochStore'
 import { ContextRegistry } from '../context/contextRegistry'
-import { contextRegistry } from '../context/contextRegistry'
+import { createContextRegistry } from '../context/contextRegistry'
+import { CapabilityRegistry } from '../capability/capabilityRegistry'
+import { NavisworksCapabilityProvider } from '../navisworks/capability'
+
+// Capability Architecture: the engine tests exercise the PRODUCTION shape —
+// the Navisworks capability contributes its policy/document/facts/reference/
+// recall sources exactly as it does in the app.
+const contextRegistry = createContextRegistry(new CapabilityRegistry([
+  new NavisworksCapabilityProvider({ bridge: { call: async <T>(): Promise<T> => ({}) as T } }),
+]))
 import { canonicalFingerprint, canonicalJson, computePrefixHash } from '../context/contextHash'
 import { documentSource } from '../context/sources/documentSource'
 import { ContextState } from '../agent/contextState'

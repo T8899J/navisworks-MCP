@@ -7,7 +7,8 @@ import { SkillRegistry } from '../skill/skillRegistry'
 import { SKILL_MAX_BYTES } from '../skill/limits'
 import { ContextEngine } from '../context/contextEngine'
 import { ContextEpochStore } from '../context/contextEpochStore'
-import { contextRegistry } from '../context/contextRegistry'
+import { createContextRegistry } from '../context/contextRegistry'
+const contextRegistry = createContextRegistry()
 import type { SkillRoots } from '../skill/paths'
 
 function encode(text: string): Uint8Array {

@@ -570,6 +570,17 @@ export class AgentRuntime {
     this.#skillRegistry = options.skillRegistry
   }
 
+  /** The composed tool registry (internal + registered capabilities):
+   * the tools.list IPC surface reads the SAME single truth the model sees. */
+  get toolInventory(): ToolRegistry {
+    return this.#tools
+  }
+
+  /** The registered capability providers (tools.list summaries + shutdown). */
+  get capabilityRegistry(): CapabilityRegistry | undefined {
+    return this.#capabilities
+  }
+
   /**
    * Title generation follows the ACTIVELY routed provider: in API mode the
    * current endpoint answers (so deleting Ollama someday keeps titles working);

@@ -5,7 +5,12 @@ import { join } from 'node:path'
 import { AgentRuntime, type AgentBridgeClient } from '../agentRuntime'
 import { ContextEngine } from '../context/contextEngine'
 import { ContextEpochStore } from '../context/contextEpochStore'
-import { contextRegistry } from '../context/contextRegistry'
+import { createContextRegistry } from '../context/contextRegistry'
+import { CapabilityRegistry } from '../capability/capabilityRegistry'
+import { NavisworksCapabilityProvider } from '../navisworks/capability'
+const contextRegistry = createContextRegistry(new CapabilityRegistry([
+  new NavisworksCapabilityProvider({ bridge: { call: async <T>(): Promise<T> => ({}) as T } }),
+]))
 
 function ndjson(lines: unknown[]): Response {
   const text = lines.map((line) => `${JSON.stringify(line)}\n`).join('')
