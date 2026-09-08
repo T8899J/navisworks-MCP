@@ -66,8 +66,17 @@ export interface NavisworksCapabilityDeps {
   operationCoordinator?: DocumentOperationCoordinator
   /** Owns polling lifecycle (§18): start returns a disposer, dispose stops it. */
   startPolling?: () => () => void
-  /** Run preflight → binding + environment snapshot; production supplies this (§40). */
+  /** Run preflight → binding + environment snapshot; production supplies this (§40).
+   *  @deprecated superseded by `preflight`; kept so legacy adapters can still inject. */
   preparePreflight?: (input: CapabilityRunPrepareInput) => Promise<NavisworksPreparedRun>
+  /**
+   * P30.3: the Navisworks run preflight seam. `prepareRun` is the ONLY place a
+   * production run gets its binding / current document / unavailable state —
+   * ChatRunRegistry no longer performs any of it (§22). Absent → an empty
+   * prepared run (capability registered but no environment to bind, the same
+   * semantics as an offline target, §64).
+   */
+  preflight?: { prepare(input: CapabilityRunPrepareInput): Promise<NavisworksPreparedRun> }
 }
 
 export class NavisworksCapabilityProvider implements CapabilityProvider {
@@ -108,10 +117,17 @@ export class NavisworksCapabilityProvider implements CapabilityProvider {
     return toolCatalog.normalizeArguments(name, args)
   }
 
+  /** P30.3: the run preflight is the capability's OWN responsibility — binding,
+   *  current document, unavailable marker and the revision marker all come from
+   *  here, never from ChatRunRegistry (§17/§22). A missing preflight seam is an
+   *  empty state (registered but nothing to bind), not a failed run (§64). */
   async prepareRun(input: CapabilityRunPrepareInput): Promise<CapabilityPreparedRun> {
-    const state: NavisworksPreparedRun = this.#deps.preparePreflight
-      ? await this.#deps.preparePreflight(input)
-      : {}
+    const { preflight, preparePreflight } = this.#deps
+    const state: NavisworksPreparedRun = preflight !== undefined
+      ? await preflight.prepare(input)
+      : preparePreflight !== undefined
+        ? await preparePreflight(input)
+        : {}
     return { capabilityId: NAVISWORKS_CAPABILITY_ID, state }
   }
 

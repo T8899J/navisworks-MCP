@@ -14,6 +14,7 @@ import { ContextEpochStore } from '../context/contextEpochStore'
 import { createContextRegistry } from '../context/contextRegistry'
 import { CapabilityRegistry } from '../capability/capabilityRegistry'
 import { NavisworksCapabilityProvider } from '../navisworks/capability'
+import { NavisworksRunPreflight } from '../navisworks/runPreflight'
 import { createToolRegistry } from '../tool/registry'
 import type { ToolRegistry } from '../tool/registry'
 import {
@@ -86,11 +87,21 @@ export async function installApplicationServices(
   // ONE first-party capability provider. Adding Files/Web/Browser later means
   // appending here — never editing AgentRuntime.
   const capabilities = new CapabilityRegistry()
+  // P30.3: the run preflight is the capability's OWN — instance discovery,
+  // selection, binding and ContextState ingest happen in prepareRun, never in
+  // ChatRunRegistry (Invariant B/D). This is the production NavisworksRunPreflight.
+  const preflight = new NavisworksRunPreflight({
+    instanceRegistry,
+    instanceSelection,
+    bridge,
+    contextState,
+  })
   capabilities.register(new NavisworksCapabilityProvider({
     bridge,
     contextState,
     executionLedger,
     operationCoordinator,
+    preflight,
     // §18: the Navisworks instance polling is this capability's OWN
     // background work — startAll() starts it, disposeAll() stops it.
     startPolling: () => startNavisworksInstancesPolling(
