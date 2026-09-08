@@ -54,16 +54,20 @@ interface SignatureState {
 /**
  * A canonical/stable call signature (§27). Excludes runId (the guard is already
  * keyed per-run), toolCallId, and any timestamp — those are random per call.
+ *
+ * P30.7 (Invariant G/§44): the operation scope is hashed as an OPAQUE record.
+ * The core guard does not name any capability's scope fields — they were once
+ * spelled out as instanceId / bridgeSessionId / documentInstanceId /
+ * documentRevision, which leaked the Navisworks concept into the loop guard.
+ * canonicalStringify sorts keys, so discriminating power is unchanged: same
+ * provider scope values ⇒ same signature, any difference ⇒ a different one.
  */
 export function toolCallSignature(call: DoomLoopCall): string {
   const canonical = canonicalStringify({
     toolName: call.toolName,
     // hashArguments is the same stable serializer the ledger/approval uses.
     arguments: stableArgs(call.normalizedArguments),
-    instanceId: call.scope.instanceId,
-    bridgeSessionId: call.scope.bridgeSessionId,
-    documentInstanceId: call.scope.documentInstanceId,
-    documentRevision: call.scope.documentRevision,
+    scope: call.scope,
   })
   return sha256(canonical)
 }

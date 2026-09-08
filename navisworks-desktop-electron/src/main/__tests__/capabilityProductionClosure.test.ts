@@ -134,6 +134,51 @@ describe('P30.4 legacy Navisworks fields never pollute other capabilities (§26/
   })
 })
 
+describe('P30.2/P30.7 normalize feeds the doom-loop signature path (§63)', () => {
+  it('the core hands the provider the NORMALIZED args, and the doom sig uses the same value', async () => {
+    // The fake provider drops blank optional strings (the real Navisworks
+    // behavior). The model emits the call with an empty `extra` field; the
+    // provider must observe the normalized ({text:'a'}) form, and the doom
+    // signature is computed from that SAME normalized value — so a later
+    // {text:'a'} call is the identical signature, not a "different call".
+    const receivedArgs: unknown[] = []
+    const provider: CapabilityProvider = {
+      manifest: { id: 'fake', name: 'Fake', description: 'fake', version: 1, firstParty: false },
+      tools: () => [fakeTool('fake_echo')],
+      contextSources: () => [],
+      ownsTool: (name) => name === 'fake_echo',
+      normalizeArguments: (_n, args) => {
+        const out: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(args)) if (v !== '') out[k] = v
+        return out
+      },
+      prepareRun: async () => ({ capabilityId: 'fake', state: { ready: true } }),
+      executeTool: async (input) => {
+        receivedArgs.push(input.arguments)
+        return { result: { ok: true } }
+      },
+    }
+    const capabilities = new CapabilityRegistry([provider])
+    const tools = createToolRegistry({ capabilities })
+    let turn = 0
+    const fetchImpl = vi.fn(async () => {
+      turn += 1
+      if (turn === 1) {
+        return ndjson([{ message: { role: 'assistant', content: '', tool_calls: [
+          { id: 'c1', function: { index: 0, name: 'fake_echo', arguments: { text: 'a', extra: '' } } },
+        ] } }])
+      }
+      return ndjson([{ message: { role: 'assistant', content: '完成。' } }])
+    }) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ capabilities, tools, fetchImpl })
+    await runtime.run({ sessionId: 's1', text: 'hi' })
+    // The provider received the normalized args (blank 'extra' removed), which
+    // is exactly the value toolCallSignature hashed for the doom guard (§63).
+    expect(receivedArgs[0]).toEqual({ text: 'a' })
+    // And normalization ran through the OWNER, not a navisworks check (§85).
+  })
+})
+
 describe('P30.5 run outcome reaches finishRun correctly (§88/§72)', () => {
   function runFinisher(outcomes: string[]): { capabilities: CapabilityRegistry; tools: ReturnType<typeof createToolRegistry> } {
     const provider: CapabilityProvider = {
