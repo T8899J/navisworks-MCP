@@ -179,6 +179,51 @@ describe('P30.2/P30.7 normalize feeds the doom-loop signature path (§63)', () =
   })
 })
 
+describe('P30.9/§92 Navisworks offline on the CAPABILITY path (not deprecated fields)', () => {
+  function offlineCapability(): CapabilityRegistry {
+    const bridge = {
+      async call<T>() { return { connected: false } as T },
+      async callToEndpoint<T>() { return { connected: false } as T },
+    } as unknown as ConstructorParameters<typeof NavisworksCapabilityProvider>[0]['bridge']
+    const contextState = new ContextState()
+    return new CapabilityRegistry([
+      new NavisworksCapabilityProvider({
+        bridge,
+        contextState,
+        // The production preflight reports an unselected/disconnected target.
+        preflight: {
+          prepare: async () => ({
+            unavailable: { code: 'TARGET_INSTANCE_DISCONNECTED', message: '当前没有选择 Navisworks 实例，请先选择一个实例。' },
+          }),
+        },
+      }),
+    ])
+  }
+
+  it('an ordinary "你好" chat still succeeds with the target offline (§65/§66/§92)', async () => {
+    const capabilities = offlineCapability()
+    const fetchImpl = vi.fn(async () => ndjson([{ message: { role: 'assistant', content: '你好！' } }])) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ capabilities, tools: createToolRegistry({ capabilities }), fetchImpl })
+    const result = await runtime.run({ sessionId: 's1', text: '你好' })
+    expect(result.isSuccess).toBe(true)
+    expect(result.message).toContain('你好')
+  })
+
+  it('asking for status still surfaces the disconnected error via the tool (§67/§92)', async () => {
+    const capabilities = offlineCapability()
+    const fetchImpl = vi.fn(async () => ndjson([{ message: { role: 'assistant', content: '', tool_calls: [
+      { id: 'c1', function: { index: 0, name: 'navisworks_status', arguments: {} } },
+    ] } }])) as unknown as typeof fetch
+    const runtime = new AgentRuntime({ capabilities, tools: createToolRegistry({ capabilities }), fetchImpl })
+    const result = await runtime.run({ sessionId: 's1', text: 'Navisworks 连接了吗？' })
+    // The capability's own preflight unavailable marker terminates the run with
+    // the clear TARGET_INSTANCE_DISCONNECTED code — not a silent global error
+    // during chat, and the diagnostic path is intact.
+    expect(result.isSuccess).toBe(false)
+    expect(result.errorCode).toBe('TARGET_INSTANCE_DISCONNECTED')
+  })
+})
+
 describe('P30.5 run outcome reaches finishRun correctly (§88/§72)', () => {
   function runFinisher(outcomes: string[]): { capabilities: CapabilityRegistry; tools: ReturnType<typeof createToolRegistry> } {
     const provider: CapabilityProvider = {
