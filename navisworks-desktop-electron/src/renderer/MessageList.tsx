@@ -100,6 +100,27 @@ function statusText(status: ToolCall['status']): string {
   }
 }
 
+/** A context-overflow paged tool result (Tool Result Delivery v2 §四/§七). */
+interface PagedToolResult {
+  delivery: 'paged'
+  resultRef: string
+  totalBytes: number
+}
+
+function isPagedToolResult(value: unknown): value is PagedToolResult {
+  return typeof value === 'object' && value !== null
+    && (value as { delivery?: unknown }).delivery === 'paged'
+    && typeof (value as { totalBytes?: unknown }).totalBytes === 'number'
+    && typeof (value as { resultRef?: unknown }).resultRef === 'string'
+}
+
+function formatKb(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const kb = bytes / 1024
+  if (kb < 1024) return `${kb % 1 === 0 ? kb.toFixed(0) : kb.toFixed(1)} KB`
+  return `${(kb / 1024).toFixed(1)} MB`
+}
+
 // Tool calls share the thinking block's streaming silhouette: a small inline
 // heading row plus an indented, left-ruled body — no full-width bar, and the
 // body never extends past the user bubble's right edge.
@@ -119,7 +140,18 @@ function ToolCallCard({ tool }: { tool: ToolCall }) {
             <pre>{displayValue(tool.arguments)}</pre>
           </div>
         ) : null}
-        {tool.result != null ? (
+        {isPagedToolResult(tool.result) ? (
+          // Tool Result Delivery v2 (§44): a context-overflow result is PAGED,
+          // not truncated — show the friendly "完整结果已保存 / 分页读取" line,
+          // never a raw dump and never the word 截断.
+          <div className="tool-detail-row">
+            <span className="tool-detail-label">结果</span>
+            <div className="tool-paged-note">
+              <span>完整结果已保存（共 {formatKb(tool.result.totalBytes)}）。</span>
+              <span>单次上下文无法完整容纳，需要时由 Curi 分页读取，数据未丢失。</span>
+            </div>
+          </div>
+        ) : tool.result != null ? (
           <div className="tool-detail-row">
             <span className="tool-detail-label">结果</span>
             <pre>{displayValue(tool.result)}</pre>

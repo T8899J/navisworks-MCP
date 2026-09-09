@@ -4169,3 +4169,14 @@ select:focus-visible,
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Tool Result Delivery v2 (§44): a paged (context-overflow) result is framed as
+   "saved + pageable", never as truncation. */
+.tool-paged-note {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text-secondary);
+  font-size: var(--text-label);
+  line-height: 1.5;
+}
