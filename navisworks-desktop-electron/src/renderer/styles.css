@@ -50,6 +50,11 @@
   --scrollbar-thumb: rgba(255, 255, 255, 0.16);
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
   --scroll-rail: 12px;
+  /* Custom tooltip (replaces the native OS title bubble — square corners, a
+     hard white border in dark mode / black in light mode). A gray rounded chip
+     that follows the theme. */
+  --tooltip-surface: #3d3d3d;
+  --tooltip-ink: #f4f4f4;
 }
 
 :root[data-theme="light"],
@@ -88,6 +93,8 @@
   --error-border: #e2aaa5;
   --scrollbar-thumb: rgba(0, 0, 0, 0.16);
   --scrollbar-thumb-hover: rgba(0, 0, 0, 0.32);
+  --tooltip-surface: #4d4d4d;
+  --tooltip-ink: #ffffff;
 }
 
 @media (prefers-color-scheme: light) {
@@ -126,6 +133,8 @@
     --error-border: #e2aaa5;
     --scrollbar-thumb: rgba(0, 0, 0, 0.16);
     --scrollbar-thumb-hover: rgba(0, 0, 0, 0.32);
+    --tooltip-surface: #4d4d4d;
+    --tooltip-ink: #ffffff;
   }
 }
 
@@ -4179,4 +4188,83 @@ select:focus-visible,
   color: var(--text-secondary);
   font-size: var(--text-label);
   line-height: 1.5;
+}
+
+/* ===== Custom tooltip (replaces the native OS title bubble) =====
+   Native `title` tooltips are drawn by the OS: square corners, an unstyleable
+   white border in dark mode / black in light mode. Elements that want a hover
+   hint use data-tip instead and get this theme-adaptive gray rounded chip.
+   Positioning defaults to ABOVE the element; data-tip-below="true" flips it for
+   controls near a top edge. */
+
+[data-tip] {
+  position: relative;
+}
+
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 200;
+  padding: 5px 10px;
+  color: var(--tooltip-ink);
+  background: var(--tooltip-surface);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px var(--shadow-color);
+  font-family: inherit;
+  font-size: calc(12px * var(--font-scale));
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  text-align: center;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 3px);
+  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+}
+
+/* The little diamond arrow pointing at the control (kept rotated on show). */
+[data-tip]::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 4px);
+  z-index: 201;
+  width: 8px;
+  height: 8px;
+  background: var(--tooltip-surface);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 3px) rotate(45deg);
+  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+}
+
+[data-tip-below="true"]::after {
+  top: calc(100% + 8px);
+  bottom: auto;
+  transform: translate(-50%, -3px);
+}
+
+[data-tip-below="true"]::before {
+  top: calc(100% + 4px);
+  bottom: auto;
+  transform: translate(-50%, -3px) rotate(45deg);
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+
+[data-tip]:hover::before,
+[data-tip]:focus-visible::before {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0) rotate(45deg);
 }

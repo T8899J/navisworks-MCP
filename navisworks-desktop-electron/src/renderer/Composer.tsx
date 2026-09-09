@@ -423,7 +423,7 @@ export function Composer({
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
                 aria-label="选择模型"
-                title="选择模型"
+                data-tip="选择模型"
                 onClick={() => setMenuOpen((open) => !open)}>
                 <span className="composer-menu-trigger-model">{activeModelName}</span>
                 {!reasoningDisabled && activeEffort !== undefined ? <>
@@ -441,7 +441,6 @@ export function Composer({
                     <button
                       type="button"
                       className="composer-picker-chip"
-                      title={activeModelName}
                       onClick={() => setPickerMode('model')}>
                       <span className="composer-picker-chip-name">{activeModelName}</span>
                       {!reasoningDisabled && activeEffort !== undefined ? <>
@@ -511,11 +510,11 @@ export function Composer({
               </div>
 
               {busy ? (
-                <button className="send-button stop" type="button" onClick={onStop} aria-label="停止生成" title="停止生成">
+                <button className="send-button stop" type="button" onClick={onStop} aria-label="停止生成" data-tip="停止生成">
                   <CircleStop aria-hidden="true" size={18} />
                 </button>
               ) : (
-                <button className="send-button" type="submit" disabled={!canSend} aria-label="发送消息" title="发送">
+                <button className="send-button" type="submit" disabled={!canSend} aria-label="发送消息" data-tip="发送">
                   <Send aria-hidden="true" size={18} />
                 </button>
               )}
