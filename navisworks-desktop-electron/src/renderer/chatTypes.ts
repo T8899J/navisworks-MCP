@@ -19,6 +19,7 @@ import type {
   ModelConfiguration,
   ModelInfo,
   ModelInputModality,
+  ModelMetadataSourceId,
   ModelOutputModality,
   ModelRef,
   ModelUsage,
@@ -549,6 +550,12 @@ export function normalizeModelUsage(value: unknown): ModelUsage | undefined {
   return Object.keys(result).length === 0 ? undefined : result
 }
 
+/** All ModelMetadataSourceId values the wire may carry (kept as a plain array
+ *  so the membership test below type-checks without an `includes` narrowing). */
+const MODEL_METADATA_SOURCES: readonly ModelMetadataSourceId[] = [
+  'local', 'profile', 'provider', 'model', 'unknown',
+]
+
 /**
  * Active ModelInfo from `model.info.get`. Malformed / missing pieces degrade
  * field by field — the UI must still render with an honest empty metadata set
@@ -609,10 +616,12 @@ export function normalizeModelInfo(value: unknown): ModelInfo | null {
         ? { requestPolicy: reasoning.requestPolicy }
         : {}),
     },
-    metadataSource: source.metadataSource === 'local'
-      || source.metadataSource === 'profile'
-      || source.metadataSource === 'provider'
-      ? source.metadataSource
+    // Model Configuration v2 (§22): 'model' must be preserved here. This
+    // whitelist previously omitted it, so a per-model override resolved by main
+    // was coerced to 'unknown' → Composer hid the known window → the ring fell
+    // back to "Auto". Accept every known ModelMetadataSourceId value.
+    metadataSource: MODEL_METADATA_SOURCES.includes(source.metadataSource as ModelMetadataSourceId)
+      ? source.metadataSource as ModelMetadataSourceId
       : 'unknown',
   }
 }
