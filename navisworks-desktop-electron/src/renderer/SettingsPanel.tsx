@@ -227,9 +227,10 @@ export function SettingsPanel({
   const [providerApiKeyText, setProviderApiKeyText] = useState('')
   const [editingApiKey, setEditingApiKey] = useState(false)
   const [pendingProfileDelete, setPendingProfileDelete] = useState(false)
-  // 高级配置 → 上下文窗口: Auto follows the provider; Fixed pins a number.
-  const [profileContextMode, setProfileContextMode] = useState<'auto' | 'fixed'>('auto')
-  const [profileContextText, setProfileContextText] = useState('')
+  // Model Configuration v2 (§41/§42): the profile-level 高级配置 上下文窗口 editor
+  // is REMOVED — per-model overrides via 编辑模型配置 are the primary entry now.
+  // profile.advanced.contextWindowTokens stays in the data (legacy fallback for
+  // the resolver) but is no longer edited here, so a save must preserve it.
   // Model Configuration v2 (§26): which model's config dialog is open.
   const [modelConfigTarget, setModelConfigTarget] = useState<{
     providerId: string
@@ -277,26 +278,16 @@ export function SettingsPanel({
     setEditingApiKey(false)
     setPendingProfileDelete(false)
     setCloudModels([])
-    const fixed = selectedProfile.advanced.contextWindowTokens
-    setProfileContextMode(fixed == null ? 'auto' : 'fixed')
-    setProfileContextText(fixed == null ? '' : String(fixed))
   }, [selectedProfile?.id, selectedProfile?.name, selectedProfile?.baseUrl, selectedProfile?.model])
 
   /**
-   * Build the FULL advanced payload for the profile: the context-window edit
-   * spreads the existing value so the other compatibility settings survive.
+   * Preserve the profile's existing advanced block verbatim. The context-window
+   * editor is gone (superseded by the per-model dialog), so a save of the name /
+   * URL / key / model must NOT clobber a legacy contextWindowTokens a previous
+   * build stored — it stays the resolver's lowest-priority fallback (§42).
    */
-  const resolveProfileAdvanced = (): ApiProfileAdvancedSettings => {
-    const base = selectedProfile?.advanced ?? DEFAULT_API_PROFILE_ADVANCED
-    if (profileContextMode === 'auto') {
-      return { ...base, contextWindowTokens: null }
-    }
-    const parsed = Number(profileContextText)
-    const bounded = Number.isFinite(parsed)
-      ? Math.min(2_000_000, Math.max(1_024, Math.trunc(parsed)))
-      : 128_000
-    return { ...base, contextWindowTokens: bounded }
-  }
+  const resolveProfileAdvanced = (): ApiProfileAdvancedSettings =>
+    selectedProfile?.advanced ?? DEFAULT_API_PROFILE_ADVANCED
 
   const refreshModels = async () => {
     setRefreshBusy(true)
@@ -664,54 +655,6 @@ export function SettingsPanel({
                       </button>
                     </div>
                   </div>
-
-                  <details className="profile-advanced">
-                    <summary>高级配置</summary>
-                    <div className="provider-field">
-                      <div className="provider-field-heading">
-                        <span className="provider-field-label">上下文窗口</span>
-                        <div className="execution-mode-choice" role="group" aria-label="上下文窗口模式">
-                          <button
-                            type="button"
-                            className={`execution-mode-option${profileContextMode === 'auto' ? ' is-active' : ''}`}
-                            aria-pressed={profileContextMode === 'auto'}
-                            onClick={() => setProfileContextMode('auto')}>
-                            Auto
-                          </button>
-                          <button
-                            type="button"
-                            className={`execution-mode-option${profileContextMode === 'fixed' ? ' is-active' : ''}`}
-                            aria-pressed={profileContextMode === 'fixed'}
-                            onClick={() => setProfileContextMode('fixed')}>
-                            固定
-                          </button>
-                        </div>
-                      </div>
-                      {profileContextMode === 'fixed' ? (
-                        <div className="cloud-model-row">
-                          <span className="cloud-model-label">窗口大小</span>
-                          <input
-                            id="profile-context-window"
-                            className="execution-number-input"
-                            type="number"
-                            inputMode="numeric"
-                            min={1024}
-                            max={2000000}
-                            step={1}
-                            value={profileContextText}
-                            placeholder="128000"
-                            onChange={(event) => setProfileContextText(event.currentTarget.value)}
-                          />
-                          <span className="cloud-model-label">tokens</span>
-                        </div>
-                      ) : null}
-                      <small className="provider-field-hint">
-                        {profileContextMode === 'auto'
-                          ? 'Auto：优先使用 Provider 能力；无法确定时使用安全预算。'
-                          : '固定：该 API 配置始终使用此上下文窗口（1024–2000000 tokens）。'}
-                      </small>
-                    </div>
-                  </details>
 
                   <div className="api-profile-actions">
                     <button className="secondary-button" type="button" disabled={!settings.apiEnabled || !selectedProfile.baseUrl || !selectedProfile.model} onClick={() => void onProviderChange({ activeApiProfileId: selectedProfile.id, preferApiModel: true })}>
