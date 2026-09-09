@@ -349,11 +349,13 @@ export function Composer({
             </div>
 
             <div className="composer-controls" ref={controlsRef}>
-              {/* Context-window ring: fills with session usage of the
-                  active model's window; hover shows the details panel. */}
+              {/* Context-window ring: fills with session usage of the active
+                  model's window. The native hover tooltip is intentionally NOT
+                  set here (the details are already in the popover on click) —
+                  the previous title="上下文窗口 …" duplicated the popover and
+                  the user asked to drop it. */}
               <span
-                className={`context-ring${usingApi ? ' api' : ''}${ring.mode === 'auto' ? ' unknown' : ''}`}
-                title={ring.title}>
+                className={`context-ring${usingApi ? ' api' : ''}${ring.mode === 'auto' ? ' unknown' : ''}`}>
                 <svg viewBox="0 0 22 22" aria-hidden="true">
                   <circle className="context-ring-track" cx="11" cy="11" r="9" />
                   {contextPct > 0 ? (
@@ -420,9 +422,8 @@ export function Composer({
                 className="composer-menu-trigger"
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
-                title={reasoningDisabled || activeEffort === undefined
-                  ? activeModelName
-                  : `${activeModelName} · ${REASONING_EFFORT_LABEL[activeEffort]}`}
+                aria-label="选择模型"
+                title="选择模型"
                 onClick={() => setMenuOpen((open) => !open)}>
                 <span className="composer-menu-trigger-model">{activeModelName}</span>
                 {!reasoningDisabled && activeEffort !== undefined ? <>
