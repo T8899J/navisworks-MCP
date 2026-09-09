@@ -894,6 +894,51 @@ describe('desktop IPC settings routes', () => {
     }
   })
 
+  it('P30.7 fix: settings.update persists modelConfigurations and settings.get echoes it back', async () => {
+    // This is the reported bug: 编辑模型配置 saved nothing. The IPC
+    // PersistenceFacade dropped patch.modelConfigurations on WRITE and
+    // toDesktopSettings dropped it on READ — the repository layer round-tripped
+    // fine (tested in sessionRepository.test) but the facade did not, so this
+    // IPC-level regression belongs HERE, not only at the store.
+    const harness = createHarness({
+      ollama: stubAgent(),
+      settings: statefulSettingsStub({ ...baseSettings }),
+    })
+    const configurations = [{
+      ref: { providerId: 'api:p1', modelId: 'qwen3.8-max' },
+      contextWindowTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+      inputModalities: ['text', 'image'],
+      outputModalities: ['text'],
+    }]
+    try {
+      const updated = await harness.invoke('settings.update', {
+        settings: { modelConfigurations: configurations },
+      })
+      expect(updated).toMatchObject({ ok: true })
+      if (updated.ok) {
+        expect((updated.data as { modelConfigurations: unknown[] }).modelConfigurations)
+          .toEqual(configurations)
+      }
+      const got = await harness.invoke('settings.get', undefined)
+      expect(got).toMatchObject({ ok: true })
+      if (got.ok) {
+        expect((got.data as { modelConfigurations: unknown[] }).modelConfigurations)
+          .toEqual(configurations)
+      }
+      // An unrelated later patch must NOT wipe the stored model configs (§20/§42).
+      const patched = await harness.invoke('settings.update', {
+        settings: { themeMode: 'dark' },
+      })
+      if (patched.ok) {
+        expect((patched.data as { modelConfigurations: unknown[] }).modelConfigurations)
+          .toEqual(configurations)
+      }
+    } finally {
+      await harness.dispose()
+    }
+  })
+
   it('saves an API profile without returning its plaintext key', async () => {
     const harness = createHarness({
       ollama: stubAgent(),

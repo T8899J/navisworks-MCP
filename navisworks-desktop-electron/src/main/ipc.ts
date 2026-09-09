@@ -1222,6 +1222,14 @@ export class PersistenceFacade {
           : current.toolPermissions,
         execution: patch.execution ? normalizeExecutionSettings(patch.execution) : current.execution,
         storage: patch.storage ? normalizeStorageSettings(patch.storage) : current.storage,
+        // Model Configuration v2: this was the save-side drop — the patch's
+        // per-model overrides were never copied into the persisted snapshot, so
+        // editing 模型配置 appeared to do nothing. Preserve the current list when
+        // the patch omits it (an updateSettings for another field must not wipe
+        // it), and normalize the modality/ref shape on the way in.
+        modelConfigurations: patch.modelConfigurations === undefined
+          ? current.modelConfigurations
+          : normalizeModelConfigurations(patch.modelConfigurations),
         activeApiProfileId: validProfileId(
           patch.activeApiProfileId,
           current.activeApiProfileId,
@@ -1533,6 +1541,40 @@ function defaultPersistedSettings(): PersistedSettings {
   }
 }
 
+const MODALITY_INPUTS = ['text', 'image', 'video', 'pdf'] as const
+const MODALITY_OUTPUTS = ['text', 'image'] as const
+
+/** Coerce the IPC patch's per-model configs into the persisted ModelConfiguration
+ *  shape: structured ref required, numerics passthrough (schema already bounded),
+ *  modalities filtered to the known enum, ref-less rows dropped. Mirrors the
+ *  renderer normalizeModelConfigurations so main never trusts the wire shape. */
+function normalizeModelConfigurations(
+  values: NonNullable<SettingsPatch['modelConfigurations']>,
+): NonNullable<PersistedSettings['modelConfigurations']> {
+  const seen = new Set<string>()
+  const out: NonNullable<PersistedSettings['modelConfigurations']> = []
+  for (const value of values) {
+    const providerId = typeof value.ref.providerId === 'string' ? value.ref.providerId.trim() : ''
+    const modelId = typeof value.ref.modelId === 'string' ? value.ref.modelId.trim() : ''
+    if (providerId === '' || modelId === '') continue
+    const key = `${providerId} ${modelId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({
+      ref: { providerId, modelId },
+      ...(value.contextWindowTokens == null ? {} : { contextWindowTokens: value.contextWindowTokens }),
+      ...(value.maxOutputTokens == null ? {} : { maxOutputTokens: value.maxOutputTokens }),
+      ...(value.inputModalities === undefined
+        ? {}
+        : { inputModalities: value.inputModalities.filter((m) => (MODALITY_INPUTS as readonly string[]).includes(m)) }),
+      ...(value.outputModalities === undefined
+        ? {}
+        : { outputModalities: value.outputModalities.filter((m) => (MODALITY_OUTPUTS as readonly string[]).includes(m)) }),
+    })
+  }
+  return out
+}
+
 function toDesktopSettings(settings: PersistedSettings): AppSettings {
   const reasoningMode = normalizeReasoningEffort(settings.reasoningMode)
   const models = settings.models.includes(settings.selectedModel)
@@ -1564,7 +1606,21 @@ function toDesktopSettings(settings: PersistedSettings): AppSettings {
     activeApiProfileId: settings.activeApiProfileId ?? null,
     toolPermissions: settings.toolPermissions ?? {},
     execution: settings.execution ?? { ...DEFAULT_EXECUTION_SETTINGS },
-    storage: settings.storage ?? { ...DEFAULT_STORAGE_SETTINGS }
+    storage: settings.storage ?? { ...DEFAULT_STORAGE_SETTINGS },
+    // Model Configuration v2: the read-side counterpart of the save fix — this
+    // was the second place that dropped modelConfigurations, so even a stored
+    // override came back empty to the Settings UI and the context ring.
+    modelConfigurations: (settings.modelConfigurations ?? []).map((configuration) => ({
+      ref: { providerId: configuration.ref.providerId, modelId: configuration.ref.modelId },
+      ...(configuration.contextWindowTokens == null
+        ? {} : { contextWindowTokens: configuration.contextWindowTokens }),
+      ...(configuration.maxOutputTokens == null
+        ? {} : { maxOutputTokens: configuration.maxOutputTokens }),
+      ...(configuration.inputModalities === undefined
+        ? {} : { inputModalities: [...configuration.inputModalities] }),
+      ...(configuration.outputModalities === undefined
+        ? {} : { outputModalities: [...configuration.outputModalities] }),
+    })),
   }
 }
 
