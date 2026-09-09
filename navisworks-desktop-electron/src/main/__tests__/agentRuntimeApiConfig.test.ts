@@ -426,8 +426,8 @@ describe('context window source resolution (Cases 1–4)', () => {
     expect(parsed).toMatchObject({ contextWindowTokens: 128_000, contextWindowSource: 'profile' })
   })
 
-  it.each(['local', 'profile', 'provider', 'fallback'] as const)(
-    'Cases A–D: eventSchemas[chat.done] accepts contextWindowSource=%s',
+  it.each(['local', 'profile', 'provider', 'fallback', 'model'] as const)(
+    'Cases A–E: eventSchemas[chat.done] accepts contextWindowSource=%s',
     (source) => {
       const parsed = eventSchemas['chat.done'].parse({
         kind: 'done',
@@ -443,6 +443,26 @@ describe('context window source resolution (Cases 1–4)', () => {
     },
   )
 
+  it('§53: the REAL chat.done schema carries modelRef (never silently drops it)', () => {
+    const parsed = eventSchemas['chat.done'].parse({
+      kind: 'done',
+      runId: 'run-1',
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+      messageId: 'message-1',
+      content: '完成。',
+      contextWindowTokens: 1_000_000,
+      contextWindowSource: 'model',
+      modelRef: { providerId: 'api:x', modelId: 'qwen3.8-max' },
+    })
+    // A field present in TS but rejected/omitted by the strict runtime schema is
+    // exactly the old chat.done drift bug — assert it survives validation.
+    expect(parsed).toMatchObject({
+      contextWindowSource: 'model',
+      modelRef: { providerId: 'api:x', modelId: 'qwen3.8-max' },
+    })
+  })
+
   it('Case E: a legacy done without contextWindowSource stays valid (no migration)', () => {
     const parsed = eventSchemas['chat.done'].parse({
       kind: 'done',
@@ -455,5 +475,31 @@ describe('context window source resolution (Cases 1–4)', () => {
     })
     expect(parsed).toMatchObject({ contextWindowTokens: 32_768 })
     expect('contextWindowSource' in parsed).toBe(false)
+  })
+
+  it('§35/§39: a resolved 1M/128K model config drives effectiveWindow AND the wire output cap', async () => {
+    const harness = makeHarness([() => textTurn('完成。')])
+    const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl: harness.fetchImpl })
+    // The endpoint is Auto (advanced.contextWindowTokens null → old code fell to
+    // the 32K fallback); the RESOLVED runtimeModel carries the model override.
+    const result = await runtime.run({
+      text: '你好',
+      api: { baseUrl: API_BASE, model: 'qwen-max', advanced: autoAdvanced() },
+      runtimeModel: {
+        ref: { providerId: 'api:x', modelId: 'qwen-max' },
+        displayName: 'qwen-max',
+        provider: { id: 'api:x', displayName: 'X', kind: 'openai-compatible' },
+        capabilities: { tools: true, temperature: true },
+        limits: { context: 1_000_000, output: 128_000 },
+        reasoning: { modes: [] },
+        metadataSource: 'model',
+      },
+    })
+    expect(result.isSuccess).toBe(true)
+    expect(result.contextWindowTokens).toBe(1_000_000)
+    expect(result.contextWindowSource).toBe('model')
+    // §39: the SAME 128K cap rides on the wire, not the old 4096 reserve.
+    const body = harness.bodies[0]!
+    expect(body.max_tokens).toBe(128_000)
   })
 })

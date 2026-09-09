@@ -151,6 +151,60 @@ describe('WPF-compatible JSON repositories', () => {
     expect(loaded?.disabledTools).toEqual(['navisworks_set_visibility', 'files_read'])
   })
 
+  it('round-trips per-model configurations exactly, and an entry without a valid ref is dropped (§52/§19)', async () => {
+    const paths = await createPaths()
+    const repository = new JsonSettingsRepository(paths)
+    await expect(repository.save({
+      ...DEFAULT_APP_SETTINGS,
+      modelConfigurations: [
+        {
+          ref: { providerId: 'api:profile_x', modelId: 'qwen3.8-max' },
+          contextWindowTokens: 1_000_000,
+          maxOutputTokens: 128_000,
+          inputModalities: ['text', 'image'],
+          outputModalities: ['text'],
+        },
+        // malformed: no structured ref → dropped, never an orphan override.
+        { ref: { providerId: '', modelId: '' } } as never,
+      ],
+    })).resolves.toBe(true)
+
+    const saved = await readFile(paths.settingsFile, 'utf8')
+    // ModelRef stays a structured OBJECT on disk (§19: never a joined string).
+    expect(saved).toContain('"ModelConfigurations"')
+    expect(saved).toContain('"providerId"')
+
+    const loaded = await repository.load()
+    expect(loaded?.modelConfigurations).toEqual([
+      {
+        ref: { providerId: 'api:profile_x', modelId: 'qwen3.8-max' },
+        contextWindowTokens: 1_000_000,
+        maxOutputTokens: 128_000,
+        inputModalities: ['text', 'image'],
+        outputModalities: ['text'],
+      },
+    ])
+  })
+
+  it('old settings with no modelConfigurations key load cleanly as absent (§20/§51)', async () => {
+    const paths = await createPaths()
+    await writeFile(paths.settingsFile, JSON.stringify({
+      SelectedModel: 'qwen3.5:9b',
+      Models: ['qwen3.5:9b'],
+      ReasoningMode: 'low',
+      ThemeMode: 'system',
+      GpuVramGb: 8,
+      CustomProfileContextWindowTokens: 32768,
+      CustomProfileNumPredict: 2048,
+      // NOTE: no ModelConfigurations field at all (a pre-v2 settings.json).
+      DisabledTools: ['navisworks_status'],
+    }), 'utf8')
+    const loaded = await new JsonSettingsRepository(paths).load()
+    expect(loaded).not.toBeNull()
+    expect(loaded?.disabledTools).toEqual(['navisworks_status'])
+    expect(loaded?.modelConfigurations).toBeUndefined()
+  })
+
   it('round-trips the font scale and clamps hand-edited extremes', async () => {
     const paths = await createPaths()
     const repository = new JsonSettingsRepository(paths)

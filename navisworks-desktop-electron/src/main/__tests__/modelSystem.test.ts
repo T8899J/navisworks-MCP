@@ -42,6 +42,99 @@ function profileOf(id: string, model: string, advancedOverrides: Partial<typeof 
   }
 }
 
+describe('Model Configuration v2 — per-model overrides resolve into ModelInfo (§21/§23/§48/§40)', () => {
+  const qwenMaxEndpoint: ResolvedChatEndpoint = {
+    baseUrl: 'https://px.example.com/v1', apiKey: '', model: 'qwen3.8-max',
+    advanced: { ...DEFAULT_API_PROFILE_ADVANCED, contextWindowTokens: null },
+  }
+  it('a model override sets limits.context=1M + limits.output=128K + source model', () => {
+    const settings = profileSettings({
+      apiEnabled: true, preferApiModel: true, activeApiProfileId: 'x',
+      apiProfiles: [profileOf('x', 'qwen3.8-max')],
+      modelConfigurations: [{
+        ref: { providerId: 'api:x', modelId: 'qwen3.8-max' },
+        contextWindowTokens: 1_000_000,
+        maxOutputTokens: 128_000,
+        inputModalities: ['text', 'image'],
+        outputModalities: ['text'],
+      }],
+    })
+    const resolution = resolveActiveModel(settings, qwenMaxEndpoint)
+    if (resolution.status !== 'resolved') throw new Error('expected resolved')
+    expect(resolution.info.limits.context).toBe(1_000_000)
+    expect(resolution.info.limits.output).toBe(128_000)
+    expect(resolution.info.metadataSource).toBe('model')
+    expect(resolution.info.capabilities.modalities).toEqual({
+      input: ['text', 'image'], output: ['text'],
+    })
+  })
+
+  it('§40: switching to a model with NO override does not inherit 1M', () => {
+    const modelConfigurations = [{
+      ref: { providerId: 'api:x' as const, modelId: 'qwen3.8-max' },
+      contextWindowTokens: 1_000_000,
+      inputModalities: ['text' as const],
+      outputModalities: ['text' as const],
+    }]
+    const base = {
+      apiEnabled: true, preferApiModel: true, activeApiProfileId: 'x',
+      apiProfiles: [profileOf('x', 'qwen3.8-max')], modelConfigurations,
+    }
+    const switched = profileSettings({
+      ...base,
+      apiProfiles: [profileOf('x', 'qwen-plus')],
+      modelConfigurations, // still keyed to qwen3.8-max
+    })
+    const resolution = resolveActiveModel(switched, {
+      baseUrl: 'https://px.example.com/v1', apiKey: '', model: 'qwen-plus',
+      advanced: { ...DEFAULT_API_PROFILE_ADVANCED, contextWindowTokens: null },
+    })
+    if (resolution.status !== 'resolved') throw new Error('expected resolved')
+    // qwen-plus has no override → NO 1M leaks onto it; profile Auto → unknown.
+    expect(resolution.info.limits.context).toBeUndefined()
+    expect(resolution.info.metadataSource).not.toBe('model')
+    // Switch BACK to qwen3.8-max restores the 1M.
+    const back = resolveActiveModel(
+      profileSettings({ ...base, apiProfiles: [profileOf('x', 'qwen3.8-max')] }),
+      qwenMaxEndpoint,
+    )
+    if (back.status !== 'resolved') throw new Error('expected resolved')
+    expect(back.info.limits.context).toBe(1_000_000)
+  })
+
+  it('§21: model override outranks the legacy profile-advanced window', () => {
+    const settings = profileSettings({
+      apiEnabled: true, preferApiModel: true, activeApiProfileId: 'x',
+      apiProfiles: [profileOf('x', 'qwen3.8-max', { contextWindowTokens: 200_000 })],
+      modelConfigurations: [{
+        ref: { providerId: 'api:x', modelId: 'qwen3.8-max' },
+        contextWindowTokens: 1_000_000,
+      }],
+    })
+    const resolution = resolveActiveModel(settings, {
+      baseUrl: 'https://px.example.com/v1', apiKey: '', model: 'qwen3.8-max',
+      advanced: { ...DEFAULT_API_PROFILE_ADVANCED, contextWindowTokens: 200_000 },
+    })
+    if (resolution.status !== 'resolved') throw new Error('expected resolved')
+    expect(resolution.info.limits.context).toBe(1_000_000) // model beats profile
+    expect(resolution.info.metadataSource).toBe('model')
+  })
+
+  it('§36: a local Ollama model with a context override reaches that window', () => {
+    const settings = profileSettings({
+      selectedModel: 'qwen3.5:9b',
+      modelConfigurations: [{
+        ref: { providerId: 'ollama', modelId: 'qwen3.5:9b' },
+        contextWindowTokens: 65_536,
+      }],
+    })
+    const resolution = resolveActiveModel(settings, null)
+    if (resolution.status !== 'resolved') throw new Error('expected resolved')
+    expect(resolution.info.limits.context).toBe(65_536)
+    expect(resolution.info.metadataSource).toBe('model')
+  })
+})
+
 describe('Model Identity — resolveActiveModelRef (§52)', () => {
   it('Case 1: local settings resolve to the ollama provider with the selected model', () => {
     const settings = profileSettings({ selectedModel: 'qwen3.5:9b' })

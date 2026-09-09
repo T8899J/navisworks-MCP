@@ -24,6 +24,7 @@ function settingsOf(overrides: Partial<DesktopSettings> = {}): DesktopSettings {
     toolPermissions: {},
     execution: { ...DEFAULT_EXECUTION_SETTINGS },
     storage: { ...DEFAULT_STORAGE_SETTINGS },
+    modelConfigurations: [],
     ...overrides,
   }
 }

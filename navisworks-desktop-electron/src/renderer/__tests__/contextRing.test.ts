@@ -118,6 +118,72 @@ describe('resolveContextRingState — pre-run states (Case 7/8 UI, 场景 D)', (
   })
 })
 
+describe('resolveContextRingState — Model Configuration v2: the ring follows the ACTIVE model (§49 A–D)', () => {
+  const QWEN_REF = { providerId: 'api:x', modelId: 'qwen3.8-max' }
+  const OTHER_REF = { providerId: 'api:x', modelId: 'qwen-plus' }
+
+  it('Case A: a stale 32K fallback is superseded by the current 1M active model', () => {
+    const state = resolveContextRingState({
+      ...BASE_API_INPUT,
+      // The LAST finished run reported a 32K fallback…
+      reportedWindow: 32_768, reportedSource: 'fallback',
+      // …but the CURRENT active model is configured to 1M → the ring shows 1M.
+      activeModelContextWindow: 1_000_000, activeModelMetadataSource: 'model',
+      activeModelRef: QWEN_REF, reportedModelRef: QWEN_REF,
+    })
+    expect(state.total).toBe(1_000_000)
+    expect(state.sourceLabel).toBe('模型自定义')
+    expect(state.total).not.toBe(32_768)
+  })
+
+  it('Case B: a saved override flips the ring to 1M BEFORE any new run', () => {
+    const state = resolveContextRingState({
+      ...BASE_API_INPUT,
+      usedTokens: 0,
+      // No reportedWindow at all — only the freshly-resolved active model.
+      profileContextWindowTokens: null,
+      activeModelContextWindow: 1_000_000, activeModelMetadataSource: 'model',
+      activeModelRef: QWEN_REF,
+    })
+    expect(state.mode).toBe('known')
+    expect(state.total).toBe(1_000_000)
+    expect(state.sourceLabel).toBe('模型自定义')
+  })
+
+  it('Case C: a finished run reports window=1M source=model', () => {
+    const state = resolveContextRingState({
+      ...BASE_API_INPUT,
+      reportedWindow: 1_000_000, reportedSource: 'model', reportedModelRef: QWEN_REF,
+      activeModelContextWindow: 1_000_000, activeModelMetadataSource: 'model', activeModelRef: QWEN_REF,
+    })
+    expect(state.total).toBe(1_000_000)
+    expect(state.sourceLabel).toBe('模型自定义')
+  })
+
+  it('Case D: switching models drops a stale window from the previous model', () => {
+    // No active window known yet (model just switched); the reported 1M belongs
+    // to the PREVIOUS model, so it must NOT be shown for the new one.
+    const state = resolveContextRingState({
+      ...BASE_API_INPUT,
+      usedTokens: 0,
+      profileContextWindowTokens: null,
+      reportedWindow: 1_000_000, reportedSource: 'model', reportedModelRef: QWEN_REF,
+      activeModelRef: OTHER_REF, // different model → stale report rejected
+    })
+    expect(state.total).not.toBe(1_000_000)
+    expect(state.mode).toBe('auto')
+  })
+
+  it('the reported window is trusted when it belongs to the current model', () => {
+    const state = resolveContextRingState({
+      ...BASE_API_INPUT,
+      reportedWindow: 200_000, reportedSource: 'provider', reportedModelRef: OTHER_REF,
+      activeModelRef: OTHER_REF, // match → usable even without an active context number
+    })
+    expect(state.total).toBe(200_000)
+  })
+})
+
 describe('formatTokenCount (§62)', () => {
   it('renders K/M units with honest decimals', () => {
     expect(formatTokenCount(1_234)).toBe('1.2K')

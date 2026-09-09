@@ -360,7 +360,7 @@ describe('AgentRuntime streaming tool loop', () => {
     )
   })
 
-  it('caps the local context window at 32K when building num_ctx', async () => {
+  it('honors an explicit local context window (32K is a default, not a cap §36)', async () => {
     const bridge: AgentBridgeClient = { async call<T>() { return undefined as T } }
     const requestBodies: Array<Record<string, unknown>> = []
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -369,12 +369,14 @@ describe('AgentRuntime streaming tool loop', () => {
         { message: { role: 'assistant', content: '好。' }, prompt_eval_count: 1, eval_count: 1 },
       ])
     }) as unknown as typeof fetch
+    // Model Configuration v2 §36/§50: a configured 65536 local window reaches
+    // num_ctx verbatim — clampLocalContextWindow no longer forces 32768.
     const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl, contextWindow: 65536 })
 
     await runtime.run('你好')
 
     const options = requestBodies[0]?.options as Record<string, unknown>
-    expect(options.num_ctx).toBe(32768)
+    expect(options.num_ctx).toBe(65536)
   })
 
   it('auto-compacts older rounds when usage crosses 90% of the window', async () => {
@@ -463,9 +465,9 @@ describe('AgentRuntime streaming tool loop', () => {
     expect(manual).toBe('本地最终回答')
   })
 
-  it('compacts local runs against the clamped 32K num_ctx, not the raw configured window', async () => {
-    // Drive `rounds` tool-call responses (each pushing usage to 30000) and then a plain
-    // text answer. The bridge call itself also returns a valid tool result.
+  it('compacts local runs against the REAL configured window, no longer a 32K clamp (§36)', async () => {
+    // Drive `rounds` tool-call responses (each pushing usage to 30000) then a text
+    // answer. The bridge call returns a valid tool result.
     const scripted = (rounds: number, usage: number, reply: string) => {
       const bridge: AgentBridgeClient = { async call<T>() { return { connected: true } as T } }
       let calls = 0
@@ -487,23 +489,22 @@ describe('AgentRuntime streaming tool loop', () => {
       return { bridge, fetchImpl }
     }
 
-    // Window 65536 is clamped to num_ctx 32768 → trigger 0.9*32768 = 29491.
-    // Usage 30000 is above the clamped trigger but far below 0.9*65536 = 58982,
-    // so only a run that compares against the CLAMPED window will compact here.
-    const clamped = scripted(5, 30_000, '最终回答。')
-    const compactedResult = await new AgentRuntime({
-      bridgeClient: clamped.bridge, fetchImpl: clamped.fetchImpl, contextWindow: 65_536,
+    // §36: 65536 is NO LONGER clamped to 32768. Trigger = 0.85*65536 = 55705, so
+    // usage 30000 does NOT compact. (Under the old clamp the trigger was 0.85*32768
+    // = 27852 and this same script DID compact — the inversion proves the cap is gone.)
+    const big = scripted(5, 30_000, '最终回答。')
+    const noCompact = await new AgentRuntime({
+      bridgeClient: big.bridge, fetchImpl: big.fetchImpl, contextWindow: 65_536,
     }).run('多轮查询')
-    expect(compactedResult.compacted).toBe(true)
+    expect(noCompact.compacted).toBeUndefined()
 
-    // Negative control: identical script with usage BELOW even the clamped trigger must
-    // NOT compact — proving the previous assertion reflects the window policy, not a
-    // size effect from the five rounds themselves.
-    const below = scripted(5, 10_000, '最终回答。')
-    const untouchedResult = await new AgentRuntime({
-      bridgeClient: below.bridge, fetchImpl: below.fetchImpl, contextWindow: 65_536,
+    // Positive control: a 32768 window still compacts at the same usage — proving the
+    // difference above was the window policy, not a size artifact of the five rounds.
+    const small = scripted(5, 30_000, '最终回答。')
+    const didCompact = await new AgentRuntime({
+      bridgeClient: small.bridge, fetchImpl: small.fetchImpl, contextWindow: 32_768,
     }).run('多轮查询')
-    expect(untouchedResult.compacted).toBeUndefined()
+    expect(didCompact.compacted).toBe(true)
   })
 
   it('delivers a large tool result COMPLETELY — no fixed character truncation (Tool Result v2)', async () => {
