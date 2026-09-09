@@ -506,9 +506,11 @@ describe('AgentRuntime streaming tool loop', () => {
     expect(untouchedResult.compacted).toBeUndefined()
   })
 
-  it('adds a structural digest to a truncated oversized tool result', async () => {
+  it('delivers a large tool result COMPLETELY — no fixed character truncation (Tool Result v2)', async () => {
     const bigItems = Array.from({ length: 200 }, (_, i) => ({ id: `id${i}`, name: `泵体-${i}` }))
     const bridge: AgentBridgeClient = {
+      // The plugin's own domain field `truncated:true` = "扫描尚未完成" (§12/§14),
+      // a Navisworks pagination CONTINUATION hint — NOT Curi character truncation.
       async call<T>() { return { items: bigItems, total: 300, truncated: true } as T },
     }
     const bodies: Array<Record<string, unknown>> = []
@@ -525,18 +527,23 @@ describe('AgentRuntime streaming tool loop', () => {
     }) as unknown as typeof fetch
     await new AgentRuntime({ bridgeClient: bridge, fetchImpl }).run({
       text: '查大量构件',
-      // Auto sizing would now let this ~16KB payload through on the 32K local
-      // window; the legacy truncation notice is exercised in fixed mode.
+      // The DEPRECATED fixed char cap is accepted by the schema but MUST no
+      // longer slice the result (§15/§47): the full 200-item payload goes to the
+      // model because it fits the window.
       runtimeConfig: { ...DEFAULT_RUNTIME_SETTINGS, toolResultMode: 'fixed', toolResultMaxChars: 4_000 },
     })
     const toolMessage = toolMessageContent(bodies[1])
-    // The oversized wire result was sliced, but the notice still reports the item count and
-    // that the full payload remains locally recallable (P3-C: not a blind slice).
-    expect(toolMessage).toContain('结构：items=200')
-    expect(toolMessage).toContain('完整结果仍保留在本地')
+    // Every item survives — the LAST id is present (no slice(0, maxChars)).
+    expect(toolMessage).toContain('泵体-199')
+    // The removed truncation machinery never fires again: no char-clip notice,
+    // no structural-digest line, no "完整结果仍保留在本地" truncation caveat.
+    expect(toolMessage).not.toContain('已截断至')
+    expect(toolMessage).not.toContain('结构：items=')
+    expect(toolMessage).not.toContain('完整结果仍保留在本地')
+    // The Navisworks DOMAIN continuation semantics (scan not complete) is kept
+    // intact — that is capability safety, not Curi truncation (§12).
     expect(toolMessage).toContain('搜索完成：返回 200 个构件，共 300 个，结果尚未完整。')
     expect(toolMessage).toContain('使用完全相同的搜索参数继续调用 navisworks_find_items')
-    expect(toolMessage).toContain('"artifacts":["id0","id1"')
   })
 
   it('maps the reasoning effort onto the local think flag', async () => {

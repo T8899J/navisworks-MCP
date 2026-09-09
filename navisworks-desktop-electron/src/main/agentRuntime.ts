@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
+  type AgentToolContract,
   type AgentToolName,
   ToolCatalogError,
 } from './toolCatalog'
@@ -11,7 +12,12 @@ import type {
   CapabilityRunSet,
   CapabilityToolExecutionResult,
 } from './capability/types'
-import type { ToolOutputStore } from './toolOutputStore'
+import { TOOL_OUTPUT_MAX_INLINE_BYTES, type ToolOutputStore } from './toolOutputStore'
+import {
+  buildPagedResultContent,
+  decideToolResultDelivery,
+  serializedByteLength,
+} from './agent/toolResultDelivery'
 import {
   buildToolErrorObservation,
   buildToolSuccessObservation,
@@ -128,7 +134,15 @@ export interface AgentRuntimeSettings {
   compactMaxTranscriptChars: number
   historyMode: 'auto' | 'fixed'
   historyMessageLimit?: number
+  /**
+   * @deprecated Tool Result Delivery v2 (§15/§47): the runtime no longer clips
+   * tool results by character count. These fields are still ACCEPTED by the
+   * settings schema and mapped here purely for old settings.json compatibility;
+   * the production tool-result path ignores them entirely (capacity is decided
+   * by the context window, never a fixed char cap). Cleanup is deferred.
+   */
   toolResultMode: 'auto' | 'fixed'
+  /** @deprecated see toolResultMode. */
   toolResultMaxChars?: number
   plannerMaxAttempts: number
   plannerMaxSteps: number
@@ -202,24 +216,6 @@ const TASK_VERIFIER = new TaskVerifier()
 
 /** Evidence summaries stored per tool result; tasks.json keeps references, not payloads. */
 const MAX_EVIDENCE_SUMMARY_CHARS = 600
-
-/**
- * Auto tool-result sizing: a dynamic share of the remaining context budget
- * (~2 chars per token, conservative for CJK-mixed payloads), bounded so a
- * 1M-token window cannot encourage unbounded dumps.
- */
-function resolveToolResultCharLimit(
-  config: AgentRuntimeSettings,
-  contextTokensUsed: number,
-  effectiveWindow: number,
-  outputReserve: number,
-): number {
-  if (config.toolResultMode === 'fixed' && config.toolResultMaxChars) {
-    return config.toolResultMaxChars
-  }
-  const remainingTokens = Math.max(0, effectiveWindow - contextTokensUsed - outputReserve - 1_024)
-  return Math.max(2_000, Math.min(32_000, remainingTokens * 2))
-}
 
 /** The completion gate's return: either keep the agent loop running or stop the run now. */
 type TaskGateOutcome =
@@ -862,6 +858,10 @@ export class AgentRuntime {
       contextBlocks,
     })
     contextManager.addUserTurn({ role: 'user', content: trimmedInput })
+    // Tool Result Delivery v2 (§六): proactive recovery refs. A large-but-fitting
+    // result is still persisted (so a later turn can re-read it) while the model
+    // keeps the COMPLETE content inline. Keyed by toolCallId to store once.
+    const proactiveRefs = new Map<string, string>()
     let latestContextTokens = 0
     let latestUsage: ModelUsage | undefined
     let latestCacheHitRate: number | undefined
@@ -1318,22 +1318,26 @@ export class AgentRuntime {
           if (toolResult.error === undefined) {
             doomLoop.recordResult(doomSignature, resultFingerprint(toolResult.wire))
           }
-          // Bound large tool results ONCE: full data goes to the
-          // ToolOutputStore, the model/session receive preview + resultRef.
-          if (toolResult.error === undefined && this.#toolOutputStore !== undefined) {
-            const bounded = await this.#toolOutputStore.bound({
-              sessionId: input.sessionId ?? '',
-              toolCallId: toolCall.id,
+          // Tool Result Delivery v2 (§一/§三/§八): NO fixed character clipping
+          // and NO 50KB preview. The FULL result is kept; the ONLY thing that
+          // can keep it out of the current tool message is the model's context
+          // window, measured against the protected floor (history may still be
+          // dropped, the current exchange may not). Fits → full inline (§六
+          // proactively stores a recovery ref); does not fit → store full + page.
+          if (toolResult.error === undefined) {
+            const delivered = await this.#deliverToolResult({
               toolName: toolCall.name,
-              data: toolResult.result,
+              toolCallId: toolCall.id,
+              result: toolResult.result,
+              assistantMessage: assistantToolMessage,
+              priorResultsThisRound: toolResultMessages,
+              tools,
+              effectiveWindow,
+              outputReserve,
+              contextManager,
+              proactiveRefs,
             })
-            toolResult = {
-              ...toolResult,
-              result: bounded.content,
-              wire: toolResult.error === undefined
-                ? buildToolSuccessObservation(toolCall.name, bounded.content)
-                : toolResult.wire,
-            }
+            toolResult = { result: delivered.content, wire: delivered.wire }
           }
           options.onEvent?.({
             phase: 'completed',
@@ -1345,18 +1349,11 @@ export class AgentRuntime {
             error: toolResult.error,
           })
 
-          const wireResult = JSON.stringify(toolResult.wire)
+          // The COMPLETE (or paged-reference) tool result — never sliced.
           toolResultMessages.push({
             role: 'tool',
             toolCallId: toolCall.id,
-            // Auto mode sizes the truncation from the remaining context budget
-            // each round; a fixed mode uses the user's value. Bigger windows
-            // are no longer pinned to the local-model 4000 chars.
-            content: truncateToolResult(
-              toolCall.name,
-              wireResult,
-              resolveToolResultCharLimit(runtimeConfig, latestContextTokens, effectiveWindow, outputReserve),
-            ),
+            content: JSON.stringify(toolResult.wire),
           })
 
           // P2/§55: result mining (Verified Facts + ordered Reference Set) is
@@ -1464,6 +1461,92 @@ export class AgentRuntime {
       // overwrite the model/tool error the run is already unwinding with.
       await finishCapabilityRun()
     }
+  }
+
+  /**
+   * Tool Result Delivery v2 (§三/§四/§五/§六/§七/§八): decide how a COMPLETE tool
+   * result reaches the model. There is no fixed character cap and no 50KB
+   * preview — the model's context window is the only limiter, measured by
+   * ContextManager against the protected floor (history may be dropped, the
+   * current exchange may not). Fits → the full result inline (with a §六
+   * proactive recovery ref when large); does not fit → store the FULL result and
+   * return a PAGED reference. Paged never loses data: read_tool_result recovers
+   * 100% of it. This is a no-op when no ToolOutputStore is configured (the
+   * result simply goes inline — still never sliced).
+   */
+  async #deliverToolResult(input: {
+    toolName: string
+    toolCallId: string
+    result: unknown
+    assistantMessage: ChatMessage
+    priorResultsThisRound: readonly ChatMessage[]
+    tools: readonly AgentToolContract[]
+    effectiveWindow: number
+    outputReserve: number
+    contextManager: ContextManager
+    proactiveRefs: Map<string, string>
+  }): Promise<{ content: unknown; wire: Record<string, unknown> }> {
+    const store = this.#toolOutputStore
+    const fullWire = buildToolSuccessObservation(input.toolName, input.result)
+    // No store (unit tests / unconfigured) → the complete result goes inline.
+    if (store === undefined) {
+      return { content: input.result, wire: fullWire }
+    }
+    // Would the CURRENT round's whole exchange (assistant call + prior result
+    // pages + this complete result) still fit the context budget? §八 order:
+    // estimate the full next request first; never slice before asking.
+    const candidateMessages: ChatMessage[] = [
+      input.assistantMessage,
+      ...input.priorResultsThisRound,
+      { role: 'tool', toolCallId: input.toolCallId, content: JSON.stringify(fullWire) },
+    ]
+    const fits = input.contextManager.fitsProjectedToolExchange({
+      tools: input.tools,
+      outputReserve: input.outputReserve,
+      effectiveWindow: input.effectiveWindow,
+      candidateMessages,
+    })
+    // §六 proactive recovery ref: a large result that still FITS is persisted so
+    // a LATER turn can re-read it, but the model receives the COMPLETE content.
+    const serializedSize = serializedByteLength(input.result)
+    let proactiveResultRef = input.proactiveRefs.get(input.toolCallId)
+    if (fits) {
+      if (proactiveResultRef === undefined && serializedSize > TOOL_OUTPUT_MAX_INLINE_BYTES) {
+        try {
+          const stored = await store.store({
+            sessionId: '',
+            toolCallId: input.toolCallId,
+            toolName: input.toolName,
+            data: input.result,
+          })
+          proactiveResultRef = stored.resultRef
+          input.proactiveRefs.set(input.toolCallId, stored.resultRef)
+        } catch {
+          proactiveResultRef = undefined
+        }
+      }
+      // §六: the ref is persisted for later recovery, but the model receives the
+      // COMPLETE, UNMODIFIED result — never a preview, never an injected field.
+      return { content: input.result, wire: fullWire }
+    }
+    // Does NOT fit → persist the FULL result and hand back a paging pointer.
+    let resultRef = proactiveResultRef
+    if (resultRef === undefined) {
+      const stored = await store.store({
+        sessionId: '',
+        toolCallId: input.toolCallId,
+        toolName: input.toolName,
+        data: input.result,
+      })
+      resultRef = stored.resultRef
+      input.proactiveRefs.set(input.toolCallId, stored.resultRef)
+    }
+    const paged = decideToolResultDelivery({ fits: false, data: input.result, proactiveResultRef: resultRef })
+    // decideToolResultDelivery returns the paged content object (never a slice).
+    const content = paged.mode === 'paged'
+      ? buildPagedResultContent(paged.resultRef, paged.totalBytes, paged.estimatedTokens)
+      : input.result
+    return { content, wire: buildToolSuccessObservation(input.toolName, content) }
   }
 
   /**
@@ -1834,56 +1917,9 @@ function hasExplicitAmbiguousRetryConfirmation(input: string): boolean {
   return /(?:仍然|继续|再次|重新)执行|确认重试/.test(input)
 }
 
-function truncateToolResult(toolName: string, result: string, maxChars: number): string {
-  if (result.length <= maxChars) {
-    return result
-  }
-  let clipped = result.slice(0, maxChars)
-  const finalCodeUnit = clipped.charCodeAt(clipped.length - 1)
-  if (finalCodeUnit >= 0xD800 && finalCodeUnit <= 0xDBFF) {
-    clipped = clipped.slice(0, -1)
-  }
-  // P3: prepend a compact structural summary of what was cut, so the truncation is not a
-  // blind slice — the model still sees the shape (counts / keys) of the elided payload.
-  const summary = summarizeTruncatedPayload(result)
-  return `${clipped}\n\n[工具 ${toolName} 的结果过大（原始 ${result.length} 字符）` +
-    `${summary ? `；${summary}` : ''}，已截断至 ${maxChars} 字符。完整结果仍保留在本地，` +
-    '需要更多时请缩小查询范围重试：降低 limit、改用 category/property 过滤参数，或减少 itemIds 数量。]'
-}
-
-/** Best-effort "N items, keys: …" digest of a JSON tool payload; empty on non-JSON.
- * The wire wraps data as `{status, tool, result}` so we descend into `result` first. */
-function summarizeTruncatedPayload(result: string): string {
-  try {
-    const parsed: unknown = JSON.parse(result)
-    const payload = unwrapWire(payloadIsRecord(parsed) ? parsed.result : parsed)
-    if (Array.isArray(payload)) return `结构：数组长度=${payload.length}`
-    if (payloadIsRecord(payload)) {
-      const parts: string[] = []
-      for (const key of ['items', 'viewpoints', 'models', 'properties', 'results']) {
-        const value = payload[key]
-        if (Array.isArray(value)) parts.push(`${key}=${value.length}`)
-      }
-      const listed = new Set(parts.map((part) => part.split('=')[0] as string))
-      const otherKeys = Object.keys(payload).filter((key) => !listed.has(key))
-      if (parts.length > 0) {
-        return `结构：${parts.join(', ')}${otherKeys.length ? `；字段：${otherKeys.join('/')}` : ''}`
-      }
-      return `字段：${otherKeys.join('/') || '无'}`
-    }
-  } catch {
-    // Not JSON (already-a-string wire shape) → no digest.
-  }
-  return ''
-}
-
-
-function unwrapWire(value: unknown): unknown {
-  // `navisworks_*` results come back wrapped as `{status, tool, result}`; if the payload
-  // still carries that wrapper, unwrap it one layer so counts/keys reflect the inner data.
-  if (payloadIsRecord(value) && 'status' in value && 'result' in value) {
-    return (value as { result: unknown }).result
-  }
-  return value
-}
+// Tool Result Delivery v2 (§一/§47): the old character-level truncators
+// (truncateToolResult / summarizeTruncatedPayload / resolveToolResultCharLimit)
+// are GONE — production usage was forced to 0. A full tool result is now either
+// inlined complete (fits the context) or stored-and-paged (never sliced), per
+// ./agent/toolResultDelivery.
 

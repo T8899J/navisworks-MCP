@@ -4,17 +4,25 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 /**
- * Bounded tool-output store: the FULL result of a large tool call is kept on
- * disk, while the model only receives a small preview plus a `resultRef` it
- * can page through via the internal `read_tool_result` tool.
+ * Full Tool Result Store + Paged Overflow Store (Tool Result Delivery v2).
  *
- * - Small results stay fully inline (no file, no ref).
- * - Large results are written ONCE per tool execution (never per token).
+ * Its ONE job (§五): persist tool results COMPLETELY and hand back a `resultRef`
+ * the model can page through via `read_tool_result`. It decides NOTHING about
+ * how much the model sees — that moved to `ToolResultDeliveryPolicy`, which
+ * compares the full result against the model context budget (never a fixed
+ * byte cap). Paged ≠ Truncated: a paged result is fully present on disk and
+ * 100% recoverable; only the single-request window is finite.
+ *
+ * - `store()` writes the full result and returns its ref + byte size.
+ * - `read()` pages through a stored result; offset/limit reach 100% of it.
  * - `resultRef` is a random internal id; the model can never express a path.
  * - Cleanup is best-effort; failures never break a run or a session load.
+ * - `bound()` is @deprecated (it fused persistence with a context-budget policy).
  */
 
-/** Results above this size are externalized to the store (Runtime Policy — not user-configurable). */
+/** @deprecated Legacy bound() inline threshold. The delivery policy decides
+ *  full-vs-paged from CONTEXT capacity (§八), NOT this byte cap. Kept only so
+ *  the deprecated `bound()` continues to compile. */
 export const TOOL_OUTPUT_MAX_INLINE_BYTES = 50_000
 /** Preview item count for large array-shaped results. */
 export const TOOL_OUTPUT_PREVIEW_ITEMS = 50
@@ -69,9 +77,43 @@ export class ToolOutputStore {
   }
 
   /**
-   * Bound a raw tool result for the model: small results pass through
-   * untouched; large ones are stored in full and reduced to a preview that
-   * keeps the original pagination metadata (total/truncated) intact.
+   * Tool Result Delivery v2 (§五/§六): PERSIST a tool result IN FULL and return
+   * its handle. The store decides NOTHING about what the model sees — that is
+   * `ToolResultDeliveryPolicy`'s job. `store()` is the durability primitive the
+   * delivery layer uses for both the proactive-ref case (a large-but-fitting
+   * result still gets a ref for recovery) and the paged-overflow case.
+   *
+   * Throws only if the write fails — callers must handle that (a run never
+   * pends on tool-output durability).
+   */
+  async store(input: {
+    sessionId: string
+    toolCallId: string
+    toolName: string
+    data: unknown
+  }): Promise<{ resultRef: string; totalBytes: number }> {
+    const serialized = JSON.stringify(input.data) ?? 'null'
+    const totalBytes = Buffer.byteLength(serialized, 'utf8')
+    const resultRef = `tor_${randomUUID()}`
+    await mkdir(this.#directory, { recursive: true })
+    const stored: StoredToolOutput = {
+      resultRef,
+      sessionId: input.sessionId,
+      toolCallId: input.toolCallId,
+      toolName: input.toolName,
+      createdAt: Date.now(),
+      data: input.data,
+    }
+    await writeFile(path.join(this.#directory, `${resultRef}.json`), JSON.stringify(stored), 'utf8')
+    return { resultRef, totalBytes }
+  }
+
+  /**
+   * @deprecated Tool Result Delivery v2 replaces this with `store()` + the
+   * delivery policy. `bound()` baked a CONTEXT-BUDGET decision (how much the
+   * model may see) into the PERSISTENCE store — the two are now separated (§五).
+   * It is no longer called on the production tool-result path; retained only so
+   * any lingering test/legacy import keeps compiling. New code MUST NOT use it.
    */
   async bound(input: {
     sessionId: string

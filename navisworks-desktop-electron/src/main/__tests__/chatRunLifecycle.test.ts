@@ -198,8 +198,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-describe('bounded tool output + internal reader (P3 runtime)', () => {
-  it('a huge find_items result becomes preview + resultRef, then pages via read_tool_result', async () => {
+describe('full-or-paged tool output + internal reader (Tool Result Delivery v2)', () => {
+  it('a find_items result larger than the context is PAGED (not sliced) and read back via read_tool_result', async () => {
     const outDir = await mkdtemp(join(tmpdir(), 'curi-runtime-tool-output-'))
     try {
       const bigItems = Array.from({ length: 2_000 }, (_, index) => ({
@@ -278,17 +278,23 @@ describe('bounded tool output + internal reader (P3 runtime)', () => {
         .map((message) => message.content)
       const findContent = toolContents.find((content) => content.includes('navisworks_find_items'))
       expect(findContent).toBeDefined()
+      // Paged (context-overflow), NOT sliced: a paging pointer + byte/token size,
+      // with the recover-instruction message — and NONE of the old truncation
+      // semantics (no "truncated":true, no "已截断", no 50-item preview).
+      expect(findContent).toContain('"delivery":"paged"')
       expect(findContent).toContain('"resultRef":"tor_')
-      expect(findContent).toContain('"truncated":true')
-      expect(findContent).toContain('"total":2000')
-      // The bounded preview is FAR smaller than the ~160KB raw payload.
-      expect(findContent!.length).toBeLessThan(30_000)
+      expect(findContent).toContain('完整工具结果已保存')
+      expect(findContent).not.toContain('"truncated":true')
+      expect(findContent).not.toContain('已截断')
+      // The paged pointer is FAR smaller than the ~160KB raw payload (data lives
+      // complete on disk, recovered via read_tool_result — not lost).
+      expect(findContent!.length).toBeLessThan(2_000)
       // The read_tool_result page returned the second slice.
       const readContent = toolContents.find((content) => content.includes('read_tool_result') && content.includes('"offset":50'))
       expect(readContent).toBeDefined()
       expect(readContent).toContain('"returned":50')
       expect(readContent).toContain('"hasMore":true')
-      // The session-visible completed event carries the bounded preview too.
+      // The session-visible completed event carries the paged reference too.
       const completed = events.find((event) => event.phase === 'completed' && event.tool === 'navisworks_find_items')
       expect((completed?.result as Record<string, unknown>).resultRef).toMatch(/^tor_/)
     } finally {

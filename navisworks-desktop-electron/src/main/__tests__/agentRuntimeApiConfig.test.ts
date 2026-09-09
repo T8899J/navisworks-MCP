@@ -178,7 +178,7 @@ describe('API-first runtime configuration (run scope, no restart)', () => {
     expect(toolMessage?.content).not.toContain('已截断至')
   })
 
-  it('toolResultMode=fixed truncates to the configured size', async () => {
+  it('toolResultMode=fixed NO LONGER truncates — the char cap is deprecated (§15/§47, Invariant A)', async () => {
     const harness = makeHarness([
       () => toolCallTurn('call-1', 'navisworks_find_items', { query: 'Pump' }),
       () => textTurn('完成。'),
@@ -195,7 +195,11 @@ describe('API-first runtime configuration (run scope, no restart)', () => {
     })
     const toolMessage = (harness.bodies[1]?.messages as Array<{ role: string; content: string }>)
       .find((message) => message.role === 'tool')
-    expect(toolMessage?.content).toContain('已截断至 600 字符')
+    // The full ~18KB payload still reaches the model: no fixed char cap, no
+    // "已截断至" notice, no slice. The deprecated setting is accepted but ignored
+    // for truncation (Tool Result Delivery v2 — capacity is the ONLY limiter).
+    expect(toolMessage?.content.length).toBeGreaterThan(9_000)
+    expect(toolMessage?.content).not.toContain('已截断')
   })
 
   it('maxToolRounds from run-scoped settings applies immediately', async () => {

@@ -167,6 +167,40 @@ export class ContextManager {
       + DEFAULT_SAFETY_MARGIN
   }
 
+  /**
+   * Tool Result Delivery v2 (§八/§九): can the FULL next tool exchange still
+   * build a legal request? History frames are droppable, but the current user
+   * turn and every tool exchange already made this turn are protected — so the
+   * honest floor is `system + context blocks + protected frames + the candidate
+   * exchange + the tool schemas`, and that floor must fit the context budget.
+   *
+   * Returns false ONLY when even with all removable history dropped the request
+   * would overflow — the exact case where the full tool result must be paged
+   * instead of sliced. Never mutates frame state.
+   */
+  fitsProjectedToolExchange(input: {
+    tools: readonly AgentToolContract[]
+    outputReserve: number
+    effectiveWindow: number
+    candidateMessages: readonly ChatMessage[]
+    providerOverhead?: number
+    safetyMargin?: number
+  }): boolean {
+    const providerOverhead = input.providerOverhead ?? DEFAULT_PROVIDER_OVERHEAD
+    const safetyMargin = input.safetyMargin ?? DEFAULT_SAFETY_MARGIN
+    const contextBudget = computeContextBudget({
+      effectiveContextWindow: input.effectiveWindow,
+      outputReserve: input.outputReserve,
+      providerOverhead,
+      safetyMargin,
+    })
+    if (!Number.isFinite(contextBudget) || contextBudget <= 0) return false
+    const protectedMessages = this.#allMessages(this.#frames.slice(this.#protectedFrameStart))
+    const floorTokens = estimateMessages(protectedMessages.concat(input.candidateMessages))
+      + estimateTools(input.tools)
+    return floorTokens <= contextBudget
+  }
+
   /** Production request assembly. All trimming is performed over complete ContextFrames. */
   assembleBudgetedFrames(input: {
     tools: readonly AgentToolContract[]
