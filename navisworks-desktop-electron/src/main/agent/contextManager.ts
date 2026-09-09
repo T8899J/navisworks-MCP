@@ -14,7 +14,18 @@ export const CONTEXT_COMPACT_TRIGGER_RATIO = 0.85
 const COMPACT_KEEP_RECENT_FRAMES = 1
 const COMPACT_MIN_COMPRESSIBLE_FRAMES = 2
 export const COMPACT_MAX_TRANSCRIPT_CHARS = 30_000
-export const LOCAL_MAX_CONTEXT_TOKENS = 32_768
+/**
+ * Model Configuration v2 (§36): 32K is now the local DEFAULT (the window used
+ * when neither a per-model override nor the global setting names one) — no
+ * longer a hard maximum. A user who explicitly configures a local model to
+ * 65536/1M gets that; clampLocalContextWindow only bounds the sane range.
+ */
+export const LOCAL_DEFAULT_CONTEXT_TOKENS = 32_768
+/** @deprecated kept as the historical name/alias for existing imports+tests; it
+ *  is now just LOCAL_DEFAULT_CONTEXT_TOKENS, NOT a ceiling. */
+export const LOCAL_MAX_CONTEXT_TOKENS = LOCAL_DEFAULT_CONTEXT_TOKENS
+/** Absolute sanity ceiling for a configured context window (settings max). */
+const CONTEXT_WINDOW_ABSOLUTE_MAX = 2_000_000
 
 export type ContextPressure = 'idle' | 'soft' | 'compact'
 /**
@@ -46,8 +57,15 @@ const DEFAULT_COMPACT_SYSTEM_PROMPT = COMPACT_SYSTEM_PROMPT
 const DEFAULT_PROVIDER_OVERHEAD = 256
 const DEFAULT_SAFETY_MARGIN = 512
 
+/**
+ * Model Configuration v2 (§36): the local window is clamped to a SANE range, not
+ * forced under 32K. Floor 1024, ceiling the settings max (2M). An explicit
+ * 65536/1M local override survives — this is the difference between "32K is a
+ * hard maximum" (old) and "32K is the default" (new). Hardware success is the
+ * provider's problem; Curi just sends what was configured (§36).
+ */
 export function clampLocalContextWindow(configured: number): number {
-  return Math.min(Math.max(1024, Math.trunc(configured)), LOCAL_MAX_CONTEXT_TOKENS)
+  return Math.min(Math.max(1024, Math.trunc(configured)), CONTEXT_WINDOW_ABSOLUTE_MAX)
 }
 
 export function providerSendsContextWindow(

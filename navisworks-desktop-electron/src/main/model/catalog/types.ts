@@ -1,3 +1,5 @@
+import type { ModelConfiguration } from '../../../shared/model'
+
 /**
  * Catalog-local helper types. ModelRef / ModelInfo / ModelUsage themselves are
  * SHARED types (src/shared/model.ts) with Zod twins in src/shared/ipc/schemas.ts
@@ -16,9 +18,15 @@ export interface ModelResolverSettings {
   ollamaEnabled: boolean
   apiEnabled: boolean
   activeApiProfileId: string | null
-  /** Safe local fallback budget; used for the local clamp only, never faked into API models. */
+  /** Safe local fallback budget; used for the local default only, never faked into API models. */
   contextWindowTokens: number
   apiProfiles: readonly ModelResolverProfile[]
+  /**
+   * Model Configuration v2 (§19): PER-MODEL overrides. Absent (old settings) →
+   * treated as [], so no migration is required. Bound to ModelRef, never a
+   * provider-wide value.
+   */
+  modelConfigurations?: readonly ModelConfiguration[]
 }
 
 /** One API profile as seen by the resolver — connection config + chosen model. */

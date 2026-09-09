@@ -51,7 +51,7 @@ import type { ContextEngine } from './context/contextEngine'
 import type { QuestionService } from './question/questionService'
 import type { QuestionOutcome } from './question/types'
 import { validateAnswersForRequest } from './question/questionSchema'
-import type { ModelUsage, QuestionRequest } from '../shared/ipc/schemas'
+import type { ModelRef, ModelUsage, QuestionRequest } from '../shared/ipc/schemas'
 type RuntimeQuestionRequest = {
   source: 'tool' | 'doom-loop'
   questions: QuestionRequest['questions']
@@ -143,6 +143,12 @@ export interface OllamaRunResult {
   contextWindowTokens?: number
   /** Where the window came from ('fallback' = safety budget, NOT a model limit). */
   contextWindowSource?: ContextWindowSource
+  /**
+   * Model Configuration v2 (§31): the ModelRef this run's window was budgeted
+   * against. Emitted on chat.done so the renderer can bind contextUsage to a
+   * specific model and refuse a stale window from a different one.
+   */
+  modelRef?: ModelRef
   /** True when automatic context compaction ran during this run. */
   compacted?: boolean
   /** P4: the summary produced by this run's compaction, for durable persistence. */
@@ -859,6 +865,9 @@ export class ChatRunRegistry {
         ...(result.contextWindowSource === undefined
           ? {}
           : { contextWindowSource: result.contextWindowSource }),
+        // Model Configuration v2 (§31): the run's model identity rides on the
+        // event so the ring can reject a window from a different model.
+        ...(result.modelRef === undefined ? {} : { modelRef: result.modelRef }),
         ...(result.compacted ? { compacted: true } : {})
       })
 

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { REASONING_EFFORTS, type ReasoningEffort } from '../reasoning'
-import type { ModelInfo, ModelUsage } from '../model'
+import type { ModelConfiguration, ModelInfo, ModelUsage } from '../model'
 
 const nonEmptyString = z.string().trim().min(1)
 const dateTimeString = z.string().trim().min(1)
@@ -246,6 +246,41 @@ export const apiProfileSchema = z.strictObject({
   )
 })
 
+/**
+ * Model System v1 shared schemas — single IPC source for model identity,
+ * capabilities and raw usage. The plain-TS twins live in src/shared/model.ts;
+ * the compile-time guards at the bottom of this file pin the two together.
+ * modelRefSchema is declared here (above appSettingsSchema) because the
+ * per-model configuration settings below reference it — a zod schema is a
+ * VALUE, so it must exist before it is composed.
+ */
+export const modelRefSchema = z.strictObject({
+  providerId: nonEmptyString,
+  modelId: nonEmptyString,
+})
+
+/** Model Configuration v2 (§18/§24): modality metadata. */
+export const modelInputModalitySchema = z.enum(['text', 'image', 'video', 'pdf'])
+export const modelOutputModalitySchema = z.enum(['text', 'image'])
+
+/**
+ * A per-model configuration (§18/§19/§28). Numeric fields are `nullish` →
+ * absent/null = Auto (no forced value). Bounds match §28: context 1024..2,000,000,
+ * output 128..1,000,000. Modalities default to text-only (the safe truth until
+ * a real transport is wired, §25).
+ */
+export const modelConfigurationSchema = z.strictObject({
+  ref: modelRefSchema,
+  contextWindowTokens: z.number().int().min(1024).max(2_000_000).nullish(),
+  maxOutputTokens: z.number().int().min(128).max(1_000_000).nullish(),
+  // OPTIONAL in both the wire type and the shared ModelConfiguration interface:
+  // an absent side means "text-only" (the safe default the resolver applies),
+  // which keeps the settings UPDATE PATCH (a partial) assignable to the stored
+  // shape with no zod input/output drift.
+  inputModalities: z.array(modelInputModalitySchema).readonly().optional(),
+  outputModalities: z.array(modelOutputModalitySchema).readonly().optional(),
+})
+
 export const appSettingsSchema = z.strictObject({
   selectedModel: z.string(),
   models: z.array(z.string()),
@@ -266,7 +301,13 @@ export const appSettingsSchema = z.strictObject({
   /** Run-scoped agent execution policy; absent in old payloads → defaults. */
   execution: z.nullish(executionSettingsSchema).transform((value) => value ?? DEFAULT_EXECUTION_SETTINGS),
   /** Disk-history retention; absent in old payloads → defaults. */
-  storage: z.nullish(storageSettingsSchema).transform((value) => value ?? DEFAULT_STORAGE_SETTINGS)
+  storage: z.nullish(storageSettingsSchema).transform((value) => value ?? DEFAULT_STORAGE_SETTINGS),
+  /**
+   * Model Configuration v2 (§19/§20): PER-MODEL overrides, bound to a
+   * structured ModelRef. OPTIONAL — absent in old settings.json → the resolver
+   * treats it as [] and the file loads unchanged (no migration wizard).
+   */
+  modelConfigurations: z.array(modelConfigurationSchema).optional(),
 })
 
 /** One registry tool as surfaced to the settings UI (resolved permission included). */
@@ -284,8 +325,12 @@ export const toolDefinitionSummarySchema = z.strictObject({
   defaultPermission: toolPermissionSchema
 })
 
-/** Where the context window a run budgeted against came from. */
-export const contextWindowSourceSchema = z.enum(['local', 'profile', 'provider', 'fallback'])
+/**
+ * Where the context window a run budgeted against came from. Model Config v2:
+ * 'model' = the user set an explicit per-model override (highest priority).
+ * 'fallback' remains a SAFETY BUDGET, never a real model maximum.
+ */
+export const contextWindowSourceSchema = z.enum(['local', 'profile', 'provider', 'fallback', 'model'])
 
 /**
  * P16 Question System — the single source for question identity so the IPC
@@ -334,16 +379,6 @@ export const questionRequestSchema = z.strictObject({
   createdAt: z.number().int().nonnegative(),
 })
 
-/**
- * Model System v1 shared schemas — single IPC source for model identity,
- * capabilities and raw usage. The plain-TS twins live in src/shared/model.ts;
- * the compile-time guards at the bottom of this file pin the two together.
- */
-export const modelRefSchema = z.strictObject({
-  providerId: nonEmptyString,
-  modelId: nonEmptyString,
-})
-
 /** Raw provider usage. Absent field = NOT REPORTED — never a faked 0. */
 export const modelUsageSchema = z.strictObject({
   inputTokens: z.number().int().nonnegative().optional(),
@@ -366,6 +401,12 @@ export const modelInfoSchema = z.strictObject({
     reasoning: z.boolean().optional(),
     temperature: z.boolean().optional(),
     attachments: z.boolean().optional(),
+    // Model Configuration v2 (§24): modality metadata, .readonly() to stay
+    // mutually assignable with the shared ModelCapabilities type.
+    modalities: z.strictObject({
+      input: z.array(modelInputModalitySchema).readonly().optional(),
+      output: z.array(modelOutputModalitySchema).readonly().optional(),
+    }).optional(),
   }),
   limits: z.strictObject({
     context: z.number().int().positive().optional(),
@@ -380,7 +421,7 @@ export const modelInfoSchema = z.strictObject({
     // capabilities.reasoning (the capability truth). Absent = no policy stated.
     requestPolicy: z.enum(['auto', 'on', 'off']).optional(),
   }),
-  metadataSource: z.enum(['local', 'profile', 'provider', 'unknown']),
+  metadataSource: z.enum(['local', 'profile', 'provider', 'model', 'unknown']),
 })
 
 export const navisworksStatusSchema = z.strictObject({
@@ -603,6 +644,13 @@ const chatDoneEventSchema = z.strictObject({
   cacheHitRate: z.number().optional(),
   contextWindowTokens: z.number().optional(),
   contextWindowSource: contextWindowSourceSchema.optional(),
+  /**
+   * Model Configuration v2 (§31): the ModelRef this run's window/usage was
+   * budgeted against. The renderer only reuses a reported window when it belongs
+   * to the CURRENT active model — a stale 32K from another model can never
+   * contaminate the ring. Absent on legacy runs (renderer then ignores it).
+   */
+  modelRef: modelRefSchema.optional(),
   compacted: z.boolean().optional()
 })
 
@@ -720,7 +768,14 @@ export type ToolDefinitionSummary = z.output<typeof toolDefinitionSummarySchema>
 export type ToolApprovalRequest = z.output<typeof eventSchemas['tool.approval.requested']>
 export type ToolPermission = z.output<typeof toolPermissionSchema>
 
-export type { ModelRef, ModelInfo, ModelUsage } from '../model'
+export type {
+  ModelRef,
+  ModelInfo,
+  ModelUsage,
+  ModelConfiguration,
+  ModelInputModality,
+  ModelOutputModality,
+} from '../model'
 
 export type ContextWindowSource = z.output<typeof contextWindowSourceSchema>
 export type QuestionKind = z.output<typeof questionKindSchema>
@@ -732,6 +787,7 @@ export type QuestionRequest = z.output<typeof questionRequestSchema>
 export type ModelRefSummary = z.output<typeof modelRefSchema>
 export type ModelUsageSummary = z.output<typeof modelUsageSchema>
 export type ModelInfoSummary = z.output<typeof modelInfoSchema>
+export type ModelConfigurationSummary = z.output<typeof modelConfigurationSchema>
 
 // Compile-time pins so the IPC schema and the shared Model System types can
 // never drift (same failure class as the old chat.done schema drift): every
@@ -740,7 +796,13 @@ const _modelUsageGuard: ModelUsage = null as unknown as ModelUsageSummary
 const _modelUsageGuardBack: ModelUsageSummary = null as unknown as ModelUsage
 const _modelInfoGuard: ModelInfo = null as unknown as ModelInfoSummary
 const _modelInfoGuardBack: ModelInfoSummary = null as unknown as ModelInfo
+// Model Configuration v2: the per-model config schema and the shared
+// ModelConfiguration type must not drift (modalities readonly-pinned above).
+const _modelConfigGuard: ModelConfiguration = null as unknown as ModelConfigurationSummary
+const _modelConfigGuardBack: ModelConfigurationSummary = null as unknown as ModelConfiguration
 void _modelUsageGuard
 void _modelUsageGuardBack
 void _modelInfoGuard
 void _modelInfoGuardBack
+void _modelConfigGuard
+void _modelConfigGuardBack

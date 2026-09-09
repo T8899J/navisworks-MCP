@@ -38,6 +38,40 @@ export function modelRefEquals(a: ModelRef, b: ModelRef): boolean {
 export type ModelProviderKind = 'ollama' | 'openai-compatible'
 
 /**
+ * Model Configuration v2 (§18) — input/output MODALITY metadata. These describe
+ * what a model CAN accept/produce. They are CAPABILITY METADATA ONLY: Curi's
+ * message transport today is text, so an `image` input modality does NOT mean
+ * Curi can send an image this round (§25/Invariant L) — it must never be used to
+ * fabricate an unimplemented attachment path.
+ */
+export type ModelInputModality = 'text' | 'image' | 'video' | 'pdf'
+export type ModelOutputModality = 'text' | 'image'
+
+/**
+ * A PER-MODEL configuration the user sets (Model Configuration v2). It is bound
+ * to a structured `ModelRef` (never a `provider/model` string key — §19), so a
+ * profile that serves many models can't leak one model's 1M window onto another
+ * (§17/§40). Absent numeric fields / `null` = Auto (no override).
+ */
+export interface ModelConfiguration {
+  ref: ModelRef
+  contextWindowTokens?: number | null
+  maxOutputTokens?: number | null
+  /** Absent = text-only (the safe default the resolver applies); §25/§28. */
+  inputModalities?: readonly ModelInputModality[]
+  outputModalities?: readonly ModelOutputModality[]
+}
+
+/** Find the configuration bound to `ref` — the ONLY sanctioned lookup (§19). */
+export function findModelConfiguration(
+  configurations: readonly ModelConfiguration[] | undefined,
+  ref: ModelRef,
+): ModelConfiguration | undefined {
+  if (configurations === undefined) return undefined
+  return configurations.find((configuration) => modelRefEquals(configuration.ref, ref))
+}
+
+/**
  * Model capabilities. `undefined` means Curi DOES NOT KNOW — it is never
  * substituted with `false` (which would deny a real capability) nor with
  * `true` (which would fabricate one).
@@ -46,7 +80,17 @@ export interface ModelCapabilities {
   tools?: boolean
   reasoning?: boolean
   temperature?: boolean
+  /** @deprecated coarse; superseded by `modalities` (§24). Kept for compat. */
   attachments?: boolean
+  /**
+   * Model Configuration v2 (§24): the fine-grained modality view, derived from
+   * the model's `ModelConfiguration` (or provider metadata). `undefined` side =
+   * unknown. NOTE: describing a modality ≠ a wired transport (§25).
+   */
+  modalities?: {
+    input?: readonly ModelInputModality[]
+    output?: readonly ModelOutputModality[]
+  }
 }
 
 export interface ModelLimits {
@@ -60,8 +104,15 @@ export interface ModelLimits {
   output?: number
 }
 
-/** Where this model's metadata came from. 'unknown' = nothing was configured or reported. */
-export type ModelMetadataSourceId = 'local' | 'profile' | 'provider' | 'unknown'
+/**
+ * Where this model's context/output limits came from (highest-wins is recorded).
+ * - 'model'  : an explicit per-model ModelConfiguration override (§22).
+ * - 'profile': the legacy API-profile advanced override (Model Config v2 keeps it).
+ * - 'provider': reported by the endpoint.
+ * - 'local'  : the local Ollama default budget.
+ * - 'unknown': nothing configured or reported.
+ */
+export type ModelMetadataSourceId = 'local' | 'profile' | 'provider' | 'model' | 'unknown'
 
 /**
  * How Curi should treat `reasoning_effort` on the WIRE for this model — a

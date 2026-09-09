@@ -371,6 +371,9 @@ async function runAgent(
     ...(result.contextWindowSource === undefined
       ? {}
       : { contextWindowSource: result.contextWindowSource }),
+    // Model Configuration v2 (§31): the ModelRef the window/usage was budgeted
+    // against, so the renderer only reuses a reported window for the SAME model.
+    ...(result.activeModel === undefined ? {} : { modelRef: result.activeModel.ref }),
     ...(result.compacted ? { compacted: true } : {}),
     ...(result.compactSummary === undefined ? {} : { compactSummary: result.compactSummary }),
     ...(result.semanticMemory === undefined ? {} : { semanticMemory: result.semanticMemory }),

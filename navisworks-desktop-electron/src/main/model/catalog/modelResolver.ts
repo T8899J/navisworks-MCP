@@ -1,11 +1,13 @@
 import { REASONING_EFFORTS, type ReasoningEffort } from '../../../shared/reasoning'
 import {
   apiProfileProviderId,
+  findModelConfiguration,
   OLLAMA_PROVIDER_ID,
+  type ModelConfiguration,
   type ModelInfo,
   type ModelRef,
 } from '../../../shared/model'
-import { LOCAL_MAX_CONTEXT_TOKENS } from '../../agent/contextManager'
+import { LOCAL_DEFAULT_CONTEXT_TOKENS } from '../../agent/contextManager'
 import type { ModelResolverProfile, ModelResolverSettings } from './types'
 
 /**
@@ -58,7 +60,7 @@ export function resolveActiveModelRef(
  */
 export type ProviderModelInfoFloor = (providerId: string, modelId: string) => ModelInfo | undefined
 
-/** The local daemon reports its own truth: 32K clamp, two-step reasoning. */
+/** The local daemon reports its own truth: 32K default budget, two-step reasoning. */
 export function buildOllamaModelInfo(ref: ModelRef, floor?: ModelInfo): ModelInfo {
   return {
     ref,
@@ -66,9 +68,51 @@ export function buildOllamaModelInfo(ref: ModelRef, floor?: ModelInfo): ModelInf
     provider: floor?.provider ?? { id: OLLAMA_PROVIDER_ID, displayName: 'Ollama', kind: 'ollama' },
     capabilities: floor?.capabilities
       ?? { tools: true, reasoning: true, temperature: true, attachments: false },
-    limits: floor?.limits ?? { context: LOCAL_MAX_CONTEXT_TOKENS },
+    limits: floor?.limits ?? { context: LOCAL_DEFAULT_CONTEXT_TOKENS },
     reasoning: floor?.reasoning ?? { modes: ['low', 'max'] },
     metadataSource: floor?.metadataSource ?? 'local',
+  }
+}
+
+/**
+ * Model Configuration v2 (§21/§23): fold a PER-MODEL override onto the base
+ * ModelInfo. Highest-wins priority for the context window:
+ *   ModelConfiguration explicit  >  legacy profile advanced  >  provider  >  default
+ * The model override sets `metadataSource = 'model'` so the UI can say WHERE the
+ * window came from. Output + modalities likewise. Absent config → base unchanged.
+ */
+export function applyModelConfiguration(
+  base: ModelInfo,
+  config: ModelConfiguration | undefined,
+): ModelInfo {
+  if (config === undefined) return base
+  const limits = { ...base.limits }
+  let metadataSource = base.metadataSource
+  let overridden = false
+  const contextOverride = config.contextWindowTokens
+  if (contextOverride != null && contextOverride > 0) {
+    limits.context = contextOverride
+    overridden = true
+  }
+  const outputOverride = config.maxOutputTokens
+  if (outputOverride != null && outputOverride > 0) {
+    limits.output = outputOverride
+    overridden = true
+  }
+  if (overridden) metadataSource = 'model'
+  return {
+    ...base,
+    limits,
+    metadataSource,
+    capabilities: {
+      ...base.capabilities,
+      // Absent modalities default to the text-only truth (§25/§28); describing a
+      // modality is metadata, NOT a claim Curi can transport it this round.
+      modalities: {
+        input: config.inputModalities ?? ['text'],
+        output: config.outputModalities ?? ['text'],
+      },
+    },
   }
 }
 
@@ -121,15 +165,22 @@ export function resolveActiveModel(
   const activeProfile = ref.providerId.startsWith('api:')
     ? settings.apiProfiles.find((profile) => apiProfileProviderId(profile.id) === ref.providerId)
     : undefined
+  const config = findModelConfiguration(settings.modelConfigurations, ref)
   if (activeProfile) {
     const providerEndpoint = endpoint ?? { model: activeProfile.model }
     return {
       status: 'resolved',
-      info: buildApiModelInfo(activeProfile, providerEndpoint, floor?.(ref.providerId, ref.modelId)),
+      info: applyModelConfiguration(
+        buildApiModelInfo(activeProfile, providerEndpoint, floor?.(ref.providerId, ref.modelId)),
+        config,
+      ),
     }
   }
   return {
     status: 'resolved',
-    info: buildOllamaModelInfo(ref, floor?.(OLLAMA_PROVIDER_ID, ref.modelId)),
+    info: applyModelConfiguration(
+      buildOllamaModelInfo(ref, floor?.(OLLAMA_PROVIDER_ID, ref.modelId)),
+      config,
+    ),
   }
 }

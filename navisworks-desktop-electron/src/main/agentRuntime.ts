@@ -79,7 +79,7 @@ import type { QuestionOutcome, QuestionPrompt } from './question/types'
 import type { SkillManifestEntry } from './skill/types'
 import type { ContextAssembly } from './context/types'
 import { localThinkForEffort, nearestReasoningEffort, type ReasoningEffort } from '../shared/reasoning'
-import type { ModelInfo, ModelUsage } from '../shared/model'
+import type { ModelInfo, ModelMetadataSourceId, ModelUsage } from '../shared/model'
 import {
   DocumentOperationCoordinator,
   ToolExecutionLedger,
@@ -524,6 +524,18 @@ export function resolveApiContextWindow(
   }
   return { window: Math.max(1024, fallbackConfigured), source: 'fallback' }
 }
+
+/** Map the resolver's metadata provenance onto the run's context-window source
+ *  (§22): 'model' = the user's per-model override; unknown never reaches here. */
+function mapMetadataSource(source: ModelMetadataSourceId): ContextWindowSource {
+  switch (source) {
+    case 'model': return 'model'
+    case 'local': return 'local'
+    case 'profile': return 'profile'
+    case 'provider': return 'provider'
+    default: return 'fallback'
+  }
+}
 export type { AgentBridgeClient } from './model/types'
 
 export class AgentRuntime {
@@ -720,29 +732,46 @@ export class AgentRuntime {
       : this.#capabilities.contributeContext(capabilityStates, {
         ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
       })
-    // Context window + its SOURCE. API priority: profile override → provider
-    // capability → safe fallback. The LOCAL 32768 clamp never applies to API
-    // endpoints, and the fallback is budget accounting — never presented as
-    // the model's real maximum.
+    // Model Configuration v2 (§21/§23/§35): the resolved runtimeModel already
+    // absorbed the per-model override, so when it KNOWS its context window
+    // (metadataSource 'model'/'profile'/'provider'/'local', never 'fallback') it
+    // is the single truth — the runtime uses it verbatim (a 1M config really
+    // budgets 1M, §35), and the profile/legacy resolution below never overrides
+    // it. Priority: ModelConfiguration > profile advanced > provider > fallback.
     const advanced = apiActive ? api!.advanced ?? undefined : undefined
     const capabilities = provider.capabilities(model)
+    const modelContext = input.runtimeModel?.limits.context
+    const modelContextKnown = input.runtimeModel !== undefined
+      && input.runtimeModel.metadataSource !== 'unknown'
+      && typeof modelContext === 'number' && modelContext > 0
+    const usingLocalWindow = provider.kind === 'ollama'
     const localWindow = clampLocalContextWindow(this.#contextWindow)
     const apiResolution = resolveApiContextWindow(
       advanced?.contextWindowTokens,
       capabilities,
       this.#contextWindow,
     )
-    const usingLocalWindow = provider.kind === 'ollama'
-    const effectiveWindow = usingLocalWindow ? localWindow : apiResolution.window
-    const contextWindowSource: ContextWindowSource = usingLocalWindow
-      ? 'local'
-      : apiResolution.source
-    // Output reserve: budgeting always needs a number, but the WIRE parameter
-    // is only sent when the profile configures one — an API run with
-    // maxOutputTokens=null no longer inherits the local 2048 cap.
-    const outputReserve = apiActive
-      ? (advanced?.maxOutputTokens ?? 4_096)
+    const effectiveWindow = modelContextKnown
+      ? clampLocalContextWindow(modelContext ?? 0)
+      : usingLocalWindow ? localWindow : apiResolution.window
+    const contextWindowSource: ContextWindowSource = modelContextKnown
+      ? mapMetadataSource(input.runtimeModel!.metadataSource)
+      : usingLocalWindow ? 'local' : apiResolution.source
+    // Output reserve (§38/§39): a known ModelConfiguration max output caps BOTH
+    // the budget reserve and the WIRE limit, so the UI and the request never
+    // disagree (no "UI 128K / wire 4096"). The model's output cap is clamped
+    // under the effective window so a too-large config can't reserve the whole
+    // budget; an unknown output falls back to the legacy profile/numPredict.
+    const outputCapFromModel = input.runtimeModel?.limits.output
+    const legacyOutputCap = apiActive
+      ? (advanced?.maxOutputTokens ?? null)
       : this.#numPredict
+    const outputCap = typeof outputCapFromModel === 'number' && outputCapFromModel > 0
+      ? outputCapFromModel
+      : legacyOutputCap
+    const outputReserve = outputCap == null
+      ? (apiActive ? 4_096 : this.#numPredict)
+      : Math.min(outputCap, Math.max(256, effectiveWindow - 1_024))
     const maxToolRounds = runtimeConfig.maxToolRounds
     // Task System v1: resume the session's latest unfinished task as Active
     // Task Context. A paused task never auto-executes — it re-enters running
@@ -986,10 +1015,11 @@ export class AgentRuntime {
           effectiveWindow,
           sendContextWindow: provider.kind === 'ollama',
         })
-        // maxOutputTokens=null (API auto) → send NO output-limit parameter at
-        // all; a configured value rides through in the profile's chosen
-        // parameter name (openaiProvider gates the wire field).
-        const requestSampling = apiActive && advanced?.maxOutputTokens == null
+        // No output cap at all (neither a ModelConfiguration max-output nor a
+        // profile advanced.maxOutputTokens) → API sends NO output-limit
+        // parameter (Auto). Any configured cap — model or profile — rides
+        // through on the wire with the SAME value the budget reserved (§39).
+        const requestSampling = apiActive && outputCap == null
           ? { ...built.sampling, maxTokens: undefined }
           : built.sampling
         const response = await provider.complete({

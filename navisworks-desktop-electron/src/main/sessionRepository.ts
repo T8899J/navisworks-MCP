@@ -14,6 +14,7 @@ import {
   type ToolPermission,
 } from '../shared/ipc'
 import type { SemanticMemory } from './agent/semanticMemory'
+import type { ModelConfiguration, ModelInputModality, ModelOutputModality } from '../shared/model'
 
 const EMPTY_GUID = '00000000-0000-0000-0000-000000000000'
 const DEFAULT_DATE_TIME_OFFSET = '0001-01-01T00:00:00+00:00'
@@ -97,6 +98,12 @@ export interface AppSettings {
   execution: ExecutionSettings
   /** Disk-history retention (defaults filled on load). */
   storage: StorageSettings
+  /**
+   * Model Configuration v2 (§19/§20): per-model overrides bound to a structured
+   * ModelRef. OPTIONAL — absent (old settings.json) loads as undefined/[] with
+   * no migration; the resolver treats absent as "no override".
+   */
+  modelConfigurations?: ModelConfiguration[]
 }
 
 /** Exact PascalCase disk contract written by the WPF System.Text.Json model. */
@@ -183,6 +190,12 @@ export interface WpfAppSettingsSnapshot {
   Execution?: Record<string, unknown> | null
   /** Electron-only extension: disk-history retention. */
   Storage?: Record<string, unknown> | null
+  /**
+   * Electron-only extension (Model Configuration v2): per-model overrides. The
+   * structured ModelRef is preserved as an OBJECT (§19 — never a joined string
+   * key). Older readers ignore this unknown field, so round-trips stay safe.
+   */
+  ModelConfigurations?: unknown[] | null
 }
 
 export type SessionLoadSource = 'none' | 'primary' | 'backup' | 'unavailable'
@@ -522,6 +535,11 @@ function fromWpfSettingsSnapshot(snapshot: WpfAppSettingsSnapshot): AppSettings 
     // New fields default when absent — old settings.json files migrate intact.
     execution: parseExecutionSettings(snapshot.Execution),
     storage: parseStorageSettings(snapshot.Storage),
+    // Model Configuration v2: absent in old files → undefined (resolver reads []
+    // and applies no override). Structured ModelRef preserved, never a string.
+    ...(snapshot.ModelConfigurations === undefined || snapshot.ModelConfigurations === null
+      ? {}
+      : { modelConfigurations: parseModelConfigurations(snapshot.ModelConfigurations) }),
   }
 }
 
@@ -551,6 +569,19 @@ function toWpfSettingsSnapshot(settings: AppSettings): WpfAppSettingsSnapshot {
     ToolPermissions: { ...settings.toolPermissions },
     Execution: { ...settings.execution },
     Storage: { ...settings.storage },
+    ...(settings.modelConfigurations === undefined
+      ? {}
+      : { ModelConfigurations: settings.modelConfigurations.map((configuration) => ({
+        ref: { providerId: configuration.ref.providerId, modelId: configuration.ref.modelId },
+        ...(configuration.contextWindowTokens === undefined
+          ? {} : { contextWindowTokens: configuration.contextWindowTokens }),
+        ...(configuration.maxOutputTokens === undefined
+          ? {} : { maxOutputTokens: configuration.maxOutputTokens }),
+        ...(configuration.inputModalities === undefined
+          ? {} : { inputModalities: [...configuration.inputModalities] }),
+        ...(configuration.outputModalities === undefined
+          ? {} : { outputModalities: [...configuration.outputModalities] }),
+      })) }),
   }
 }
 
@@ -727,6 +758,10 @@ function parseWpfSettingsSnapshot(value: unknown): WpfAppSettingsSnapshot {
     ToolPermissions: objectOrNull(entry.ToolPermissions),
     Execution: objectOrNull(entry.Execution),
     Storage: objectOrNull(entry.Storage),
+    // Model Configuration v2: pass the raw array through (validated in
+    // fromWpfSettingsSnapshot → parseModelConfigurations). Absent → undefined,
+    // so old settings stay "no overrides".
+    ModelConfigurations: Array.isArray(entry.ModelConfigurations) ? entry.ModelConfigurations : null,
   }
 }
 
@@ -1026,6 +1061,55 @@ function parseProfileAdvanced(value: unknown): ApiProfileAdvancedSettings {
       ? entry.sendStreamOptions
       : defaults.sendStreamOptions,
   }
+}
+
+/**
+ * Model Configuration v2 (§19/§28): validate persisted per-model overrides. Each
+ * needs a STRUCTURED ref (providerId + non-empty modelId — never a joined
+ * string); numeric fields clamp to the schema bounds or drop to undefined (Auto);
+ * modalities filter to the known enum. An entry with no valid ref is DROPPED so
+ * a hand-edited file can't inject a broken key. Returns undefined only for an
+ * empty result (so absent old settings stay absent).
+ */
+const MODEL_INPUT_MODALITIES = ['text', 'image', 'video', 'pdf'] as const
+const MODEL_OUTPUT_MODALITIES = ['text', 'image'] as const
+
+function parseModelConfigurations(value: unknown): ModelConfiguration[] {
+  if (!Array.isArray(value)) return []
+  const configurations: ModelConfiguration[] = []
+  const seen = new Set<string>()
+  for (const raw of value) {
+    const entry = objectOrNull(raw)
+    const ref = objectOrNull(entry?.ref)
+    const providerId = typeof ref?.providerId === 'string' ? ref.providerId.trim() : ''
+    const modelId = typeof ref?.modelId === 'string' ? ref.modelId.trim() : ''
+    if (providerId === '' || modelId === '') continue
+    const key = `${providerId} ${modelId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const inputModalities = Array.isArray(entry?.inputModalities)
+      ? entry.inputModalities.filter((m): m is ModelInputModality =>
+        (MODEL_INPUT_MODALITIES as readonly string[]).includes(String(m)))
+      : undefined
+    const outputModalities = Array.isArray(entry?.outputModalities)
+      ? entry.outputModalities.filter((m): m is ModelOutputModality =>
+        (MODEL_OUTPUT_MODALITIES as readonly string[]).includes(String(m)))
+      : undefined
+    const context = nullableClampInteger(entry?.contextWindowTokens, null, 1024, 2_000_000)
+    const output = nullableClampInteger(entry?.maxOutputTokens, null, 128, 1_000_000)
+    configurations.push({
+      ref: { providerId, modelId },
+      ...(context === null ? {} : { contextWindowTokens: context }),
+      ...(output === null ? {} : { maxOutputTokens: output }),
+      ...(inputModalities === undefined || inputModalities.length === 0
+        ? {}
+        : { inputModalities }),
+      ...(outputModalities === undefined || outputModalities.length === 0
+        ? {}
+        : { outputModalities }),
+    })
+  }
+  return configurations
 }
 
 function assertGuid(value: string, label: string): void {
