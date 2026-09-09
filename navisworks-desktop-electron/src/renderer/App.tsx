@@ -20,6 +20,7 @@ import {
   type QuestionAnswer,
   type QuestionRequest,
   type ModelInfo,
+  type ModelRef,
   type ModelUsage,
   type ToolDefinitionSummary,
   type ChatSession,
@@ -79,7 +80,8 @@ const DEFAULT_SETTINGS: DesktopSettings = {
   activeApiProfileId: null,
   toolPermissions: {},
   execution: DEFAULT_EXECUTION_SETTINGS,
-  storage: DEFAULT_STORAGE_SETTINGS
+  storage: DEFAULT_STORAGE_SETTINGS,
+  modelConfigurations: []
 }
 
 const DEFAULT_NAVISWORKS_STATUS: NavisworksStatus = {
@@ -230,6 +232,9 @@ export default function App() {
     used: number
     window?: number
     source?: ContextWindowSource
+    /** Model Configuration v2 (§31): the run's model identity; a stale window is
+     *  ignored when the active model differs. */
+    modelRef?: ModelRef
     usage?: ModelUsage
     cacheHitRate?: number
   } | null>(null)
@@ -664,6 +669,8 @@ export default function App() {
               used: done.contextTokensUsed,
               ...(typeof done.contextWindowTokens === 'number' ? { window: done.contextWindowTokens } : {}),
               ...(typeof done.contextWindowSource === 'string' ? { source: done.contextWindowSource } : {}),
+              // §31: tag the reported window/usage with the model that produced it.
+              ...(done.modelRef !== undefined ? { modelRef: done.modelRef } : {}),
               ...(doneUsage === undefined ? {} : { usage: doneUsage }),
               ...(typeof done.cacheHitRate === 'number' ? { cacheHitRate: done.cacheHitRate } : {})
             })
@@ -738,7 +745,10 @@ export default function App() {
   }, [refreshToolDefinitions, settings.toolPermissions, settings.disabledTools])
 
   // P8: the active model re-resolves whenever anything that routes it changes
-  // — provider switches, profile edits, model picks, profile deletion.
+  // — provider switches, profile edits, model picks, profile deletion. Model
+  // Configuration v2 (§29): a saved per-model override also changes the resolved
+  // window, so modelConfigurations is in the deps — save → re-resolve → ring
+  // refreshes WITHOUT a restart or a new message.
   useEffect(() => {
     refreshActiveModel()
   }, [
@@ -749,7 +759,23 @@ export default function App() {
     settings.ollamaEnabled,
     settings.apiEnabled,
     settings.apiProfiles,
+    settings.modelConfigurations,
   ])
+
+  // §32: when the active model's identity OR its known context window changes
+  // (model switch / saved override), a run-reported window/usage from the
+  // previous model is stale — drop it so it can never contaminate the ring. The
+  // ring then shows the CURRENT activeModel window immediately (§33/Case B).
+  const modelWindowKey = activeModel === null
+    ? ''
+    : `${activeModel.ref.providerId} ${activeModel.ref.modelId} ${activeModel.limits.context ?? ''}`
+  const lastModelWindowKey = useRef(modelWindowKey)
+  useEffect(() => {
+    if (lastModelWindowKey.current !== modelWindowKey) {
+      lastModelWindowKey.current = modelWindowKey
+      setContextUsage(null)
+    }
+  }, [modelWindowKey])
 
   // P7: after switching models, a persisted step outside the new model's
   // allowed modes snaps to the nearest legal one — the UI never shows (and
@@ -1266,6 +1292,9 @@ export default function App() {
               return saved
             }}
             onModelChange={(selectedModel) => updateSettings({ ...settings, selectedModel, preferApiModel: false })}
+            onModelConfigurationsChange={(modelConfigurations) => {
+              void updateSettings({ ...settings, modelConfigurations })
+            }}
             onDisabledToolsChange={(disabledTools) => updateSettings({ ...settings, disabledTools })}
             tools={toolDefinitions}
             onToolPermissionChange={(name, permission) => {

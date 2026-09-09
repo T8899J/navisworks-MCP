@@ -1,4 +1,4 @@
-import type { ContextWindowSource } from '../shared/ipc'
+import type { ContextWindowSource, ModelRef } from '../shared/ipc'
 
 export type { ContextWindowSource }
 
@@ -13,6 +13,23 @@ export interface ContextRingInput {
   /** Window the last finished run budgeted against (chat.done). */
   reportedWindow?: number
   reportedSource?: ContextWindowSource
+  /**
+   * The ModelRef the `reportedWindow`/`reportedSource` came from (chat.done
+   * modelRef). A reported window is only trusted for THAT model — switching the
+   * active model invalidates a stale window immediately (§31/§32), so a saved
+   * 1M never keeps showing the previous run's 32K.
+   */
+  reportedModelRef?: ModelRef
+  /**
+   * Model Configuration v2 (§33): the CURRENT active model's known context
+   * window (ModelInfo.limits.context) + its metadata source, resolved by main.
+   * When present it outranks profile/settings guessing so the ring shows the
+   * truth the moment a config is saved — WITHOUT needing a new message first.
+   */
+  activeModelContextWindow?: number
+  activeModelMetadataSource?: ContextWindowSource
+  /** The CURRENT active model's identity (activeModel.ref). */
+  activeModelRef?: ModelRef
   /** Active API profile's fixed window; null = profile Auto. */
   profileContextWindowTokens: number | null
   /** settings.contextWindowTokens — local default / fallback budget. */
@@ -36,6 +53,9 @@ export interface ContextRingState {
 }
 
 const SOURCE_LABELS: Record<ContextWindowSource, string> = {
+  // Model Configuration v2 (§22): an explicit per-model override — the user's
+  // own number, shown immediately on save without waiting for a new run.
+  model: '模型自定义',
   local: '本地上下文窗口',
   profile: 'API 配置窗口',
   provider: '服务端报告窗口',
@@ -93,16 +113,34 @@ function measuredState(
  * present a fallback budget as the model's real context window, and in API
  * Auto mode with no finished run it must show an honest "unknown" state.
  */
+/** Two ModelRefs that belong to the same model (§31). */
+function sameModelRef(a?: ModelRef, b?: ModelRef): boolean {
+  return a !== undefined && b !== undefined && a.providerId === b.providerId && a.modelId === b.modelId
+}
+
 export function resolveContextRingState(input: ContextRingInput): ContextRingState {
   const used = Math.max(0, input.usedTokens)
+  // §33 FIRST: the CURRENT active model's known window is the truth. When a
+  // ModelConfiguration (1M) is saved, main re-resolves activeModel, so the ring
+  // flips to 1M IMMEDIATELY — no new message required. This outranks a stale
+  // reportedWindow from a previous run.
+  const activeWindow = input.activeModelContextWindow
+  if (activeWindow !== undefined && activeWindow > 0 && input.activeModelMetadataSource !== undefined) {
+    return measuredState(input.activeModelMetadataSource, activeWindow, used)
+  }
+  // No active model resolved yet (or it truly knows no window): only THEN fall
+  // back to a run-reported window — and only when it belongs to the CURRENT
+  // model. A 32K window reported for a since-switched model is stale (§31/§32)
+  // and must NOT be shown.
   const reported = input.reportedWindow !== undefined
     && input.reportedWindow > 0
     && input.reportedSource !== undefined
+    && (input.activeModelRef === undefined || sameModelRef(input.reportedModelRef, input.activeModelRef))
   if (reported) {
     return measuredState(input.reportedSource!, input.reportedWindow!, used)
   }
 
-  // No finished run reported a window for this session yet.
+  // Nothing resolved this session yet.
   if (input.usingApi === null) {
     return {
       mode: 'auto',
@@ -127,7 +165,8 @@ export function resolveContextRingState(input: ContextRingInput): ContextRingSta
     }
   }
 
-  // Local before the first report: the runtime's own clamp is the real window.
-  const localWindow = Math.min(Math.max(1024, input.configuredContextWindowTokens), 32_768)
+  // Local before a window is known: the configured local budget, clamped to the
+  // SANE range only (Model Configuration v2 §36: 32K is a default, not a cap).
+  const localWindow = Math.max(1024, Math.trunc(input.configuredContextWindowTokens))
   return measuredState('local', localWindow, used)
 }

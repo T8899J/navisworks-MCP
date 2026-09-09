@@ -4025,3 +4025,147 @@ select:focus-visible,
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* ===== Model Configuration v2 dialog (§26) ===== */
+
+.model-config-edit {
+  margin-left: auto;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--overlay-background);
+  backdrop-filter: blur(5px);
+}
+
+.modal-card {
+  display: flex;
+  width: min(440px, 100%);
+  max-height: calc(100vh - 48px);
+  flex-direction: column;
+  color: var(--text);
+  background: var(--background);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px var(--shadow-color);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  font-size: calc(14px * var(--font-scale));
+  font-weight: 650;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-close {
+  display: inline-grid;
+  padding: 4px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.modal-close:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.modal-body {
+  display: flex;
+  overflow-y: auto;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 20px;
+}
+
+.model-config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.model-config-label {
+  color: var(--text-secondary);
+  font-size: var(--text-label);
+}
+
+.model-config-field input[type="text"],
+.model-config-field input[type="number"] {
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--input-background, var(--background));
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: var(--text-secondary-size);
+}
+
+.model-config-field input:disabled {
+  color: var(--text-muted, var(--text-secondary));
+  opacity: 0.7;
+}
+
+.model-config-modality {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.model-config-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: var(--text-secondary-size);
+}
+
+.model-config-error {
+  color: var(--error-text);
+  font-size: var(--text-label);
+}
+
+.model-config-note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-label);
+  line-height: 1.6;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.modal-footer .primary-button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  color: var(--accent-text, #fff);
+  background: var(--accent, #2563eb);
+  border: none;
+  border-radius: 8px;
+  font-size: var(--text-secondary-size);
+  cursor: pointer;
+}
+
+.modal-footer .primary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

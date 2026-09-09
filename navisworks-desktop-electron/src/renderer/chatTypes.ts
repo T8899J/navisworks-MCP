@@ -15,11 +15,25 @@ import {
   type ToolName,
 } from '../shared/ipc'
 import { normalizeReasoningEffort, REASONING_EFFORTS, type ReasoningEffort } from '../shared/reasoning'
-import type { ModelInfo, ModelUsage } from '../shared/model'
+import type {
+  ModelConfiguration,
+  ModelInfo,
+  ModelInputModality,
+  ModelOutputModality,
+  ModelRef,
+  ModelUsage,
+} from '../shared/model'
 
 export type { ApiProfile, ContextWindowSource, ToolApprovalRequest, ToolDefinitionSummary, ToolPermission }
 export type { ReasoningEffort }
-export type { ModelInfo, ModelUsage }
+export type {
+  ModelConfiguration,
+  ModelInfo,
+  ModelInputModality,
+  ModelOutputModality,
+  ModelUsage,
+  ModelRef,
+}
 export type { QuestionAnswer, QuestionPrompt, QuestionRequest } from '../shared/ipc'
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'error'
@@ -82,6 +96,8 @@ export interface DesktopSettings {
   execution: ExecutionSettings
   /** Disk-history retention. */
   storage: StorageSettings
+  /** Model Configuration v2: per-model overrides (empty when none saved). */
+  modelConfigurations: ModelConfiguration[]
 }
 
 export type { ApiProfileAdvancedSettings, ExecutionSettings, StorageSettings }
@@ -160,6 +176,11 @@ export interface ChatStreamEvent {
   contextWindowTokens?: number
   /** Where that window came from ('fallback' = safety budget, NOT a model limit). */
   contextWindowSource?: ContextWindowSource
+  /**
+   * Model Configuration v2 (§31): the ModelRef the reported window/usage belong
+   * to. The ring refuses a stale window from a different model.
+   */
+  modelRef?: ModelRef
   compacted?: boolean
   error?: string | { code: string; message: string }
 }
@@ -321,8 +342,56 @@ export function normalizeSettings(value: unknown): DesktopSettings {
     activeApiProfileId: typeof source.activeApiProfileId === 'string' ? source.activeApiProfileId : null,
     toolPermissions: normalizeToolPermissions(asRecord(source.toolPermissions ?? {})),
     execution: normalizeExecutionSettings(asRecord(source.execution ?? {})),
-    storage: normalizeStorageSettings(asRecord(source.storage ?? {}))
+    storage: normalizeStorageSettings(asRecord(source.storage ?? {})),
+    // Model Configuration v2: old settings (no key) → []. Structured ref only.
+    modelConfigurations: normalizeModelConfigurations(
+      Array.isArray(source.modelConfigurations)
+        ? source.modelConfigurations
+        : Array.isArray(source.ModelConfigurations)
+          ? source.ModelConfigurations
+          : [],
+    ),
   }
+}
+
+const INPUT_MODALITIES: readonly string[] = ['text', 'image', 'video', 'pdf']
+const OUTPUT_MODALITIES: readonly string[] = ['text', 'image']
+
+function normalizeModelConfigurations(value: readonly unknown[]): ModelConfiguration[] {
+  const configs: ModelConfiguration[] = []
+  const seen = new Set<string>()
+  for (const raw of value) {
+    const entry = asRecord(raw)
+    const ref = asRecord(entry.ref)
+    const providerId = typeof ref.providerId === 'string' ? ref.providerId.trim() : ''
+    const modelId = typeof ref.modelId === 'string' ? ref.modelId.trim() : ''
+    if (providerId === '' || modelId === '') continue
+    const key = `${providerId} ${modelId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const context = clampOptionalInt(entry.contextWindowTokens, 1024, 2_000_000)
+    const output = clampOptionalInt(entry.maxOutputTokens, 128, 1_000_000)
+    const inputModalities = Array.isArray(entry.inputModalities)
+      ? entry.inputModalities.filter((m): m is ModelInputModality => INPUT_MODALITIES.includes(String(m)))
+      : undefined
+    const outputModalities = Array.isArray(entry.outputModalities)
+      ? entry.outputModalities.filter((m): m is ModelOutputModality => OUTPUT_MODALITIES.includes(String(m)))
+      : undefined
+    configs.push({
+      ref: { providerId, modelId },
+      ...(context === undefined ? {} : { contextWindowTokens: context }),
+      ...(output === undefined ? {} : { maxOutputTokens: output }),
+      ...(inputModalities === undefined || inputModalities.length === 0 ? {} : { inputModalities }),
+      ...(outputModalities === undefined || outputModalities.length === 0 ? {} : { outputModalities }),
+    })
+  }
+  return configs
+}
+
+function clampOptionalInt(value: unknown, min: number, max: number): number | undefined {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return undefined
+  return Math.min(max, Math.max(min, Math.trunc(n)))
 }
 
 function normalizeToolPermissions(value: Record<string, unknown>): Record<string, ToolPermission> {

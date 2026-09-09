@@ -7,6 +7,7 @@ import {
   type ReasoningEffort,
 } from '../shared/reasoning'
 import { calculateCacheHitRate, type ModelInfo, type ModelUsage } from '../shared/model'
+import type { ContextWindowSource } from '../shared/ipc'
 import type { DesktopSettings, ToolApprovalRequest } from './chatTypes'
 import { ConversationColumn } from './ConversationColumn'
 import { formatCacheRateLabel, formatTokenCount, resolveContextRingState } from './contextRing'
@@ -50,6 +51,8 @@ interface ComposerProps {
     used: number
     window?: number
     source?: import('../shared/ipc').ContextWindowSource
+    /** Model Configuration v2 (§31): the ModelRef the reported window is for. */
+    modelRef?: import('../shared/ipc').ModelRef
     /** P6: raw usage of the last round — drives the input/output/cache lines. */
     usage?: ModelUsage
     /** @deprecated Derived helper; the truth is `usage` now. */
@@ -135,6 +138,16 @@ export function Composer({
     usedTokens: contextUsage?.used ?? 0,
     reportedWindow: contextUsage?.window,
     reportedSource: contextUsage?.source,
+    // The window + usage come from the SAME chat.done run (§31): a stale model's
+    // window can't be reused once the active model is different.
+    reportedModelRef: contextUsage?.modelRef,
+    // §33: the CURRENT active model's known window is the truth the ring prefers
+    // — so a saved 1M ModelConfiguration shows 1M at once, no new message.
+    activeModelContextWindow: activeModel?.limits.context,
+    activeModelMetadataSource: activeModel !== undefined && activeModel !== null && activeModel.metadataSource !== 'unknown'
+      ? activeModel.metadataSource as ContextWindowSource
+      : undefined,
+    activeModelRef: activeModel?.ref,
     profileContextWindowTokens: usingApi
       ? activeApiProfile?.advanced.contextWindowTokens ?? null
       : null,

@@ -19,7 +19,8 @@ import {
   useState
 } from 'react'
 import { DEFAULT_API_PROFILE_ADVANCED, type ApiProfileAdvancedSettings, type ThemeMode, type ToolDefinitionSummary, type ToolName, type ToolPermission } from '../shared/ipc'
-import type { DesktopSettings } from './chatTypes'
+import type { DesktopSettings, ModelConfiguration, ModelRef } from './chatTypes'
+import { ModelConfigurationDialog, type ModelConfigurationDraft } from './ModelConfigurationDialog'
 
 export interface RuntimeDiagnostics {
   dataDirectory?: string
@@ -165,6 +166,8 @@ interface SettingsPanelProps {
   }): Promise<DesktopSettings>
   onDeleteApiProfile(profileId: string): Promise<DesktopSettings>
   onModelChange(model: string): void | Promise<void>
+  /** Model Configuration v2 (§19): persist the full per-model override list. */
+  onModelConfigurationsChange(configurations: ModelConfiguration[]): void | Promise<void>
   onDisabledToolsChange(disabledTools: ToolName[]): void | Promise<void>
   /** Registry summaries (resolved permissions included) for the 工具与权限 page. */
   tools: ToolDefinitionSummary[]
@@ -194,6 +197,7 @@ export function SettingsPanel({
   onSaveApiProfile,
   onDeleteApiProfile,
   onModelChange,
+  onModelConfigurationsChange,
   onDisabledToolsChange,
   onToolPermissionChange,
   onBulkToolPermissions,
@@ -226,6 +230,40 @@ export function SettingsPanel({
   // 高级配置 → 上下文窗口: Auto follows the provider; Fixed pins a number.
   const [profileContextMode, setProfileContextMode] = useState<'auto' | 'fixed'>('auto')
   const [profileContextText, setProfileContextText] = useState('')
+  // Model Configuration v2 (§26): which model's config dialog is open.
+  const [modelConfigTarget, setModelConfigTarget] = useState<{
+    providerId: string
+    modelId: string
+    modelIdEditable: boolean
+  } | null>(null)
+  const existingModelConfiguration = (ref: ModelRef): ModelConfiguration | undefined =>
+    (settings.modelConfigurations ?? []).find(
+      (configuration) => configuration.ref.providerId === ref.providerId
+        && configuration.ref.modelId === ref.modelId,
+    )
+  const applyModelConfigDraft = (draft: ModelConfigurationDraft): void => {
+    const base = draft.baseRef
+    // Replace/insert the entry for THIS model (dropping any prior config bound to
+    // the OLD ref, so a rename never leaves an orphan override, §27).
+    const others = (settings.modelConfigurations ?? []).filter(
+      (configuration) => !(configuration.ref.providerId === base.providerId
+        && configuration.ref.modelId === base.modelId),
+    )
+    const next = draft.cleared ? others : [...others, draft.configuration]
+    void onModelConfigurationsChange(next)
+    // §27: an API model-id rename also re-points profile.model.
+    if (draft.renamedTo !== undefined && selectedProfile !== undefined) {
+      void onSaveApiProfile({
+        id: selectedProfile.id,
+        name: selectedProfile.name,
+        baseUrl: selectedProfile.baseUrl,
+        model: draft.renamedTo,
+        ...(selectedProfile.advanced ? { advanced: selectedProfile.advanced } : {}),
+      })
+    }
+    setModelConfigTarget(null)
+    onNotice('已保存模型配置，正在刷新生效')
+  }
   useEffect(() => {
     if (!selectedProfile) {
       setSelectedProfileId(settings.apiProfiles[0]?.id ?? null)
@@ -612,6 +650,18 @@ export function SettingsPanel({
                           })
                         }}
                       />
+                      <button
+                        type="button"
+                        className="secondary-button model-config-edit"
+                        disabled={cloudModelText.trim() === ''}
+                        onClick={() => setModelConfigTarget({
+                          providerId: `api:${selectedProfile.id}`,
+                          modelId: cloudModelText.trim(),
+                          modelIdEditable: true,
+                        })}
+                      >
+                        编辑模型配置
+                      </button>
                     </div>
                   </div>
 
@@ -714,8 +764,35 @@ export function SettingsPanel({
                       disabled={!serviceAvailable}
                       onPick={(model) => void onModelChange(model)}
                     />
+                    <button
+                      type="button"
+                      className="secondary-button model-config-edit"
+                      disabled={settings.selectedModel.trim() === ''}
+                      onClick={() => setModelConfigTarget({
+                        providerId: 'ollama',
+                        modelId: settings.selectedModel.trim(),
+                        modelIdEditable: false,
+                      })}
+                    >
+                      编辑模型配置
+                    </button>
                   </div>
                 </div>
+
+                {modelConfigTarget !== null && (
+                  <ModelConfigurationDialog
+                    open
+                    providerId={modelConfigTarget.providerId}
+                    modelId={modelConfigTarget.modelId}
+                    modelIdEditable={modelConfigTarget.modelIdEditable}
+                    existing={existingModelConfiguration({
+                      providerId: modelConfigTarget.providerId,
+                      modelId: modelConfigTarget.modelId,
+                    })}
+                    onCancel={() => setModelConfigTarget(null)}
+                    onSubmit={applyModelConfigDraft}
+                  />
+                )}
 
               </>
             ) : null}
