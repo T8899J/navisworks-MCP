@@ -4190,23 +4190,22 @@ select:focus-visible,
   line-height: 1.5;
 }
 
-/* ===== Custom tooltip (replaces the native OS title bubble) =====
-   Native `title` tooltips are drawn by the OS: square corners, an unstyleable
-   white border in dark mode / black in light mode. Elements that want a hover
-   hint use data-tip instead and get this theme-adaptive gray rounded chip.
-   Positioning defaults to ABOVE the element; data-tip-below="true" flips it for
-   controls near a top edge. */
+/* ===== Global custom tooltip (replaces every native OS title bubble) =====
+   Native `title` is drawn by the OS: square corners, an unstyleable white
+   border in dark mode / black in light mode, and it cannot be themed. A single
+   body-level node (appTooltip.ts) is positioned with `position: fixed` from the
+   hovered element's rect, so it escapes every overflow:hidden ancestor (the
+   sidebar, .model-display, …) and renders identically everywhere. Elements opt
+   in with data-tip="…"; data-tip-below="true" forces it under the control.
+   The gray rounded look follows --tooltip-surface / --tooltip-ink tokens that
+   already adapt to light / dark. */
 
-[data-tip] {
-  position: relative;
-}
-
-[data-tip]::after {
-  content: attr(data-tip);
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  z-index: 200;
+.app-tooltip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 1000;
+  max-width: 320px;
   padding: 5px 10px;
   color: var(--tooltip-ink);
   background: var(--tooltip-surface);
@@ -4217,54 +4216,38 @@ select:focus-visible,
   font-weight: 500;
   line-height: 1.35;
   letter-spacing: 0.01em;
-  white-space: nowrap;
   text-align: center;
+  overflow-wrap: break-word;
+  /* pre-line so a multi-line data-tip (e.g. the instance menu's doc / host /
+     PID / status) keeps its line breaks, like the native title it replaces. */
+  white-space: pre-line;
   pointer-events: none;
   opacity: 0;
   visibility: hidden;
-  transform: translate(-50%, 3px);
-  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+  transition: opacity 0.12s ease, visibility 0.12s;
 }
 
-/* The little diamond arrow pointing at the control (kept rotated on show). */
-[data-tip]::before {
+.app-tooltip[data-visible="true"] {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* Arrow: a diamond pinned to the bubble edge facing the control. */
+.app-tooltip::after {
   content: "";
   position: absolute;
   left: 50%;
-  bottom: calc(100% + 4px);
-  z-index: 201;
   width: 8px;
   height: 8px;
+  margin-left: -4px;
   background: var(--tooltip-surface);
-  pointer-events: none;
-  opacity: 0;
-  visibility: hidden;
-  transform: translate(-50%, 3px) rotate(45deg);
-  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+  transform: rotate(45deg);
 }
 
-[data-tip-below="true"]::after {
-  top: calc(100% + 8px);
-  bottom: auto;
-  transform: translate(-50%, -3px);
+.app-tooltip[data-placement="top"]::after {
+  bottom: -3px;
 }
 
-[data-tip-below="true"]::before {
-  top: calc(100% + 4px);
-  bottom: auto;
-  transform: translate(-50%, -3px) rotate(45deg);
-}
-
-[data-tip]:hover::after,
-[data-tip]:focus-visible::after {
-  opacity: 1;
-  visibility: visible;
-  transform: translate(-50%, 0);
-}
-
-[data-tip]:hover::before,
-[data-tip]:focus-visible::before {
-  opacity: 1;
-  visibility: visible;
-  transform: translate(-50%, 0) rotate(45deg);
+.app-tooltip[data-placement="bottom"]::after {
+  top: -3px;
 }

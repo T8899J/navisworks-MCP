@@ -42,6 +42,7 @@ import {
   shouldApplyContextUsage,
 } from './sessionLifecycle'
 import { appearanceGateway, applyAppearance, applyFontScale } from './appearance'
+import { installAppTooltip } from './appTooltip'
 import { desktopGateway } from './desktop'
 import { MessageList } from './MessageList'
 import {
@@ -291,6 +292,9 @@ export default function App() {
     const timer = window.setTimeout(() => setNotice(''), 3000)
     return () => window.clearTimeout(timer)
   }, [notice])
+  // Global tooltip: one body-level fixed node backs every [data-tip] control
+  // (replacing the native OS title bubble). Installed once for the app session.
+  useEffect(() => installAppTooltip(), [])
   const [composerClearance, setComposerClearance] = useState(176)
   const composerDockRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<ChatSession | undefined>(undefined)
@@ -1321,7 +1325,7 @@ export default function App() {
             </div>
           )}
           <div className="header-actions">
-            <div className="navisworks-status" data-connected={navisworks.connected} role="status" title={navisworksChipTitle}>
+            <div className="navisworks-status" data-connected={navisworks.connected} role="status" data-tip={navisworksChipTitle} data-tip-below="true">
               <span className="status-dot" />
               <Box aria-hidden="true" size={14} />
               <span className="status-copy">
@@ -1366,7 +1370,7 @@ export default function App() {
                         data-selected={isSelected}
                         data-disconnected={isDisconnected}
                         disabled={isDisconnected || busy || navisworksConnection.runningInstanceId !== undefined}
-                        title={[
+                        data-tip={[
                           instance.documentName ?? '未命名文档',
                           `Navisworks ${instance.hostVersion}`,
                           `PID ${instance.processId}`,

@@ -67,7 +67,7 @@ export function Sidebar({
             className="mini-icon-button"
             type="button"
             aria-label={session.pinnedAt ? '取消固定会话' : '固定会话'}
-            title={session.pinnedAt ? '取消固定' : '固定'}
+            data-tip={session.pinnedAt ? '取消固定' : '固定'}
             onClick={() => onTogglePinned(session.id)}>
             {session.pinnedAt ? <PinOff aria-hidden="true" size={13} /> : <Pin aria-hidden="true" size={13} />}
           </button>
@@ -75,7 +75,7 @@ export function Sidebar({
             className="mini-icon-button danger"
             type="button"
             aria-label="删除会话"
-            title="删除"
+            data-tip="删除"
             onClick={() => onDelete(session.id)}>
             <Trash2 aria-hidden="true" size={13} />
           </button>
@@ -149,7 +149,7 @@ export function Sidebar({
                   type="button"
                   aria-label="搜索聊天"
                   aria-haspopup="dialog"
-                  title="搜索聊天"
+                  data-tip="搜索聊天"
                   onClick={onOpenSearch}>
                   <Search aria-hidden="true" size={22} />
                 </button>
@@ -181,7 +181,7 @@ export function Sidebar({
                 type="button"
                 aria-label="打开设置"
                 aria-haspopup="dialog"
-                title="设置"
+                data-tip="设置"
                 onClick={onOpenSettings}>
                 <Settings aria-hidden="true" size={18} />
               </button>

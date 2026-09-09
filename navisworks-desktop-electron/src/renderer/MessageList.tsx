@@ -227,12 +227,12 @@ function MessageActions({ message, retry }: { message: ChatMessage; retry?: () =
   return (
     <div className="message-actions" aria-label="消息操作">
       {canCopy ? (
-        <button className="message-action-button" type="button" onClick={() => void copy()} aria-label={copied ? '已复制' : '复制消息'} title={copied ? '已复制' : '复制'}>
+        <button className="message-action-button" type="button" onClick={() => void copy()} aria-label={copied ? '已复制' : '复制消息'} data-tip={copied ? '已复制' : '复制'}>
           {copied ? <Check aria-hidden="true" size={15} /> : <Copy aria-hidden="true" size={15} />}
         </button>
       ) : null}
       {retry ? (
-        <button className="message-action-button" type="button" onClick={retry} aria-label="重新生成" title="重新生成">
+        <button className="message-action-button" type="button" onClick={retry} aria-label="重新生成" data-tip="重新生成">
           <RotateCcw aria-hidden="true" size={15} />
         </button>
       ) : null}

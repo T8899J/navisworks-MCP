@@ -624,7 +624,7 @@ export function SettingsPanel({
                     </div>
                     <div className="cloud-model-row">
                       <span className="cloud-model-label">当前模型</span>
-                      <span className="model-display" title={cloudModelText}>{cloudModelText || '未设置'}</span>
+                      <span className="model-display" data-tip={cloudModelText || '未设置'}>{cloudModelText || '未设置'}</span>
                       <ModelPicker
                         value={cloudModelText}
                         options={cloudModels}
@@ -698,7 +698,7 @@ export function SettingsPanel({
                 <div className="provider-field">
                   <div className="cloud-model-row">
                     <span className="cloud-model-label">当前模型</span>
-                    <span className="model-display" title={settings.selectedModel}>{settings.selectedModel}</span>
+                    <span className="model-display" data-tip={settings.selectedModel}>{settings.selectedModel}</span>
                     <ModelPicker
                       value={settings.selectedModel}
                       options={settings.models}
@@ -805,7 +805,7 @@ export function SettingsPanel({
             {activePage === 'runtime' ? (
               <dl className="diagnostic-list">
                 <div><dt>桌面服务</dt><dd>{serviceAvailable ? '已连接' : '未连接'}</dd></div>
-                {diagnostics?.dataDirectory ? <div><dt>数据目录</dt><dd title={diagnostics.dataDirectory}>{diagnostics.dataDirectory}</dd></div> : null}
+                {diagnostics?.dataDirectory ? <div><dt>数据目录</dt><dd data-tip={diagnostics.dataDirectory}>{diagnostics.dataDirectory}</dd></div> : null}
                 {diagnostics?.runtime ? <div><dt>运行时</dt><dd>{diagnostics.runtime}</dd></div> : null}
               </dl>
             ) : null}
