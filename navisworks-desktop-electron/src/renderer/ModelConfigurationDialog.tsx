@@ -1,5 +1,6 @@
+import { ModelPicker } from './ModelPicker'
 import { useEffect, useState } from 'react'
-import { X } from 'lucide-react'
+import { LoaderCircle, RefreshCw, X } from 'lucide-react'
 import type { ModelConfiguration, ModelInputModality, ModelOutputModality, ModelRef } from './chatTypes'
 
 /**
@@ -60,6 +61,7 @@ interface ModelConfigurationDialogProps {
   existing?: ModelConfiguration
   onCancel(): void
   onSubmit(draft: ModelConfigurationDraft): void
+  onFetchModels?(): Promise<string[]>
 }
 
 export function ModelConfigurationDialog({
@@ -70,7 +72,11 @@ export function ModelConfigurationDialog({
   existing,
   onCancel,
   onSubmit,
+  onFetchModels,
 }: ModelConfigurationDialogProps) {
+  const [fetchBusy, setFetchBusy] = useState(false)
+  const [fetchedModels, setFetchedModels] = useState<string[]>([])
+  const [fetchError, setFetchError] = useState('')
   const [modelText, setModelText] = useState(modelId)
   const [contextText, setContextText] = useState(
     existing?.contextWindowTokens != null ? String(existing.contextWindowTokens) : '',
@@ -96,6 +102,21 @@ export function ModelConfigurationDialog({
   }, [open, modelId, existing])
 
   if (!open) return null
+
+  const fetchModels = async () => {
+    if (!onFetchModels || fetchBusy) return
+    setFetchBusy(true)
+    setFetchError('')
+    try {
+      const models = [...new Set((await onFetchModels()).map((id) => id.trim()).filter(Boolean))]
+      setFetchedModels(models)
+      if (models.length === 0) setFetchError('该 API 未返回模型，可手动填写模型 ID。')
+    } catch (error) {
+      setFetchError(error instanceof Error ? error.message : '获取模型失败，请检查 Base URL 和 API 密钥。')
+    } finally {
+      setFetchBusy(false)
+    }
+  }
 
   const contextValue = parseNumber(contextText)
   const outputValue = parseNumber(outputText)
@@ -135,7 +156,7 @@ export function ModelConfigurationDialog({
     <div className="modal-overlay" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onCancel()
     }}>
-      <div className="modal-card" role="dialog" aria-modal="true" aria-label="编辑模型配置">
+      <div className="modal-card model-configuration-dialog" role="dialog" aria-modal="true" aria-label="编辑模型配置">
         <div className="modal-header">
           <span>编辑模型配置</span>
           <button className="modal-close" type="button" aria-label="关闭" onClick={onCancel}>
@@ -143,8 +164,15 @@ export function ModelConfigurationDialog({
           </button>
         </div>
         <div className="modal-body">
-          <label className="model-config-field" htmlFor="mc-model-id">
-            <span className="model-config-label">模型 ID</span>
+          <div className="model-config-field">
+            <div className="provider-field-heading">
+              <label className="model-config-label" htmlFor="mc-model-id">模型 ID</label>
+              {modelIdEditable && onFetchModels ? <button className="secondary-button" type="button" disabled={fetchBusy} onClick={() => void fetchModels()}>
+                {fetchBusy ? <LoaderCircle size={14} className="running" aria-hidden="true" /> : <RefreshCw size={14} aria-hidden="true" />}
+                {fetchBusy ? '获取中…' : '获取模型'}
+              </button> : null}
+            </div>
+            <div className="model-id-controls">
             <input
               id="mc-model-id"
               type="text"
@@ -152,12 +180,16 @@ export function ModelConfigurationDialog({
               disabled={!modelIdEditable}
               onChange={(event) => setModelText(event.currentTarget.value)}
               placeholder={modelIdEditable ? '如 qwen3.8-max' : modelId}
+              aria-describedby={fetchError ? 'model-fetch-error' : undefined}
             />
+            {fetchedModels.length > 0 ? <ModelPicker value={fetchedModels.includes(modelText) ? modelText : ''} options={fetchedModels} placeholder={`选择模型（${fetchedModels.length}）`} emptyHint="暂无模型" onPick={setModelText} /> : null}
+            </div>
+            {fetchError ? <small id="model-fetch-error" className="model-config-error" role="alert">{fetchError}</small> : null}
             {!modelIdEditable && (
               <small className="provider-field-hint">本地 Ollama 模型 ID 来自模型列表，只读。</small>
             )}
             {modelInvalid && <small className="model-config-error">模型 ID 不能为空。</small>}
-          </label>
+          </div>
 
           <label className="model-config-field" htmlFor="mc-context">
             <span className="model-config-label">上下文窗口（tokens）</span>

@@ -615,7 +615,7 @@ export class AgentRuntime {
    * current endpoint answers (so deleting Ollama someday keeps titles working);
    * only a genuinely local run uses the local daemon.
    */
-  async summarizeTitle(text: string, signal?: AbortSignal, api?: ApiEndpointConfig): Promise<string> {
+  async summarizeTitle(text: string, signal?: AbortSignal, api?: ApiEndpointConfig, model?: string): Promise<string> {
     const apiActive = Boolean(api?.baseUrl && api.model?.trim())
     if (apiActive) {
       const provider = this.#apiProvider(api!)
@@ -625,7 +625,8 @@ export class AgentRuntime {
           { role: 'system', content: '根据用户的第一条消息生成一个简洁的会话标题：不超过 20 个字，不要标点或引号，只输出标题本身。' },
           { role: 'user', content: text },
         ],
-        sampling: { temperature: 0.2, maxTokens: 64 },
+        sampling: { temperature: 0.2, maxTokens: 4096 },
+        reasoningEffort: 'low',
         ...(signal ? { signal } : {}),
       })
       const title = response.content.trim()
@@ -639,7 +640,7 @@ export class AgentRuntime {
     if (!summarize) {
       throw new AgentRuntimeError('MODEL_INVALID_RESPONSE', '本地模型不支持标题生成。')
     }
-    return summarize.call(provider, this.#model, text, signal)
+    return summarize.call(provider, model?.trim() || this.#model, text, signal)
   }
 
   async run(rawInput: string | AgentRunInput, options: RunAgentOptions = {}): Promise<AgentRunResult> {

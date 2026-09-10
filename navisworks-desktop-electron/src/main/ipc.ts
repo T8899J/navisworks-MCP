@@ -179,7 +179,7 @@ export interface OllamaAgentPort {
   ): Promise<OllamaRunResult>
   /** Optional: model-generated conversation title; routes fall back to truncation.
    * When an `api` endpoint is supplied, the ACTIVE API provider answers. */
-  summarizeTitle?(text: string, signal?: AbortSignal, api?: ApiEndpointConfig): Promise<string>
+  summarizeTitle?(text: string, signal?: AbortSignal, api?: ApiEndpointConfig, model?: string): Promise<string>
   /** Manual /compact: summarizes a session's messages into one summary. */
   compact?(
     messages: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }>,
@@ -335,7 +335,7 @@ export function registerDesktopIpc(dependencies: DesktopIpcDependencies): () => 
       try {
         const settings = await persistence.getSettings()
         const endpoint = await resolveChatEndpoint(persistence, settings)
-        return { title: await dependencies.ollama.summarizeTitle(text, undefined, endpoint ?? undefined) }
+        return { title: await dependencies.ollama.summarizeTitle(text, undefined, endpoint ?? undefined, settings.selectedModel) }
       } catch {
         return fallback
       }
@@ -1264,6 +1264,8 @@ export class PersistenceFacade {
         name: input.name.trim(),
         baseUrl,
         model: input.model.trim(),
+        models: input.models ? [...new Set(input.models)] : existing?.models,
+        enabled: input.enabled ?? existing?.enabled ?? true,
         apiKeyCiphertext,
         legacyApiKey: '',
         // New advanced config only when supplied; editing name/URL alone keeps
@@ -1272,13 +1274,18 @@ export class PersistenceFacade {
           ? normalizeProfileAdvanced(input.advanced)
           : existing?.advanced ?? { ...DEFAULT_API_PROFILE_ADVANCED },
       }
-      const apiProfiles = existing
+      const profiles = existing
         ? current.apiProfiles.map((candidate) => candidate.id === id ? profile : candidate)
         : [...current.apiProfiles, profile]
+      // Migrating the old global off switch must not silently enable other APIs.
+      const apiProfiles = input.enabled === true && current.apiEnabled === false
+        ? profiles.map((candidate) => candidate.id === id ? candidate : { ...candidate, enabled: false })
+        : profiles
       const next: PersistedSettings = {
         ...current,
         apiProfiles,
         activeApiProfileId: current.activeApiProfileId ?? id,
+        ...(input.enabled === true ? { apiEnabled: true } : {}),
       }
       await this.#saveSettings(next)
       return toDesktopSettings(next)
@@ -1471,6 +1478,7 @@ function toDesktopSession(session: ConversationSession): Session {
         ...(tool.error ? { error: tool.error } : {})
       }))
     })),
+    ...(session.contextUsage === undefined ? {} : { contextUsage: session.contextUsage }),
     ...(session.compactSummary === undefined ? {} : { compactSummary: session.compactSummary }),
     ...(session.semanticMemory === undefined ? {} : { semanticMemory: session.semanticMemory })
   }
@@ -1490,6 +1498,7 @@ function toPersistedSession(session: Session): ConversationSession {
     updatedAt: session.updatedAt,
     pinnedAt: session.pinnedAt ?? null,
     contextTokensUsed: session.contextTokensUsed ?? 0,
+    ...(session.contextUsage === undefined ? {} : { contextUsage: session.contextUsage }),
     ...(session.compactSummary === undefined ? {} : { compactSummary: session.compactSummary }),
     ...(session.semanticMemory === undefined ? {} : { semanticMemory: session.semanticMemory }),
     messages: session.messages.map((message) => ({
@@ -1601,6 +1610,8 @@ function toDesktopSettings(settings: PersistedSettings): AppSettings {
       baseUrl: profile.baseUrl,
       model: profile.model,
       hasApiKey: Boolean(profile.apiKeyCiphertext || profile.legacyApiKey),
+      models: profile.models,
+      enabled: profile.enabled ?? true,
       advanced: profile.advanced ?? { ...DEFAULT_API_PROFILE_ADVANCED },
     })),
     activeApiProfileId: settings.activeApiProfileId ?? null,
@@ -1639,7 +1650,8 @@ async function resolveChatEndpoint(
   persistence: Pick<PersistenceFacade, 'getApiEndpoint'>,
   settings: AppSettings,
 ): Promise<(OllamaEndpointOptions & { model: string }) | null> {
-  if (settings.apiEnabled && (settings.preferApiModel || !settings.ollamaEnabled)) {
+  if (settings.apiEnabled && (settings.preferApiModel || !settings.ollamaEnabled)
+    && settings.apiProfiles.find((profile) => profile.id === settings.activeApiProfileId)?.enabled !== false) {
     const endpoint = await persistence.getApiEndpoint(settings.activeApiProfileId)
     if (endpoint) return endpoint
   }

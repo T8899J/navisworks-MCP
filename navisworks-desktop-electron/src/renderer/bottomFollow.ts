@@ -73,6 +73,11 @@ export class BottomFollowController {
     return this.#following
   }
 
+  /** Reconcile a collapsed layout without requiring a browser scroll event. */
+  onLayout(position: ScrollPosition): void {
+    if (!this.#following && distanceFromBottom(position) <= ACTUAL_BOTTOM_EPSILON_PX) this.resetToFollowing()
+  }
+
   /** A smooth user-requested travel to the bottom began. */
   beginSmoothTravel(): void {
     this.#smoothLatch = true

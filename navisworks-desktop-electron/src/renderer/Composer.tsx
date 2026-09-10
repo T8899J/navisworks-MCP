@@ -74,7 +74,7 @@ interface ComposerProps {
   onResolveApproval(decision: 'confirm' | 'cancel'): void
   onModelChange(model: string): void
   /** Switches the active chat model to the API-connected cloud model. */
-  onApiModelPick(profileId: string): void
+  onApiModelPick(profileId: string, model: string): void
   /** Runs a slash command (e.g. /compact) against the active session. */
   onSlashCommand(cmd: string): void
   onReasoningChange(mode: ReasoningEffort): void
@@ -242,8 +242,8 @@ export function Composer({
     if (compatible !== undefined && compatible !== settings.reasoningMode) onReasoningChange(compatible)
     setPickerMode('effort')
   }
-  const pickApiModel = (profileId: string) => {
-    onApiModelPick(profileId)
+  const pickApiModel = (profileId: string, model: string) => {
+    onApiModelPick(profileId, model)
     setPickerMode('effort')
   }
   const runSlashCommand = (cmd: string) => {
@@ -380,12 +380,10 @@ export function Composer({
                     <span>已用 / 总量</span>
                     <span>{formatContextK(usedTokens)} / {contextLabel}</span>
                   </div>
-                  <div className="context-popover-row">
-                    <span>窗口来源</span>
-                    <span>{ring.sourceLabel}</span>
-                  </div>
+
                   {/* P6: this round's raw usage. Absent numbers render as
                       未报告 — a provider that says nothing is NEVER shown as 0. */}
+                  {contextUsage ? <>
                   <div className="context-popover-usage-title">本轮使用</div>
                   <div className="context-popover-row">
                     <span>输入</span>
@@ -415,6 +413,7 @@ export function Composer({
                     <span>缓存复用</span>
                     <span>{formatCacheRateLabel(cachedReuseRate)}</span>
                   </div>
+                  </> : null}
                 </div>
               </span>
               <button
@@ -472,7 +471,7 @@ export function Composer({
                 ) : (
                   <div className="composer-model-pane" role="menu" aria-label="可选模型">
                     <div className="composer-model-list">
-                      {settings.ollamaEnabled ? settings.models.map((model) => (
+                      {settings.ollamaEnabled ? <div className="model-provider-group" role="group" aria-label="Ollama"><div className="model-provider-heading">Ollama</div>{settings.models.map((model) => (
                         <button
                           key={model}
                           type="button"
@@ -486,24 +485,24 @@ export function Composer({
                             <Check aria-hidden="true" size={13} />
                           ) : null}
                         </button>
-                      )) : null}
+                      ))}</div> : null}
                       {settings.apiEnabled ? settings.apiProfiles
-                        .filter((profile) => profile.baseUrl.trim() && profile.model.trim())
-                        .map((profile) => (
+                        .filter((profile) => profile.enabled !== false && profile.baseUrl.trim())
+                        .map((profile) => <div className="model-provider-group" key={profile.id} role="group" aria-label={profile.name}><div className="model-provider-heading">{profile.name}</div>{(profile.models ?? [profile.model]).filter(Boolean).map((model) => (
                         <button
-                          key={profile.id}
+                          key={`${profile.id}:${model}`}
                           type="button"
                           role="menuitemradio"
-                          aria-checked={settings.preferApiModel && settings.activeApiProfileId === profile.id}
+                          aria-checked={settings.preferApiModel && settings.activeApiProfileId === profile.id && profile.model === model}
                           className="menu-option"
-                          data-selected={settings.preferApiModel && settings.activeApiProfileId === profile.id}
-                          onClick={() => pickApiModel(profile.id)}>
-                          <span className="menu-option-name">{profile.model}</span>
-                          {settings.preferApiModel && settings.activeApiProfileId === profile.id
+                          data-selected={settings.preferApiModel && settings.activeApiProfileId === profile.id && profile.model === model}
+                          onClick={() => pickApiModel(profile.id, model)}>
+                          <span className="menu-option-name">{model}</span>
+                          {settings.preferApiModel && settings.activeApiProfileId === profile.id && profile.model === model
                             ? <Check aria-hidden="true" size={13} />
                             : null}
                         </button>
-                      )) : null}
+                      ))}</div>) : null}
                     </div>
                   </div>
                 )}

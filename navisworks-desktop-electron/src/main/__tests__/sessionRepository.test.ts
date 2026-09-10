@@ -75,6 +75,7 @@ describe('WPF-compatible JSON repositories', () => {
         }],
       }],
       contextTokensUsed: 512,
+      contextUsage: { used: 512, window: 1048576, source: 'model', modelRef: { providerId: 'api:test', modelId: 'm' }, usage: { inputTokens: 400, outputTokens: 112, cacheReadTokens: 100 } },
       pinnedAt: null,
     }
 
@@ -87,8 +88,9 @@ describe('WPF-compatible JSON repositories', () => {
     expect(primary).not.toContain('ToolEvents')
     expect(primary).toContain('"Name": "navisworks_find_items"')
 
-    const loaded = await repository.load()
+    const loaded = await new JsonSessionRepository(paths).load()
     expect(loaded.sessions[0]?.messages?.[0]?.tools).toEqual(session.messages?.[0]?.tools)
+    expect(loaded.sessions[0]?.contextUsage).toEqual(session.contextUsage)
   })
 
   it('loads legacy settings and preserves historical CustomProfile field names', async () => {
@@ -258,6 +260,8 @@ describe('WPF-compatible JSON repositories', () => {
         name: '测试 API',
         baseUrl: 'https://cloud.example.com/v1',
         model: 'qwen-plus',
+        models: ['qwen-plus', 'qwen-max'],
+        enabled: false,
         apiKeyCiphertext: 'encrypted-value',
         legacyApiKey: '',
         advanced: { ...DEFAULT_API_PROFILE_ADVANCED },
@@ -269,6 +273,8 @@ describe('WPF-compatible JSON repositories', () => {
     expect(loaded?.apiProfiles).toEqual([expect.objectContaining({
       id: 'profile-1',
       baseUrl: 'https://cloud.example.com/v1',
+      models: ['qwen-plus', 'qwen-max'],
+      enabled: false,
       apiKeyCiphertext: 'encrypted-value',
       legacyApiKey: '',
     })])

@@ -78,9 +78,10 @@ export class ModelCatalogService {
     const floor = this.#floorFor(settings)
     const infos: ModelInfo[] = []
     for (const profile of settings.apiProfiles) {
-      const modelId = profile.model.trim()
-      if (!modelId) continue
-      infos.push(buildApiModelInfo(profile, { model: modelId, advanced: profile.advanced }, floor(apiProfileProviderId(profile.id), modelId)))
+      for (const modelId of profile.models ?? [profile.model.trim()]) {
+        if (!modelId) continue
+        infos.push(buildApiModelInfo(profile, { model: modelId, advanced: profile.advanced }, floor(apiProfileProviderId(profile.id), modelId)))
+      }
     }
     const selected = settings.selectedModel.trim()
     if (selected) {

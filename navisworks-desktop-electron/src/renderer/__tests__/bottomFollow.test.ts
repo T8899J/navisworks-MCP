@@ -206,3 +206,20 @@ describe('diagnostics wiring', () => {
     expect(BOTTOM_INVARIANT_FAILED_HINT).toBe('BOTTOM_INVARIANT_FAILED')
   })
 })
+
+describe('layout changes after reading expanded details', () => {
+  it('reengages follow when collapse reaches the bottom without a scroll event', () => {
+    const controller = new BottomFollowController()
+    controller.userInterrupted()
+    controller.onScroll({ scrollTop: 100, scrollHeight: 1400, clientHeight: 400 })
+    expect(controller.following).toBe(false)
+    controller.onLayout({ scrollTop: 100, scrollHeight: 500, clientHeight: 400 })
+    expect(controller.following).toBe(true)
+  })
+  it('keeps the reader in history if content still remains below', () => {
+    const controller = new BottomFollowController()
+    controller.onScroll({ scrollTop: 100, scrollHeight: 1400, clientHeight: 400 })
+    controller.onLayout({ scrollTop: 100, scrollHeight: 900, clientHeight: 400 })
+    expect(controller.following).toBe(false)
+  })
+})

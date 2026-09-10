@@ -2852,45 +2852,256 @@ body.message-nav-scrubbing * {
   outline: 0;
 }
 
-.api-profile-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 12px;
+.settings-page--model {
+  container-type: inline-size;
 }
 
-/* API profile tabs share the settings-panel pill language: idle tabs match
-   .secondary-button; the selected one takes the same muted
-   surface-active + primary-text treatment as the settings nav and session
-   rows, so no element reads as an accent button. */
-.api-profile-tabs > button {
-  min-height: 30px;
-  padding: 0 10px;
+.model-settings-description {
+  margin: 0 0 20px;
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  line-height: 1.6;
+}
+
+.model-settings-workspace {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  min-height: 560px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-input);
+}
+
+.provider-navigation {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 16px 10px;
+  border-right: 1px solid var(--border);
+}
+
+.provider-navigation-label {
+  padding: 8px 10px;
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
+
+.provider-navigation-label:not(:first-child) {
+  margin-top: 18px;
+}
+
+.provider-navigation-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 10px;
   color: var(--text-secondary);
   font-size: var(--text-label);
-  font-weight: 590;
-  background: var(--surface-control);
-  border: 1px solid var(--border);
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: 8px;
   cursor: pointer;
 }
 
-.api-profile-tabs > button:hover:not([data-selected="true"]) {
-  color: var(--text);
-  background: var(--surface-hover);
-  border-color: var(--border-strong);
+.provider-navigation-item svg {
+  flex-shrink: 0;
 }
 
-.api-profile-tabs > button[data-selected="true"] {
+.provider-navigation-item > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.provider-navigation-item:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.provider-navigation-item[aria-current='page'] {
   color: var(--text);
   font-weight: 600;
   background: var(--surface-active);
   border-color: var(--border-strong);
 }
 
-.api-profile-tabs > span {
+.provider-navigation-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.provider-navigation-add {
+  margin-top: 4px;
+}
+
+
+
+
+
+
+
+.provider-detail {
+  min-width: 0;
+  padding: 24px;
+}
+
+.provider-detail-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.provider-detail-heading h4 {
+  margin: 0;
+  font-size: var(--text-title);
+  overflow-wrap: anywhere;
+}
+
+
+.provider-title-input {
+  min-width: 100px;
+  width: min(280px, 100%);
+  padding: 5px 8px;
+  font-size: var(--text-title);
+  color: var(--text);
+  background: var(--surface-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+
+.provider-delete-button, .provider-model-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.provider-delete-button { margin-left: auto; }
+.provider-delete-button:hover, .provider-model-action:hover { color: var(--text); background: var(--surface-hover); }
+.provider-format {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+  color: var(--text-secondary);
+  font-size: var(--text-label);
+  background: var(--surface-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  opacity: 1;
+}
+.provider-navigation-item > .provider-state-dot {
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.provider-navigation-item > .provider-state-dot[data-enabled='true'] { background: #65b979; }
+.provider-model-list { border: 1px solid var(--border); border-radius: 10px; }
+.provider-model-list-row { display: flex; align-items: center; gap: 8px; padding: 12px; }
+.provider-model-list-row + .provider-model-list-row { border-top: 1px solid var(--border); }
+.provider-model-value {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 12px;
+  min-height: 38px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.provider-model-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-family: monospace; font-size: var(--text-body); }
+.provider-model-badges { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 5px; }
+.provider-model-badges > span { padding: 2px 6px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-muted); font-size: var(--text-caption); white-space: nowrap; }
+.provider-model-empty { padding: 12px; color: var(--text-muted); font-size: var(--text-label); }
+.provider-add-model { align-self: flex-start; margin-top: 4px; }
+.model-id-controls {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.model-id-controls > input { flex: 1; min-width: 0; }
+@container (max-width: 600px) {
+  .provider-model-value { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .provider-model-list-row { gap: 3px; padding: 8px; }
+  .provider-detail-heading h4 { flex: 1; min-width: 0; }
+}
+
+
+
+.provider-detail .provider-field {
+  margin-top: 22px;
+}
+
+.provider-detail .provider-field input {
+  height: 38px;
+}
+
+
+
+.provider-detail .provider-field-actions {
+  flex-wrap: wrap;
+}
+
+.provider-detail .settings-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.provider-detail .settings-row label small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: var(--text-caption);
+}
+
+.provider-detail .cloud-model-row .model-picker {
+  flex: 1;
+  min-width: 0;
+}
+
+.provider-detail .model-picker-trigger {
+  width: 100%;
+  height: 38px;
+}
+
+.provider-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 360px;
+  text-align: center;
   color: var(--text-muted);
   font-size: var(--text-label);
+}
+
+@container (max-width: 700px) {
+  .model-settings-workspace { grid-template-columns: 160px minmax(0, 1fr); }
+  .provider-detail { padding: 18px; }
+  .provider-detail .cloud-model-row { flex-wrap: wrap; }
+  .provider-detail .cloud-model-row .model-picker { flex: 1 1 100%; }
+}
+
+@container (max-width: 460px) {
+  .model-settings-workspace { grid-template-columns: minmax(0, 1fr); }
+  .provider-navigation { border-right: 0; border-bottom: 1px solid var(--border); }
+  .provider-detail .provider-input-group { flex-wrap: wrap; }
 }
 
 .api-key-status {
@@ -2907,19 +3118,6 @@ body.message-nav-scrubbing * {
 
 .provider-input-group.api-key-editor .secondary-button {
   flex: 0 0 auto;
-}
-
-.api-profile-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 7px;
-  margin: 4px 0 16px;
-}
-
-.api-profile-actions > span {
-  color: var(--text-secondary);
-  font-size: var(--text-label);
 }
 
 .provider-input-group {
@@ -2952,8 +3150,7 @@ body.message-nav-scrubbing * {
   background: var(--surface-hover);
 }
 
-/* Model-selection row: plain 当前模型 label, read-only display (models change
-   only via the picker), and the fetched models picker. */
+/* Current model picker and its configuration action. */
 .cloud-model-row {
   display: flex;
   align-items: center;
@@ -2966,26 +3163,6 @@ body.message-nav-scrubbing * {
   font-size: var(--text-body);
   font-weight: 600;
   white-space: nowrap;
-}
-
-/* Read-only display box: looks like the inputs on the row but accepts no
-   typing and no text selection - models change through the picker only. */
-.model-display {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  height: 32px;
-  padding: 0 10px;
-  display: flex;
-  align-items: center;
-  color: var(--text);
-  font-size: var(--text-label);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  background: var(--surface-input);
-  border: 1px solid var(--border);
-  border-radius: 8px;
 }
 
 /* Dropdown picker styled like the composer's model menu. */
@@ -4179,6 +4356,17 @@ select:focus-visible,
   cursor: not-allowed;
 }
 
+.model-configuration-dialog .primary-button {
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.model-configuration-dialog .primary-button:disabled {
+  color: var(--text-secondary);
+  background: var(--surface-control);
+  border: 1px solid var(--border-strong);
+  opacity: 1;
+}
+
 /* Tool Result Delivery v2 (§44): a paged (context-overflow) result is framed as
    "saved + pageable", never as truncation. */
 .tool-paged-note {
@@ -4251,3 +4439,36 @@ select:focus-visible,
 .app-tooltip[data-placement="bottom"]::after {
   top: -3px;
 }
+
+/* Shared settings controls and model menus. */
+.provider-name-editor { display:flex; align-items:center; gap:10px; min-width:0; max-width:100%; }
+.provider-name-field { display:grid; min-width:40px; max-width:400px; }
+.provider-name-size, .provider-name-field .provider-title-input { grid-area:1/1; font:inherit; letter-spacing:inherit; line-height:1.5; }
+.provider-name-size { visibility:hidden; white-space:pre; overflow:hidden; }
+.provider-name-field .provider-title-input { width:100%; min-width:0; padding:0; margin:0; border:0; border-radius:4px; background:transparent; color:inherit; }
+.provider-name-field .provider-title-input:focus { outline:none; box-shadow:none; }
+.provider-name-field .provider-title-input:not([readonly]):focus { background:var(--surface-control); }
+.model-config-field input[type="text"], .model-config-field input[type="number"], .model-config-field input[type="password"], .model-id-controls .model-picker-trigger { padding:8px 10px; color:var(--text); background:color-mix(in srgb, var(--surface-control) 70%, var(--background)); border:1px solid var(--border); border-radius:8px; transition:background .15s,border-color .15s,box-shadow .15s; }
+.model-config-field input:focus, .model-id-controls .model-picker-trigger:focus-visible { outline:none; border-color:var(--border-strong); background:color-mix(in srgb, var(--surface-control) 85%, var(--background)); box-shadow:0 0 0 2px color-mix(in srgb, var(--text) 6%, transparent); }
+.model-id-controls > .model-picker { width:42%; min-width:0; }
+.model-id-controls .model-picker-trigger { width:100%; height:100%; }
+.model-picker-list { max-height:min(240px,35vh); }
+.model-provider-group { display:flex; flex-direction:column; }
+.model-provider-group + .model-provider-group { border-top:1px solid var(--border); margin-top:5px; padding-top:5px; }
+.model-provider-heading { padding:7px 10px 4px; color:var(--text-muted); font-size:11px; font-weight:600; overflow-wrap:anywhere; }
+.model-picker-option, .menu-option { border-radius:7px; }
+.model-picker-option:hover, .menu-option:hover { color:var(--text); background:var(--surface-hover); }
+.settings-dialog .primary-button { color:var(--accent-ink); font-weight:600; }
+.settings-dialog .primary-button:disabled { background:var(--surface-control); color:var(--text-muted); opacity:1; }
+.settings-dialog .danger-button { padding:8px 14px; border:1px solid color-mix(in srgb,#ef6666 35%,var(--border)); border-radius:8px; color:var(--text); background:color-mix(in srgb,#ef6666 18%,var(--background)); }
+.settings-dialog .danger-button:hover { background:color-mix(in srgb,#ef6666 28%,var(--background)); }
+.dialog-description { margin:0; line-height:1.7; color:var(--text-secondary); overflow-wrap:anywhere; }
+.modal-close:hover { background:var(--surface-hover); }
+.provider-name-field .provider-title-input { width:0; min-width:100%; }
+
+.message-table-scroll { max-width:100%; overflow-x:auto; margin:12px 0; border:1px solid var(--border); border-radius:9px; white-space:normal; }
+.message-table-scroll table { width:100%; border-collapse:collapse; font-size:inherit; line-height:1.6; }
+.message-table-scroll th, .message-table-scroll td { padding:9px 12px; min-width:90px; border-bottom:1px solid var(--border); vertical-align:top; }
+.message-table-scroll th { background:var(--surface-control); color:var(--text); font-weight:600; }
+.message-table-scroll tbody tr:last-child td { border-bottom:0; }
+.message-table-scroll tbody tr:nth-child(even) { background:color-mix(in srgb,var(--surface-control) 35%,transparent); }

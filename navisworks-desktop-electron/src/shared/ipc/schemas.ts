@@ -73,9 +73,20 @@ export const sessionSummarySchema = z.strictObject({
   contextTokensUsed: z.number().int().nonnegative().optional()
 })
 
+export const contextUsageSchema = z.strictObject({
+  used: z.number().int().nonnegative(),
+  window: z.number().int().positive().optional(),
+  source: z.lazy(() => contextWindowSourceSchema).optional(),
+  modelRef: z.lazy(() => modelRefSchema).optional(),
+  usage: z.lazy(() => modelUsageSchema).optional(),
+  cacheHitRate: z.number().finite().min(0).max(1).optional(),
+})
+export type ContextUsage = z.output<typeof contextUsageSchema>
+
 export const sessionSchema = sessionSummarySchema.extend({
   createdAt: dateTimeString.optional(),
   messages: z.array(chatMessageSchema),
+  contextUsage: contextUsageSchema.optional(),
   // P4: the durable result of context compaction — a short digest of early turns. Optional
   // so older sessions.json files load unchanged (missing field ⇒ no summary yet).
   compactSummary: z.string().optional(),
@@ -239,6 +250,8 @@ export const apiProfileSchema = z.strictObject({
   name: nonEmptyString,
   baseUrl: z.string(),
   model: z.string(),
+  models: z.array(nonEmptyString).optional(),
+  enabled: z.boolean().optional(),
   hasApiKey: z.boolean(),
   /** Absent in old payloads → treated as all-auto defaults. */
   advanced: z.nullish(apiProfileAdvancedSchema).transform(
@@ -498,6 +511,8 @@ export const requestSchemas = {
       name: z.string().trim().min(1).max(60),
       baseUrl: z.string().trim().max(2048),
       model: z.string().trim().max(200),
+      models: z.array(z.string().trim().min(1).max(200)).optional(),
+      enabled: z.boolean().optional(),
       apiKey: z.string().max(4096).optional(),
       clearApiKey: z.boolean().optional(),
       advanced: apiProfileAdvancedSchema.nullish().optional()

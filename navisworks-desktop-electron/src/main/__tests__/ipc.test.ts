@@ -967,6 +967,28 @@ describe('desktop IPC settings routes', () => {
     }
   })
 
+  it('persists model lists and independent enabled states across unrelated edits', async () => {
+    const harness = createHarness({ ollama: stubAgent(), settings: statefulSettingsStub({ ...baseSettings, apiEnabled: false }) })
+    try {
+      const profile = { name: 'API', baseUrl: 'https://example.com/v1', model: 'm1' }
+      await harness.invoke('api.profile.save', { ...profile, id: 'a', models: ['m1', 'm2'] })
+      await harness.invoke('api.profile.save', { ...profile, id: 'b' })
+      await harness.invoke('api.profile.save', { ...profile, id: 'a', enabled: true })
+      const result = await harness.invoke('api.profile.save', { ...profile, id: 'a', name: 'Renamed' })
+      expect(result).toMatchObject({ ok: true, data: {
+        apiEnabled: true,
+        apiProfiles: [
+          expect.objectContaining({ id: 'a', name: 'Renamed', models: ['m1', 'm2'], enabled: true }),
+          expect.objectContaining({ id: 'b', enabled: false }),
+        ],
+      } })
+      await harness.invoke('api.profile.save', { ...profile, id: 'a', models: [], model: '', enabled: false })
+      expect(await harness.invoke('settings.get', undefined)).toMatchObject({ ok: true, data: {
+        apiProfiles: [expect.objectContaining({ id: 'a', models: [], model: '', enabled: false }), expect.objectContaining({ id: 'b', enabled: false })],
+      } })
+    } finally { await harness.dispose() }
+  })
+
   it('rejects insecure remote API addresses while allowing local HTTP endpoints', async () => {
     const harness = createHarness({
       ollama: stubAgent(),

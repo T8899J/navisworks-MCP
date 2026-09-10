@@ -35,6 +35,8 @@ export interface ModelResolverProfile {
   name: string
   baseUrl: string
   model: string
+  models?: readonly string[]
+  enabled?: boolean
   advanced: {
     contextWindowTokens: number | null
     sendReasoningEffort: 'auto' | 'on' | 'off'

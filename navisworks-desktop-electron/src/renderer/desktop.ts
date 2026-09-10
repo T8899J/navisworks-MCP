@@ -1,4 +1,4 @@
-import type { DesktopApi, DesktopEventName } from '../shared/ipc'
+import type { DesktopApi, DesktopEventName, InputFor } from '../shared/ipc'
 import type { NavisworksConnectionState, RuntimeInfo } from '../shared/ipc'
 import type { ReasoningEffort } from '../shared/reasoning'
 import {
@@ -74,14 +74,7 @@ export const desktopGateway = {
     return normalizeSettings(await requireApi().request('settings.update', { settings }))
   },
 
-  async saveApiProfile(input: {
-    id?: string
-    name: string
-    baseUrl: string
-    model: string
-    apiKey?: string
-    clearApiKey?: boolean
-  }): Promise<DesktopSettings> {
+  async saveApiProfile(input: InputFor<'api.profile.save'>): Promise<DesktopSettings> {
     return normalizeSettings(await requireApi().request('api.profile.save', input))
   },
 

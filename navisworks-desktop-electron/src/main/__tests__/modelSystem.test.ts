@@ -43,6 +43,15 @@ function profileOf(id: string, model: string, advancedOverrides: Partial<typeof 
 }
 
 describe('Model Configuration v2 — per-model overrides resolve into ModelInfo (§21/§23/§48/§40)', () => {
+  it('does not resolve a disabled API profile even when it is selected', () => {
+    const settings = profileSettings({
+      preferApiModel: true, activeApiProfileId: 'x',
+      apiProfiles: [{ ...profileOf('x', 'remote'), enabled: false }],
+    })
+    expect(resolveActiveModelRef(settings, { model: 'remote' }).providerId).toBe('ollama')
+    settings.apiProfiles[0]!.enabled = true
+    expect(resolveActiveModelRef(settings, { model: 'remote' }).providerId).toBe('api:x')
+  })
   const qwenMaxEndpoint: ResolvedChatEndpoint = {
     baseUrl: 'https://px.example.com/v1', apiKey: '', model: 'qwen3.8-max',
     advanced: { ...DEFAULT_API_PROFILE_ADVANCED, contextWindowTokens: null },

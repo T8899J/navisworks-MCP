@@ -1,13 +1,13 @@
+import { ModelPicker } from './ModelPicker'
 import {
   Bot,
-  Check,
-  ChevronDown,
   Database,
   Gauge,
   KeyRound,
   LoaderCircle,
   MonitorCog,
   Palette,
+  Pencil,
   Plus,
   RefreshCw,
   Trash2,
@@ -21,10 +21,23 @@ import {
 import { DEFAULT_API_PROFILE_ADVANCED, type ApiProfileAdvancedSettings, type ThemeMode, type ToolDefinitionSummary, type ToolName, type ToolPermission } from '../shared/ipc'
 import type { DesktopSettings, ModelConfiguration, ModelRef } from './chatTypes'
 import { ModelConfigurationDialog, type ModelConfigurationDraft } from './ModelConfigurationDialog'
+import { ApiProfileDialog, type ApiProfileAction } from './ApiProfileDialog'
 
 export interface RuntimeDiagnostics {
   dataDirectory?: string
   runtime?: string
+}
+
+function ModelBadges({ configuration }: { configuration?: ModelConfiguration }) {
+  const formatTokens = (value: number) => value >= 1_000_000 ? `${+(value / 1_000_000).toFixed(2)}M` : `${+(value / 1000).toFixed(1)}K`
+  return <span className="provider-model-badges">
+    {configuration?.inputModalities?.includes('image') ? <span>视觉</span> : null}
+    {configuration?.inputModalities?.includes('video') ? <span>视频</span> : null}
+    {configuration?.inputModalities?.includes('pdf') ? <span>PDF</span> : null}
+    {configuration?.outputModalities?.includes('image') ? <span>生图</span> : null}
+    {configuration?.contextWindowTokens != null ? <span>{formatTokens(configuration.contextWindowTokens)}</span> : null}
+    {configuration?.maxOutputTokens != null ? <span>输出 {formatTokens(configuration.maxOutputTokens)}</span> : null}
+  </span>
 }
 
 export type SettingsPageId = 'appearance' | 'model' | 'tools' | 'runtime'
@@ -39,84 +52,6 @@ export const SETTINGS_PAGES: Array<{
   { id: 'tools', label: '工具与权限', icon: Wrench },
   { id: 'runtime', label: '运行信息', icon: Database }
 ]
-
-/**
- * Dropdown model picker styled like the composer's model menu. The trigger
- * shows the current value; 获取模型 feeds the option list, picking one fills
- * the row's read-only display.
- */
-function ModelPicker({
-  value,
-  options,
-  placeholder,
-  emptyHint,
-  disabled,
-  onPick
-}: {
-  value: string
-  options: readonly string[]
-  placeholder: string
-  emptyHint: string
-  disabled?: boolean
-  onPick(model: string): void
-}) {
-  const [open, setOpen] = useState(false)
-  const rootRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointerDown)
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown)
-      document.removeEventListener('keydown', onKeyDown)
-    }
-  }, [open])
-
-  return (
-    <div className="model-picker" ref={rootRef}>
-      <button
-        type="button"
-        className="model-picker-trigger"
-        disabled={disabled}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}>
-        <span className="model-picker-value">{value.trim() || placeholder}</span>
-        <ChevronDown aria-hidden="true" size={13} className={open ? 'flipped' : undefined} />
-      </button>
-      {open ? (
-        <div className="model-picker-list" role="listbox">
-          {options.length === 0 ? (
-            <div className="model-picker-empty">{emptyHint}</div>
-          ) : (
-            options.map((model) => (
-              <button
-                key={model}
-                type="button"
-                role="option"
-                aria-selected={model === value}
-                className={`model-picker-option${model === value ? ' selected' : ''}`}
-                onClick={() => {
-                  setOpen(false)
-                  if (model !== value) onPick(model)
-                }}>
-                <span className="model-picker-option-name">{model}</span>
-                {model === value ? <Check aria-hidden="true" size={13} /> : null}
-              </button>
-            ))
-          )}
-        </div>
-      ) : null}
-    </div>
-  )
-}
 
 /** Discrete font-size levels; the slider snaps to these so the active
  *  step is always visible. */
@@ -159,6 +94,8 @@ interface SettingsPanelProps {
     name: string
     baseUrl: string
     model: string
+    models?: string[]
+    enabled?: boolean
     apiKey?: string
     clearApiKey?: boolean
     /** Full compatibility/capability set; callers spread the profile's existing value. */
@@ -212,8 +149,7 @@ export function SettingsPanel({
   // are unrelated operations and must never disable each other.
   const [testBusy, setTestBusy] = useState(false)
   const [refreshBusy, setRefreshBusy] = useState(false)
-  const [cloudModelsBusy, setCloudModelsBusy] = useState(false)
-  const [cloudModels, setCloudModels] = useState<string[]>([])
+  const [providerPage, setProviderPage] = useState<'api' | 'ollama'>('api')
   // Provider connection inputs keep local text state (cherry-studio style
   // blur-commit) and re-sync when the saved settings change underneath.
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(
@@ -224,9 +160,12 @@ export function SettingsPanel({
   const [profileNameText, setProfileNameText] = useState(selectedProfile?.name ?? '')
   const [providerBaseUrlText, setProviderBaseUrlText] = useState(selectedProfile?.baseUrl ?? '')
   const [cloudModelText, setCloudModelText] = useState(selectedProfile?.model ?? '')
-  const [providerApiKeyText, setProviderApiKeyText] = useState('')
-  const [editingApiKey, setEditingApiKey] = useState(false)
-  const [pendingProfileDelete, setPendingProfileDelete] = useState(false)
+  const [profileAction, setProfileAction] = useState<ApiProfileAction | null>(null)
+  const [editingProfileName, setEditingProfileName] = useState(false)
+  const profileNameInput = useRef<HTMLInputElement>(null)
+  const [providerToggleBusy, setProviderToggleBusy] = useState(false)
+  const [profileError, setProfileError] = useState('')
+  const apiModels = selectedProfile?.models ?? (selectedProfile?.model ? [selectedProfile.model] : [])
   // Model Configuration v2 (§41/§42): the profile-level 高级配置 上下文窗口 editor
   // is REMOVED — per-model overrides via 编辑模型配置 are the primary entry now.
   // profile.advanced.contextWindowTokens stays in the data (legacy fallback for
@@ -242,26 +181,34 @@ export function SettingsPanel({
       (configuration) => configuration.ref.providerId === ref.providerId
         && configuration.ref.modelId === ref.modelId,
     )
-  const applyModelConfigDraft = (draft: ModelConfigurationDraft): void => {
+  const applyModelConfigDraft = async (draft: ModelConfigurationDraft): Promise<void> => {
     const base = draft.baseRef
     // Replace/insert the entry for THIS model (dropping any prior config bound to
     // the OLD ref, so a rename never leaves an orphan override, §27).
     const others = (settings.modelConfigurations ?? []).filter(
       (configuration) => !(configuration.ref.providerId === base.providerId
-        && configuration.ref.modelId === base.modelId),
+        && (configuration.ref.modelId === base.modelId || configuration.ref.modelId === draft.configuration.ref.modelId)),
     )
     const next = draft.cleared ? others : [...others, draft.configuration]
-    void onModelConfigurationsChange(next)
-    // §27: an API model-id rename also re-points profile.model.
-    if (draft.renamedTo !== undefined && selectedProfile !== undefined) {
-      void onSaveApiProfile({
+    if (selectedProfile && base.providerId === `api:${selectedProfile.id}` && !draft.cleared) {
+      const modelId = draft.configuration.ref.modelId
+      if (apiModels.some((id) => id === modelId && id !== base.modelId)) {
+        onNotice('该模型已在列表中')
+        return
+      }
+      const models = apiModels.includes(base.modelId)
+        ? apiModels.map((id) => id === base.modelId ? modelId : id)
+        : [...apiModels, modelId]
+      await onSaveApiProfile({
         id: selectedProfile.id,
         name: selectedProfile.name,
         baseUrl: selectedProfile.baseUrl,
-        model: draft.renamedTo,
+        model: !selectedProfile.model || selectedProfile.model === base.modelId ? modelId : selectedProfile.model,
+        models,
         ...(selectedProfile.advanced ? { advanced: selectedProfile.advanced } : {}),
       })
     }
+    await onModelConfigurationsChange(next)
     setModelConfigTarget(null)
     onNotice('已保存模型配置，正在刷新生效')
   }
@@ -274,10 +221,8 @@ export function SettingsPanel({
     setProfileNameText(selectedProfile.name)
     setProviderBaseUrlText(selectedProfile.baseUrl)
     setCloudModelText(selectedProfile.model)
-    setProviderApiKeyText('')
-    setEditingApiKey(false)
-    setPendingProfileDelete(false)
-    setCloudModels([])
+    setProfileAction(null)
+    setEditingProfileName(false)
   }, [selectedProfile?.id, selectedProfile?.name, selectedProfile?.baseUrl, selectedProfile?.model])
 
   /**
@@ -312,8 +257,9 @@ export function SettingsPanel({
     }
   }
 
-  const saveSelectedProfile = async (extra: { apiKey?: string; clearApiKey?: boolean } = {}) => {
+  const saveSelectedProfile = async (extra: { apiKey?: string; clearApiKey?: boolean; enabled?: boolean; models?: string[]; model?: string } = {}) => {
     if (!selectedProfile) return null
+    setProfileError('')
     try {
       return await onSaveApiProfile({
         id: selectedProfile.id,
@@ -324,7 +270,9 @@ export function SettingsPanel({
         ...extra
       })
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : '保存 API 配置失败')
+      const message = error instanceof Error ? error.message : '保存 API 配置失败'
+      setProfileError(message)
+      onNotice(message)
       return null
     }
   }
@@ -338,7 +286,10 @@ export function SettingsPanel({
         model: ''
       })
       const created = saved.apiProfiles.find((profile) => !before.has(profile.id))
-      if (created) setSelectedProfileId(created.id)
+      if (created) {
+        setSelectedProfileId(created.id)
+        setProviderPage('api')
+      }
     } catch (error) {
       onNotice(error instanceof Error ? error.message : '新建 API 配置失败')
     }
@@ -349,46 +300,11 @@ export function SettingsPanel({
     try {
       const saved = await onDeleteApiProfile(selectedProfile.id)
       setSelectedProfileId(saved.activeApiProfileId ?? saved.apiProfiles[0]?.id ?? null)
-      setPendingProfileDelete(false)
+      setProfileAction(null)
+      return true
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : '删除 API 配置失败')
-    }
-  }
-
-  // Fetches the endpoint's model list into the picker; an empty 模型选择
-  // field is auto-filled with the first model.
-  const fetchCloudModels = async () => {
-    if (!selectedProfile) {
-      onNotice('请先新建 API 配置')
-      return
-    }
-    const saved = await saveSelectedProfile()
-    if (!saved) return
-    try {
-      setCloudModelsBusy(true)
-      const models = await onFetchCloudModels(selectedProfile.id)
-      setCloudModels(models)
-      if (models.length === 0) {
-        onNotice('端点未返回任何模型')
-        return
-      }
-      if (!cloudModelText.trim()) {
-        const first = models[0] ?? ''
-        setCloudModelText(first)
-        await onSaveApiProfile({
-          id: selectedProfile.id,
-          name: profileNameText.trim() || selectedProfile.name,
-          baseUrl: providerBaseUrlText.trim(),
-          model: first
-        })
-        onNotice(`已默认使用 ${first}（端点共 ${models.length} 个模型）`)
-      } else {
-        onNotice(`已获取 ${models.length} 个模型，可在列表中切换`)
-      }
-    } catch (error) {
-      onNotice(error instanceof Error ? error.message : '获取云端模型失败')
-    } finally {
-      setCloudModelsBusy(false)
+      setProfileError(error instanceof Error ? error.message : '删除 API 配置失败')
+      return false
     }
   }
 
@@ -429,7 +345,7 @@ export function SettingsPanel({
   // read-only switches untouched.
   return (
     <section
-      className="settings-page"
+      className={`settings-page${activePage === 'model' ? ' settings-page--model' : ''}`}
       role="region"
       aria-label={activePageMeta.label}>
       <header className="settings-page-heading">
@@ -500,57 +416,54 @@ export function SettingsPanel({
 
             {activePage === 'model' ? (
               <>
-                <div className="provider-section-heading">
-                  <h4 className="settings-group-title">API 配置</h4>
-                  <button className="secondary-button" type="button" disabled={!serviceAvailable} onClick={() => void addApiProfile()}>
-                    <Plus aria-hidden="true" size={14} />
-                    新建
-                  </button>
-                </div>
-                <div className="settings-row">
-                  <label htmlFor="api-enabled">
-                    启用 API
-                    <small>关闭后对话不再使用 API 配置</small>
-                  </label>
-                  <input
-                    id="api-enabled"
-                    className="settings-switch"
-                    type="checkbox"
-                    checked={settings.apiEnabled}
-                    disabled={!serviceAvailable}
-                    onChange={(event) => void onProviderChange({ apiEnabled: event.currentTarget.checked })}
-                  />
-                </div>
-                <div className="api-profile-tabs" role="listbox" aria-label="API 配置">
-                  {settings.apiProfiles.map((profile) => (
-                    <button
-                      key={profile.id}
-                      type="button"
-                      role="option"
-                      aria-selected={profile.id === selectedProfile?.id}
-                      data-selected={profile.id === selectedProfile?.id}
-                      onClick={() => setSelectedProfileId(profile.id)}>
-                      {profile.name}
+                <p className="model-settings-description">管理 API 供应商与本地模型，选择供应商以编辑配置。</p>
+                <div className="model-settings-workspace">
+                  <nav className="provider-navigation" aria-label="模型供应商">
+                    <div className="provider-navigation-label">API 供应商</div>
+                    {settings.apiProfiles.map((profile) => (
+                      <button
+                        key={profile.id}
+                        type="button"
+                        className="provider-navigation-item"
+                        aria-current={providerPage === 'api' && profile.id === selectedProfile?.id ? 'page' : undefined}
+                        onClick={() => { setSelectedProfileId(profile.id); setProviderPage('api') }}>
+                        <Bot aria-hidden="true" size={17} />
+                        <span>{profile.name}</span>
+                        <span className="provider-state-dot" data-enabled={settings.apiEnabled && profile.enabled !== false} aria-label={settings.apiEnabled && profile.enabled !== false ? '已启用' : '已禁用'} />
+                      </button>
+                    ))}
+                    <button className="provider-navigation-item provider-navigation-add" type="button" disabled={!serviceAvailable} onClick={() => void addApiProfile()}>
+                      <Plus aria-hidden="true" size={17} />添加供应商
                     </button>
-                  ))}
-                  {settings.apiProfiles.length === 0 ? <span>还没有 API 配置</span> : null}
-                </div>
-
-                {selectedProfile ? <>
-                  <div className="provider-field">
-                    <label htmlFor="provider-name">配置名称</label>
-                    <input
-                      id="provider-name"
-                      type="text"
-                      value={profileNameText}
-                      disabled={!serviceAvailable}
-                      onChange={(event) => setProfileNameText(event.currentTarget.value)}
-                      onBlur={() => void saveSelectedProfile()}
-                    />
-                  </div>
+                    <div className="provider-navigation-label">本地模型</div>
+                    <button className="provider-navigation-item" type="button" aria-current={providerPage === 'ollama' ? 'page' : undefined} onClick={() => setProviderPage('ollama')}>
+                      <MonitorCog aria-hidden="true" size={17} /><span>Ollama</span>
+                    </button>
+                  </nav>
+                  <div className="provider-detail" key={providerPage === 'api' ? selectedProfile?.id ?? 'empty' : 'ollama'}>
+                {providerPage === 'api' && selectedProfile ? <>
+                  <header className="provider-detail-heading">
+                    <h4 className="provider-name-editor">
+                      <span className="provider-name-field"><span className="provider-name-size" aria-hidden="true">{selectedProfile.name}</span><input ref={profileNameInput} className="provider-title-input" aria-label="API 配置名称" value={profileNameText} readOnly={!editingProfileName} maxLength={60}
+                        onChange={(event) => setProfileNameText(event.currentTarget.value)}
+                        onBlur={() => { if (editingProfileName) { void saveSelectedProfile(); setEditingProfileName(false) } }}
+                        onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setProfileNameText(selectedProfile.name); setEditingProfileName(false) } }}
+                      /></span>
+                      <button className="provider-model-action" type="button" aria-label="编辑 API 配置名称" disabled={!serviceAvailable} onClick={() => { setEditingProfileName(true); profileNameInput.current?.focus(); profileNameInput.current?.select() }}><Pencil size={16} aria-hidden="true" /></button>
+                    </h4>
+                    <button className="secondary-button" type="button" disabled={!serviceAvailable || providerToggleBusy} onClick={async () => {
+                      setProviderToggleBusy(true)
+                      try { await saveSelectedProfile({ enabled: !(settings.apiEnabled && selectedProfile.enabled !== false) }) }
+                      finally { setProviderToggleBusy(false) }
+                    }}>
+                      {providerToggleBusy ? '保存中…' : settings.apiEnabled && selectedProfile.enabled !== false ? '禁用' : '启用'}
+                    </button>
+                    <button className="provider-delete-button" type="button" aria-label="删除 API 配置" disabled={!serviceAvailable} onClick={() => { setProfileError(''); setProfileAction('delete') }}><Trash2 size={17} aria-hidden="true" /></button>
+                  </header>
+                  {profileError ? <p className="model-config-error" role="alert">{profileError}</p> : null}
                   <div className="provider-field">
                     <div className="provider-field-heading">
-                      <label htmlFor="provider-base-url">API 地址</label>
+                      <label htmlFor="provider-base-url">Base URL</label>
                       <div className="provider-field-actions">
                         {cloudLatency ? (
                           <span className={`latency-chip ${cloudLatency.ok
@@ -578,100 +491,47 @@ export function SettingsPanel({
                   </div>
 
                   <div className="provider-field">
-                    <div className="provider-field-heading">
-                      <span className="provider-field-label">API 密钥</span>
-                      <span className="api-key-status"><KeyRound aria-hidden="true" size={13} />{selectedProfile.hasApiKey ? '已安全保存' : '未设置'}</span>
-                    </div>
-                    {editingApiKey ? (
-                      <div className="provider-input-group api-key-editor">
-                        <input
-                          id="provider-api-key"
-                          type="password"
-                          value={providerApiKeyText}
-                          placeholder="输入新密钥"
-                          autoComplete="new-password"
-                          spellCheck={false}
-                          disabled={!serviceAvailable}
-                          onChange={(event) => setProviderApiKeyText(event.currentTarget.value)}
-                        />
-                        <button className="secondary-button" type="button" disabled={!providerApiKeyText || !serviceAvailable} onClick={async () => {
-                          const saved = await saveSelectedProfile({ apiKey: providerApiKeyText })
-                          if (saved) {
-                            setProviderApiKeyText('')
-                            setEditingApiKey(false)
-                          }
-                        }}>保存密钥</button>
-                      </div>
-                    ) : (
-                      <div className="provider-field-actions">
-                        <button className="secondary-button" type="button" onClick={() => setEditingApiKey(true)}>
-                          {selectedProfile.hasApiKey ? '更换密钥' : '设置密钥'}
-                        </button>
-                        {selectedProfile.hasApiKey ? (
-                          <button className="secondary-button" type="button" onClick={() => void saveSelectedProfile({ clearApiKey: true })}>清除密钥</button>
-                        ) : null}
-                      </div>
-                    )}
+                    <label htmlFor="provider-api-format">API 格式</label>
+                    <select id="provider-api-format" className="provider-format" value="openai" disabled>
+                      <option value="openai">OpenAI Chat Completions (/v1/chat/completions)</option>
+                    </select>
                   </div>
 
                   <div className="provider-field">
                     <div className="provider-field-heading">
-                      <span className="provider-field-label">模型选择</span>
-                      <button className="secondary-button" type="button" disabled={cloudModelsBusy || !serviceAvailable} onClick={() => void fetchCloudModels()}>
-                        {cloudModelsBusy ? <LoaderCircle className="running" aria-hidden="true" size={14} /> : <RefreshCw aria-hidden="true" size={14} />}
-                        获取模型
-                      </button>
+                      <span className="provider-field-label">API 密钥</span>
+                      <span className="api-key-status"><KeyRound aria-hidden="true" size={13} />{selectedProfile.hasApiKey ? '已安全保存' : '未设置'}</span>
                     </div>
-                    <div className="cloud-model-row">
-                      <span className="cloud-model-label">当前模型</span>
-                      <span className="model-display" data-tip={cloudModelText || '未设置'}>{cloudModelText || '未设置'}</span>
-                      <ModelPicker
-                        value={cloudModelText}
-                        options={cloudModels}
-                        placeholder="未设置"
-                        emptyHint="先获取模型"
-                        disabled={!serviceAvailable}
-                        onPick={(model) => {
-                          setCloudModelText(model)
-                          void onSaveApiProfile({
-                            id: selectedProfile.id,
-                            name: profileNameText.trim() || selectedProfile.name,
-                            baseUrl: providerBaseUrlText.trim(),
-                            model
-                          })
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="secondary-button model-config-edit"
-                        disabled={cloudModelText.trim() === ''}
-                        onClick={() => setModelConfigTarget({
-                          providerId: `api:${selectedProfile.id}`,
-                          modelId: cloudModelText.trim(),
-                          modelIdEditable: true,
-                        })}
-                      >
-                        编辑模型配置
-                      </button>
+                    <div className="provider-field-actions">
+                      <button className="secondary-button" type="button" disabled={!serviceAvailable} onClick={() => { setProfileError(''); setProfileAction('replace-key') }}>{selectedProfile.hasApiKey ? '更换密钥' : '设置密钥'}</button>
+                      {selectedProfile.hasApiKey ? <button className="secondary-button" type="button" disabled={!serviceAvailable} onClick={() => { setProfileError(''); setProfileAction('clear-key') }}>清除密钥</button> : null}
                     </div>
                   </div>
 
-                  <div className="api-profile-actions">
-                    <button className="secondary-button" type="button" disabled={!settings.apiEnabled || !selectedProfile.baseUrl || !selectedProfile.model} onClick={() => void onProviderChange({ activeApiProfileId: selectedProfile.id, preferApiModel: true })}>
-                      设为当前
-                    </button>
-                    {pendingProfileDelete ? <>
-                      <span>确定删除此配置？</span>
-                      <button className="danger-button" type="button" onClick={() => void deleteSelectedProfile()}>确认删除</button>
-                      <button className="secondary-button" type="button" onClick={() => setPendingProfileDelete(false)}>取消</button>
-                    </> : (
-                      <button className="secondary-button" type="button" onClick={() => setPendingProfileDelete(true)}>
-                        <Trash2 aria-hidden="true" size={14} />删除
-                      </button>
-                    )}
+                  <div className="provider-field">
+                    <div className="provider-field-heading">
+                      <span className="provider-field-label">模型列表</span>
+
+                    </div>
+                    <div className="provider-model-list">
+                      {apiModels.map((model) => {
+                        const configuration = existingModelConfiguration({ providerId: 'api:' + selectedProfile.id, modelId: model })
+                        return <div className="provider-model-list-row" key={model}>
+                          <div className="provider-model-value"><span className="provider-model-name">{model}</span><ModelBadges configuration={configuration} /></div>
+                          <button className="provider-model-action" type="button" aria-label={'编辑模型 ' + model} disabled={!serviceAvailable} onClick={() => setModelConfigTarget({providerId: 'api:' + selectedProfile.id, modelId: model, modelIdEditable: true})}><Pencil size={16} aria-hidden="true" /></button>
+                          <button className="provider-model-action" type="button" aria-label={'移除模型 ' + model} disabled={!serviceAvailable} onClick={() => {
+                            const models = apiModels.filter((id) => id !== model)
+                            void saveSelectedProfile({ models, model: selectedProfile.model === model ? models[0] ?? '' : selectedProfile.model })
+                          }}><Trash2 size={16} aria-hidden="true" /></button>
+                        </div>
+                      })}
+                      {apiModels.length === 0 ? <p className="provider-model-empty">暂无模型，获取模型或手动添加。</p> : null}
+                    </div>
+                    <button className="secondary-button provider-add-model" type="button" disabled={!serviceAvailable} onClick={() => setModelConfigTarget({ providerId: 'api:' + selectedProfile.id, modelId: '', modelIdEditable: true })}><Plus size={14} aria-hidden="true" />添加模型</button>
                   </div>
                 </> : null}
-
+                {providerPage === 'api' && !selectedProfile ? <div className="provider-empty-state"><Bot size={28} aria-hidden="true" /><h4>添加第一个 API 供应商</h4><p>配置 API 地址、密钥和模型后即可使用。</p><button className="secondary-button" type="button" disabled={!serviceAvailable} onClick={() => void addApiProfile()}><Plus size={14} aria-hidden="true" />添加供应商</button></div> : null}
+                {providerPage === 'ollama' ? <>
                 <div className="provider-section-heading">
                   <h4 className="settings-group-title">Ollama</h4>
                   <div className="provider-field-actions">
@@ -698,7 +558,6 @@ export function SettingsPanel({
                 <div className="provider-field">
                   <div className="cloud-model-row">
                     <span className="cloud-model-label">当前模型</span>
-                    <span className="model-display" data-tip={settings.selectedModel}>{settings.selectedModel}</span>
                     <ModelPicker
                       value={settings.selectedModel}
                       options={settings.models}
@@ -722,6 +581,13 @@ export function SettingsPanel({
                   </div>
                 </div>
 
+                </> : null}
+                  </div>
+                </div>
+                {profileAction && selectedProfile ? <ApiProfileDialog key={selectedProfile.id + profileAction} action={profileAction} name={selectedProfile.name} error={profileError} onCancel={() => setProfileAction(null)} onConfirm={async (apiKey) => {
+                  if (profileAction === 'delete') return (await deleteSelectedProfile()) === true
+                  return (await saveSelectedProfile(profileAction === 'replace-key' ? { apiKey } : { clearApiKey: true })) !== null
+                }} /> : null}
                 {modelConfigTarget !== null && (
                   <ModelConfigurationDialog
                     open
@@ -732,8 +598,9 @@ export function SettingsPanel({
                       providerId: modelConfigTarget.providerId,
                       modelId: modelConfigTarget.modelId,
                     })}
+                    onFetchModels={modelConfigTarget.providerId.startsWith('api:') ? () => onFetchCloudModels(modelConfigTarget.providerId.slice(4)) : undefined}
                     onCancel={() => setModelConfigTarget(null)}
-                    onSubmit={applyModelConfigDraft}
+                    onSubmit={(draft) => { void applyModelConfigDraft(draft).catch((error) => onNotice(error instanceof Error ? error.message : '保存模型配置失败')) }}
                   />
                 )}
 

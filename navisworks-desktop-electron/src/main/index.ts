@@ -270,7 +270,7 @@ function adaptModelAgent(runtime: AgentRuntime, router: ModelRouter): OllamaAgen
     run: (input, options) => runAgent(runtime, input, options),
     // Title summaries stay on the local model; the method itself forces a
     // tiny budget so retitleing never competes with the main reply.
-    summarizeTitle: (text, signal, api) => runtime.summarizeTitle(text, signal, api),
+    summarizeTitle: (text, signal, api, model) => runtime.summarizeTitle(text, signal, api, model),
     // Manual /compact follows the active chat endpoint, or the local model.
     compact: (messages, input, options) =>
       runtime.compactConversation(messages, input, options?.signal),

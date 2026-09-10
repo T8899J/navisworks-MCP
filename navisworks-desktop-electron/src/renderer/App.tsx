@@ -20,12 +20,9 @@ import {
   type QuestionAnswer,
   type QuestionRequest,
   type ModelInfo,
-  type ModelRef,
-  type ModelUsage,
   type ToolDefinitionSummary,
   type ChatSession,
   type ChatStreamEvent,
-  type ContextWindowSource,
   type DesktopSettings,
   type NavisworksStatus,
   type SessionSummary,
@@ -229,16 +226,6 @@ export default function App() {
       .then((summaries) => setToolDefinitions(summaries))
       .catch(() => setToolDefinitions([]))
   }, [serviceAvailable])
-  const [contextUsage, setContextUsage] = useState<{
-    used: number
-    window?: number
-    source?: ContextWindowSource
-    /** Model Configuration v2 (§31): the run's model identity; a stale window is
-     *  ignored when the active model differs. */
-    modelRef?: ModelRef
-    usage?: ModelUsage
-    cacheHitRate?: number
-  } | null>(null)
   // P8: the ACTIVE model as resolved by the main-process Model System.
   // Never derived in the renderer — this is the one copy the UI reads.
   const [activeModel, setActiveModel] = useState<ModelInfo | null>(null)
@@ -634,7 +621,16 @@ export default function App() {
         ? sessionRef.current
         : inflightSessionsRef.current.get(targetId)
       if (!base) return
-      const next = { ...base, messages: updateStreamMessage(base.messages, event) }
+      const next = { ...base, messages: updateStreamMessage(base.messages, event),
+        ...(event.kind === 'done' ? { contextUsage: {
+          used: event.contextTokensUsed ?? 0,
+          ...(event.contextWindowTokens === undefined ? {} : { window: event.contextWindowTokens }),
+          ...(event.contextWindowSource === undefined ? {} : { source: event.contextWindowSource }),
+          ...(event.modelRef === undefined ? {} : { modelRef: event.modelRef }),
+          ...(normalizeModelUsage(event.usage) === undefined ? {} : { usage: normalizeModelUsage(event.usage) }),
+          ...(event.cacheHitRate === undefined ? {} : { cacheHitRate: event.cacheHitRate }),
+        }, contextTokensUsed: event.contextTokensUsed ?? 0 } : {}),
+      }
       if (isActive) {
         sessionRef.current = next
         setSession(next)
@@ -665,20 +661,6 @@ export default function App() {
         // The context ring is session-scoped: a BACKGROUND session finishing
         // must never repaint the ring of the session on screen.
         if (shouldApplyContextUsage(done.sessionId, activeSessionIdRef.current)) {
-          // P6: the raw usage object rides along for the detail lines —
-          // re-validated, because event payloads are runtime data.
-          const doneUsage = normalizeModelUsage(done.usage)
-          if (typeof done.contextTokensUsed === 'number') {
-            setContextUsage({
-              used: done.contextTokensUsed,
-              ...(typeof done.contextWindowTokens === 'number' ? { window: done.contextWindowTokens } : {}),
-              ...(typeof done.contextWindowSource === 'string' ? { source: done.contextWindowSource } : {}),
-              // §31: tag the reported window/usage with the model that produced it.
-              ...(done.modelRef !== undefined ? { modelRef: done.modelRef } : {}),
-              ...(doneUsage === undefined ? {} : { usage: doneUsage }),
-              ...(typeof done.cacheHitRate === 'number' ? { cacheHitRate: done.cacheHitRate } : {})
-            })
-          }
           if (done.compacted) {
             setNotice('上下文已接近上限，早期过程已自动压缩为摘要')
           }
@@ -714,12 +696,6 @@ export default function App() {
     ]
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
   }, [activeSessionId, persistSession, serviceAvailable])
-
-  // Context-ring data: the finished run's token usage feeds the composer's
-  // usage ring; switching sessions clears it until the next reply lands.
-  useEffect(() => {
-    setContextUsage(null)
-  }, [activeSessionId])
 
   // P16 §18: re-attach this session's pending question after a switch. The
   // card must NOT rely on having caught the question.requested event live.
@@ -766,20 +742,10 @@ export default function App() {
     settings.modelConfigurations,
   ])
 
-  // §32: when the active model's identity OR its known context window changes
-  // (model switch / saved override), a run-reported window/usage from the
-  // previous model is stale — drop it so it can never contaminate the ring. The
-  // ring then shows the CURRENT activeModel window immediately (§33/Case B).
-  const modelWindowKey = activeModel === null
-    ? ''
-    : `${activeModel.ref.providerId} ${activeModel.ref.modelId} ${activeModel.limits.context ?? ''}`
-  const lastModelWindowKey = useRef(modelWindowKey)
-  useEffect(() => {
-    if (lastModelWindowKey.current !== modelWindowKey) {
-      lastModelWindowKey.current = modelWindowKey
-      setContextUsage(null)
-    }
-  }, [modelWindowKey])
+  const savedUsage = session && session.id === activeSessionId ? session.contextUsage : undefined
+  const usageMatchesModel = !savedUsage?.modelRef || !activeModel
+    || (savedUsage.modelRef.providerId === activeModel.ref.providerId && savedUsage.modelRef.modelId === activeModel.ref.modelId)
+  const contextUsage = usageMatchesModel ? savedUsage ?? null : null
 
   // P7: after switching models, a persisted step outside the new model's
   // allowed modes snaps to the nearest legal one — the UI never shows (and
@@ -813,12 +779,13 @@ export default function App() {
   const applySummarizedTitle = async (sessionId: string, firstMessage: string) => {
     try {
       const suggested = await desktopGateway.suggestSessionTitle(firstMessage)
-      if (activeSessionIdRef.current !== sessionId || sessionRef.current?.id !== sessionId) return
-      const target = sessionRef.current
-      if (!target || target.title === suggested) return
+      const isActive = activeSessionIdRef.current === sessionId && sessionRef.current?.id === sessionId
+      const target = isActive ? sessionRef.current : inflightSessionsRef.current.get(sessionId)
+      if (!target || !sessionsRef.current.some(item => item.id === sessionId)
+        || target.title !== firstMessage.trim().slice(0, 28) || target.title === suggested) return
       const retitled = { ...target, title: suggested }
-      sessionRef.current = retitled
-      setSession(retitled)
+      inflightSessionsRef.current.set(sessionId, retitled)
+      if (isActive) { sessionRef.current = retitled; setSession(retitled) }
       void persistSession(retitled)
     } catch {
       // Silent: the truncation label is already a usable fallback.
@@ -1296,8 +1263,9 @@ export default function App() {
               return saved
             }}
             onModelChange={(selectedModel) => updateSettings({ ...settings, selectedModel, preferApiModel: false })}
-            onModelConfigurationsChange={(modelConfigurations) => {
-              void updateSettings({ ...settings, modelConfigurations })
+            onModelConfigurationsChange={async (modelConfigurations) => {
+              const saved = await desktopGateway.updateSettings({ modelConfigurations })
+              setSettings(saved)
             }}
             onDisabledToolsChange={(disabledTools) => updateSettings({ ...settings, disabledTools })}
             tools={toolDefinitions}
@@ -1463,7 +1431,14 @@ export default function App() {
             onStop={() => void stop()}
             onResolveApproval={(decision) => void resolveToolApproval(decision)}
             onModelChange={(selectedModel) => void updateSettings({ ...settings, selectedModel, preferApiModel: false })}
-            onApiModelPick={(activeApiProfileId) => void updateSettings({ ...settings, activeApiProfileId, preferApiModel: true })}
+            onApiModelPick={(activeApiProfileId, model) => {
+              const profile = settings.apiProfiles.find((candidate) => candidate.id === activeApiProfileId)
+              if (!profile) return
+              void desktopGateway.saveApiProfile({ id: profile.id, name: profile.name, baseUrl: profile.baseUrl, model })
+                .then(() => desktopGateway.updateSettings({ activeApiProfileId, preferApiModel: true }))
+                .then(setSettings)
+                .catch((error) => setNotice(error instanceof Error ? error.message : '切换模型失败'))
+            }}
             onSlashCommand={(cmd) => { if (cmd === 'compact') void runCompact() }}
             onReasoningChange={(reasoningMode) => void updateSettings({ ...settings, reasoningMode })}
           />

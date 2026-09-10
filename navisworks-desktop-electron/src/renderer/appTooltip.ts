@@ -31,11 +31,13 @@ function ensureNode(): HTMLDivElement {
 
 function tipTarget(element: EventTarget | null): HTMLElement | null {
   if (!(element instanceof Element)) return null
-  const host = element.closest<HTMLElement>('[data-tip]')
+  const host = element.closest<HTMLElement>('[data-tip], button[aria-label], svg[aria-label]')
   if (host === null) return null
+  // Text already labels a control. Only standalone icons need hover help.
+  if (host.textContent?.trim() || !(host.matches('svg') || host.querySelector('svg'))) return null
   // Treat an empty/whitespace label as "no tooltip" so a bound-but-blank
   // data-tip (e.g. a not-yet-loaded name) shows nothing instead of a dot.
-  const text = host.getAttribute('data-tip')?.trim()
+  const text = (host.getAttribute('data-tip') ?? host.getAttribute('aria-label'))?.trim()
   return text ? host : null
 }
 
@@ -46,7 +48,7 @@ function hide(): void {
 
 function showFor(target: HTMLElement): void {
   const tip = ensureNode()
-  const text = target.getAttribute('data-tip')?.trim() ?? ''
+  const text = (target.getAttribute('data-tip') ?? target.getAttribute('aria-label'))?.trim() ?? ''
   if (!text) {
     hide()
     return
@@ -77,7 +79,8 @@ function showFor(target: HTMLElement): void {
 const onPointerOver = (event: PointerEvent): void => {
   if (event.pointerType === 'touch') return
   const target = tipTarget(event.target)
-  if (target === null || target === current) return
+  if (target === null) { hide(); return }
+  if (target === current) return
   showFor(target)
 }
 
@@ -111,6 +114,7 @@ export function installAppTooltip(): () => void {
   document.addEventListener('pointerout', onPointerOut)
   document.addEventListener('focusin', onFocusIn)
   document.addEventListener('focusout', onFocusOut)
+  document.addEventListener('pointerdown', dismiss)
   window.addEventListener('scroll', dismiss, true)
   window.addEventListener('resize', dismiss)
   return () => {
@@ -119,6 +123,7 @@ export function installAppTooltip(): () => void {
     document.removeEventListener('pointerout', onPointerOut)
     document.removeEventListener('focusin', onFocusIn)
     document.removeEventListener('focusout', onFocusOut)
+    document.removeEventListener('pointerdown', dismiss)
     window.removeEventListener('scroll', dismiss, true)
     window.removeEventListener('resize', dismiss)
     node?.remove()

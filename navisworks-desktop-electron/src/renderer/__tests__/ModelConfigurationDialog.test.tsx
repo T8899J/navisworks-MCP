@@ -16,6 +16,7 @@ function render(props: {
       existing={props.existing}
       onCancel={() => undefined}
       onSubmit={() => undefined}
+      onFetchModels={async () => ['qwen3.8-max']}
     />,
   )
 }
@@ -40,6 +41,8 @@ describe('ModelConfigurationDialog (§26/§43)', () => {
   it('API model id is editable; Ollama model id is read-only with a hint (§27)', () => {
     expect(render({ modelIdEditable: true })).not.toMatch(/id="mc-model-id"[^>]*disabled/)
     const ollama = render({ modelIdEditable: false })
+    expect(render({ modelIdEditable: true })).toContain('获取模型')
+    expect(ollama).not.toContain('获取模型')
     expect(ollama).toMatch(/id="mc-model-id"[^>]*disabled/)
     expect(ollama).toContain('只读')
   })

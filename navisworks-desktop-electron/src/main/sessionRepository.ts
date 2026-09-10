@@ -1,3 +1,4 @@
+import { contextUsageSchema, type ContextUsage } from '../shared/ipc'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -43,6 +44,7 @@ export interface ConversationSession {
   updatedAt: string
   messages: ConversationMessage[] | null
   contextTokensUsed: number
+  contextUsage?: ContextUsage
   pinnedAt: string | null
   /** P4: durable digest of compacted early turns; absent ⇒ nothing compacted yet. */
   compactSummary?: string
@@ -61,6 +63,8 @@ export interface ApiProfileSettings {
   name: string
   baseUrl: string
   model: string
+  models?: string[]
+  enabled?: boolean
   apiKeyCiphertext: string
   /** Read only during one-time migration; never written back to disk. */
   legacyApiKey: string
@@ -133,6 +137,7 @@ export interface WpfChatSessionSnapshot {
   UpdatedAt: string
   Messages: WpfChatMessageSnapshot[] | null
   ContextTokensUsed: number
+  ContextUsage?: ContextUsage
   PinnedAt: string | null
   CompactSummary?: string
   SemanticMemory?: SemanticMemory
@@ -152,6 +157,8 @@ export interface WpfApiProfileSnapshot {
   Name: string
   BaseUrl: string
   Model: string
+  Models?: string[]
+  Enabled?: boolean
   ApiKeyCiphertext: string
   /** Electron-only extension: compatibility & capability overrides. */
   Advanced?: Record<string, unknown> | null
@@ -447,6 +454,7 @@ export function fromWpfSessionSnapshot(snapshot: WpfChatSessionSnapshot): Conver
       tools: (message.Tools ?? []).map(fromWpfToolCallSnapshot),
     })) ?? null,
     contextTokensUsed: snapshot.ContextTokensUsed,
+    ...(snapshot.ContextUsage ? { contextUsage: snapshot.ContextUsage } : {}),
     pinnedAt: snapshot.PinnedAt,
     ...(snapshot.CompactSummary === undefined ? {} : { compactSummary: snapshot.CompactSummary }),
     ...(snapshot.SemanticMemory === undefined ? {} : { semanticMemory: snapshot.SemanticMemory }),
@@ -467,6 +475,7 @@ export function toWpfSessionSnapshot(session: ConversationSession): WpfChatSessi
       Tools: message.tools.map(toWpfToolCallSnapshot),
     })) ?? null,
     ContextTokensUsed: session.contextTokensUsed,
+    ...(session.contextUsage ? { ContextUsage: session.contextUsage } : {}),
     PinnedAt: session.pinnedAt,
     ...(session.compactSummary === undefined ? {} : { CompactSummary: session.compactSummary }),
     ...(session.semanticMemory === undefined ? {} : { SemanticMemory: session.semanticMemory }),
@@ -615,6 +624,8 @@ function fromWpfApiProfileSnapshot(snapshot: WpfApiProfileSnapshot): ApiProfileS
     name: snapshot.Name,
     baseUrl: snapshot.BaseUrl,
     model: snapshot.Model,
+    models: snapshot.Models,
+    enabled: snapshot.Enabled,
     apiKeyCiphertext: snapshot.ApiKeyCiphertext,
     legacyApiKey: '',
     advanced: parseProfileAdvanced(snapshot.Advanced),
@@ -627,6 +638,8 @@ function toWpfApiProfileSnapshot(profile: ApiProfileSettings): WpfApiProfileSnap
     Name: profile.name,
     BaseUrl: profile.baseUrl,
     Model: profile.model,
+    Models: profile.models,
+    Enabled: profile.enabled,
     ApiKeyCiphertext: profile.apiKeyCiphertext,
     Advanced: { ...profile.advanced },
   }
@@ -690,6 +703,7 @@ function parseWpfSessionSnapshot(value: unknown): WpfChatSessionSnapshot {
     UpdatedAt: updatedAt,
     Messages: messages,
     ContextTokensUsed: optionalFiniteInteger(entry.ContextTokensUsed, 0),
+    ...(contextUsageSchema.safeParse(entry.ContextUsage).success ? { ContextUsage: contextUsageSchema.parse(entry.ContextUsage) } : {}),
     PinnedAt: pinnedAt,
     ...(typeof entry.CompactSummary === 'string' ? { CompactSummary: entry.CompactSummary } : {}),
     ...(semanticMemory === undefined ? {} : { SemanticMemory: semanticMemory }),
@@ -773,6 +787,8 @@ function parseWpfApiProfileSnapshot(value: unknown): WpfApiProfileSnapshot {
     BaseUrl: optionalString(entry.BaseUrl, ''),
     Model: optionalString(entry.Model, ''),
     ApiKeyCiphertext: optionalString(entry.ApiKeyCiphertext, ''),
+    Models: Array.isArray(entry.Models) ? entry.Models.filter((value): value is string => typeof value === 'string' && value.trim() !== '') : undefined,
+    Enabled: typeof entry.Enabled === 'boolean' ? entry.Enabled : undefined,
     Advanced: objectOrNull(entry.Advanced),
   }
 }

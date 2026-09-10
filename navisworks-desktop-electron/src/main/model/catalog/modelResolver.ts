@@ -45,6 +45,7 @@ export function resolveActiveModelRef(
   const apiChosen = settings.apiEnabled
     && (settings.preferApiModel || !settings.ollamaEnabled)
     && activeProfile !== undefined
+    && activeProfile.enabled !== false
     && endpoint !== null
   if (apiChosen && activeProfile) {
     return { providerId: apiProfileProviderId(activeProfile.id), modelId: endpoint.model.trim() }

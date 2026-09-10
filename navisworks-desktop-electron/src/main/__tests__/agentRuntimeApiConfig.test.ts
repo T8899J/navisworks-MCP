@@ -226,6 +226,9 @@ describe('API-first runtime configuration (run scope, no restart)', () => {
       advanced: autoAdvanced(),
     })
     expect(title).toBe('会话标题')
+    expect(harness.bodies[0]?.model).toBe('qwen-max')
+    expect(harness.bodies[0]?.max_tokens).toBe(4096)
+    expect(harness.bodies[0]?.reasoning_effort).toBe('low')
     expect(harness.urls.every((url) => url.startsWith(API_BASE))).toBe(true)
   })
 
@@ -242,10 +245,11 @@ describe('API-first runtime configuration (run scope, no restart)', () => {
       })
     }) as unknown as typeof fetch
     const runtime = new AgentRuntime({ bridgeClient: bridge, fetchImpl })
-    const title = await runtime.summarizeTitle('帮我检查')
+    const title = await runtime.summarizeTitle('帮我检查', undefined, undefined, 'selected-local-model')
     expect(title).toBe('本地标题')
     expect(urls[0]?.startsWith('http://localhost:11434')).toBe(true)
     expect(index).toBe(1)
+    expect(JSON.parse(String((fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]?.body)).model).toBe('selected-local-model')
   })
 })
 

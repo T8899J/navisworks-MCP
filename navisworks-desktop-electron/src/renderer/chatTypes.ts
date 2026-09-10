@@ -1,3 +1,4 @@
+import { contextUsageSchema, type ContextUsage } from '../shared/ipc'
 import {
   DEFAULT_API_PROFILE_ADVANCED,
   DEFAULT_EXECUTION_SETTINGS,
@@ -69,6 +70,7 @@ export interface SessionSummary {
 }
 
 export interface ChatSession extends SessionSummary {
+  contextUsage?: ContextUsage
   messages: ChatMessage[]
   contextTokensUsed?: number
   /** P4: durable digest of compacted early turns; undefined ⇒ nothing compacted yet. */
@@ -284,6 +286,7 @@ export function normalizeSession(value: unknown): ChatSession {
   return {
     ...summary,
     messages: rawMessages.map(normalizeMessage),
+    ...(contextUsageSchema.safeParse(source.contextUsage).success ? { contextUsage: contextUsageSchema.parse(source.contextUsage) } : {}),
     contextTokensUsed: Number(source.contextTokensUsed ?? source.ContextTokensUsed ?? 0),
     ...(compactSummary === undefined ? {} : { compactSummary })
   }
@@ -318,6 +321,8 @@ export function normalizeSettings(value: unknown): DesktopSettings {
       name: String(profile.name ?? 'API'),
       baseUrl: String(profile.baseUrl ?? ''),
       model: String(profile.model ?? ''),
+      models: Array.isArray(profile.models) ? profile.models.filter((value): value is string => typeof value === 'string' && value.trim() !== '') : undefined,
+      enabled: profile.enabled !== false,
       hasApiKey: Boolean(profile.hasApiKey),
       advanced: normalizeProfileAdvanced(rawAdvanced)
     }

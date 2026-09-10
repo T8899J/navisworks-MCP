@@ -1,3 +1,4 @@
+import { MessageMarkdown } from './MessageMarkdown'
 import {
   Check,
   ChevronDown,
@@ -35,24 +36,6 @@ import {
   type NavDragState,
   type NavScrubStop,
 } from './messageNavScrub'
-
-// The local models answer in markdown, but the chat renders plain text.
-// Inline-only formatting — **bold** -> <strong>, `code` -> <code> — so the
-// asterisks never leak into the UI; headings and lists fall through as
-// ordinary characters.
-function renderInlineMarkdown(text: string): ReactNode {
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`\n]+`)/g)
-  if (parts.length === 1) return text
-  return parts.map((part, index) => {
-    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
-      return <strong key={index}>{part.slice(2, -2)}</strong>
-    }
-    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
-      return <code key={index}>{part.slice(1, -1)}</code>
-    }
-    return part
-  })
-}
 
 interface MessageListProps {
   messages: ChatMessage[]
@@ -277,7 +260,7 @@ function MessageRow({ message, retry }: { message: ChatMessage; retry?: () => vo
             <div className="message-stream-divider" role="presentation" />
           ) : null}
 
-          {message.content ? <div className="message-content">{renderInlineMarkdown(message.content)}</div> : null}
+          {message.content ? <div className="message-content"><MessageMarkdown text={message.content} /></div> : null}
           {message.transient && !message.content && !message.thinking && message.tools.length === 0 ? (
             <div className="message-waiting" role="status">
               <span />
@@ -697,17 +680,24 @@ export function MessageList({ messages, sessionId, sessionTitle, composerClearan
       // Follow intent was decided BEFORE this growth: a layout increase must
       // never be able to silently un-follow (the controller treats in-flight
       // anchor echoes as ours, not as user scrolls).
-      if (!follow.following || frame !== 0) return
+      if (frame !== 0) return
       frame = requestAnimationFrame(() => {
         frame = 0
         const current = scrollerRef.current
-        if (!current || !follow.following) return
+        if (!current) return
+        if (!follow.following) {
+          follow.onLayout(current)
+          setShowBottomButton(distanceFromBottom(current) > ACTUAL_BOTTOM_EPSILON_PX)
+          return
+        }
         const top = Math.max(0, current.scrollHeight - current.clientHeight)
         current.scrollTo({ top, behavior: 'instant' })
         follow.recordInstantAnchor(current.scrollTop)
+        setShowBottomButton(false)
         verifyBottomInvariant()
       })
     })
+    observer.observe(scroller)
     observer.observe(column)
     const contentEnd = scroller.querySelector<HTMLElement>('.message-content-end')
     if (contentEnd) observer.observe(contentEnd)
@@ -774,8 +764,8 @@ export function MessageList({ messages, sessionId, sessionTitle, composerClearan
         onScroll={(event) => {
           // The follow controller decides whether this event is a programmatic
           // echo (ignored) or real movement (follow = am I at the bottom?).
-          const following = follow.onScroll(event.currentTarget)
-          setShowBottomButton(!following && messages.length > 0)
+          follow.onScroll(event.currentTarget)
+          setShowBottomButton(distanceFromBottom(event.currentTarget) > ACTUAL_BOTTOM_EPSILON_PX && messages.length > 0)
         }}
         onWheel={() => follow.userInterrupted()}
         onTouchStart={() => follow.userInterrupted()}
